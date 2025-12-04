@@ -1,0 +1,12 @@
+# Ignore all model artifacts
+*.pkl
+*.h5
+*.pt
+*.pth
+*.onnx
+*.pb
+*.joblib
+
+# Allow README
+!README.md
+!.gitignore

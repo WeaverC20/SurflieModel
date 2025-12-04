@@ -1,25 +1,79 @@
-# Ignore Python cache
+# Dependencies
+node_modules/
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
-
-# Ignore virtual environments
-venv/
-.env/
-.env
-
-# Ignore data files
-*.csv
-
-# Ignore Jupyter Notebook checkpoints
-.ipynb_checkpoints/
-
-# Ignore compiled extensions
+*.pyd
+*.py[cod]
+.Python
 *.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+env/
+ENV/
+.env/
 
-# Ignore logs
-*.log
-
-# Ignore OS-specific files
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+.next/
+out/
+.expo/
+.expo-shared/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ML artifacts
+ml/artifacts/*.pkl
+ml/artifacts/*.h5
+ml/artifacts/*.pt
+ml/artifacts/*.pth
+ml/artifacts/*.onnx
+ml/artifacts/*.pb
+ml/experiments/
+
+# Data files
+*.csv
+*.parquet
+*.h5
+*.hdf5
+data/raw/
+data/processed/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# OS
 Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.bak
+tmp/
+temp/

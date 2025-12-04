@@ -1,0 +1,4 @@
+celery>=5.3.4
+redis>=5.0.1
+httpx>=0.26.0
+schedule>=1.2.0
