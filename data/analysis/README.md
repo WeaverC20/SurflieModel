@@ -2,30 +2,46 @@
 
 **This directory is for your personal analysis only. Never deployed to production.**
 
-## What Goes Here
+## Surfline Forecast Accuracy Analysis
 
-- Performance comparisons (your model vs Surfline)
-- Private experiments
-- Personal insights and research
-- Anything using Surfline data
+Simple script to analyze how Surfline's forecast accuracy degrades over time.
 
-## Important
+### Quick Start
 
-This code is **never imported by production code**:
-- ❌ Not imported by `backend/api`
-- ❌ Not imported by `ml/inference`
-- ❌ Not deployed anywhere
+```bash
+# Install dependencies
+pip install pandas numpy matplotlib
 
-This is your private workspace for understanding how your models perform compared to industry standards.
-
-## Example Notebooks
-
+# Edit the script to set your data path (line 25)
+# Then run:
+python analyze_forecast_accuracy.py
 ```
-data/analysis/
-├── compare_surfline_vs_mine.ipynb
-├── accuracy_over_time.ipynb
-├── spot_specific_performance.ipynb
-└── surfline_api_exploration.ipynb
+
+### What It Does
+
+1. Loads your Surfline forecast CSV files
+2. Uses the most recent forecast as "ground truth"
+3. Calculates MSE (Mean Squared Error) for forecasts at different lead times
+4. Shows graphs of MSE vs lead time for surf, wind, rating, swells
+5. Saves the graphs as PNG files in this directory
+
+### Output
+
+- Shows interactive plots (close windows to exit)
+- Saves to `figures/` directory: `surf_mse_vs_lead_time.png`, `wind_mse_vs_lead_time.png`, etc.
+
+### Adjusting Variables
+
+Edit the script to change which columns are analyzed:
+
+```python
+# Around line 180
+surf_results = analyze_forecast_type(
+    data_dir,
+    'surf',
+    ['surf_min', 'surf_max'],  # <- Change these
+    lead_time_bins
+)
 ```
 
 ## Ethics Note
