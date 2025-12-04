@@ -31,7 +31,12 @@ async def health_check():
     return {"status": "healthy"}
 
 
-# TODO: Add routers
+# Include routers
+from app.routers import dev
+
+app.include_router(dev.router, prefix="/api/v1/dev", tags=["dev"])
+
+# TODO: Add production routers
 # from app.routers import forecast, spots, users
 # app.include_router(forecast.router, prefix="/api/v1/forecast", tags=["forecast"])
 # app.include_router(spots.router, prefix="/api/v1/spots", tags=["spots"])

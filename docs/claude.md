@@ -75,6 +75,54 @@ Backend Worker (scheduler) → Fetches data → Runs ML predictions → Cache (R
 Backend API → Reads cache/DB → Returns forecasts → Frontend (web/mobile)
 ```
 
+### 3a. Data Sources Strategy
+
+#### Current Implementation (Phase 1)
+
+**Tide Data**:
+- **Source**: NOAA CO-OPS Harmonic Constituents
+- **Coverage**: US only
+- **License**: Free and open, no license required
+- **Accuracy**: Highly accurate for US coastal waters
+- **Future**: Consider TPXO / FES for global coverage (requires license, TPXO may be free after request)
+
+**Swell Height and Direction**:
+- **Source**: NOAA Wave Watch 3
+- **Coverage**: US-focused but global data available
+- **License**: Free and open
+- **Forecast Range**: Up to 16 days
+- **Future**: Consider GEFS-WAVE for ensemble uncertainty forecasts (16-day with probabilistic outputs)
+
+**Wind Data**:
+- **Source**: NOAA GFS (Global Forecast System)
+- **Coverage**: Global
+- **License**: Free and open
+- **Forecast Range**: Up to 16 days
+- **Resolution**: 0.25 degree (~25km)
+- **Future**: Transition to GEFS for ensemble uncertainty
+
+#### Future Enhancements (Phase 2+)
+
+**Regional High-Resolution Wind Models**:
+- NAM (U.S.) - 3km resolution
+- HRRR (U.S.) - 3km hourly updates
+- AROME (Europe) - 1.3km resolution
+- HARMONIE-AROME (Nordic) - 2.5km resolution
+- ACCESS (Australia) - Regional coverage
+
+**Premium Data** (Optional, Paid):
+- ECMWF - Superior global forecasts but requires paid subscription
+- Only consider if forecasts demonstrate clear accuracy improvements
+
+#### Data Validation Sources
+
+**For Model Training and Accuracy Assessment** (Private use only):
+- CDIP buoy data - High-quality directional wave data
+- NDBC buoy data - Extensive network of observation buoys
+- Surfline forecasts - For private comparison only (see `data/analysis/`)
+
+**Important**: Buoy data and Surfline comparisons are for research and validation only. Never expose Surfline data through the public API.
+
 ### 4. Shared Code Strategy
 
 **TypeScript**:
