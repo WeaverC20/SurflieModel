@@ -126,13 +126,14 @@ This module fetches wave forecast data from NOAA (National Oceanic and Atmospher
 
 ### Data Format Notes
 
-**GRIB2 Files**:
+**GRIB2 Files** ✅:
 - Wave Watch 3 and GFS data come as GRIB2 binary files
-- Current implementation fetches raw GRIB2 data
-- For production, parse with:
-  - `pygrib` (requires GRIB library installation)
-  - `cfgrib` (pure Python, uses eccodes)
-  - `xarray` + `cfgrib` (recommended for ease of use)
+- **GRIB2 parsing is now implemented** using cfgrib + xarray
+- Automatically extracts wave height, period, direction, wind speed, etc.
+- **NaN Handling**: Coastal/land points may return NaN in wave data
+  - Automatically finds nearest valid ocean grid point
+  - Falls back gracefully when selected point is over land
+  - Logs actual coordinates used for transparency
 
 **Tide Data**:
 - Returns JSON directly
@@ -181,10 +182,11 @@ tides = await tide_fetcher.fetch_tide_predictions(
 - [x] GFS wind GRIB2 fetcher (metadata only)
 - [x] Unified interface with error handling
 
-### Phase 2: GRIB Parsing
-- [ ] Implement GRIB2 parsing with cfgrib/xarray
-- [ ] Extract actual wave/wind values from binary data
-- [ ] Add spatial interpolation for point locations
+### Phase 2: GRIB Parsing ✅
+- [x] Implement GRIB2 parsing with cfgrib/xarray
+- [x] Extract actual wave/wind values from binary data
+- [x] Add NaN handling for coastal/land grid points
+- [x] Automatic fallback to nearest valid grid point
 - [ ] Cache parsed data to reduce API calls
 
 ### Phase 3: Enhanced Features
@@ -222,16 +224,42 @@ tides = await tide_fetcher.fetch_tide_predictions(
 - Fetchers automatically convert as needed
 - Always use decimal degrees for coordinates
 
-### GRIB2 Parsing Dependencies
-To parse GRIB2 files in production, add to requirements:
+### NaN Handling in Wave Data
+Wave Watch 3 model masks certain areas where wave forecasts are not meaningful:
+- Land grid points
+- Very shallow water
+- Coastal zones
+- Harbors/bays
+
+**Solution Implemented**:
+1. First attempts nearest-neighbor selection to requested coordinates
+2. If selected point contains NaN values, searches for nearest valid (non-NaN) grid point
+3. Uses simple Euclidean distance in lat/lon space for small regions
+4. Returns data from nearest valid ocean point
+5. Includes `actual_latitude` and `actual_longitude` in result to show which point was used
+
+**Example**:
 ```
-cfgrib>=0.9.10
-xarray>=2023.1.0
+Requested: Huntington Beach (33.6595, -118.0007)
+Selected grid point: (33.75, 242.00) - NaN (over land)
+Fallback to: (34.00, 241.75) - Valid ocean data
+Result includes: actual_latitude=34.00, actual_longitude=241.75
 ```
 
-Or for pygrib (faster but requires system libraries):
+**Note**: Wind data (GFS) covers both land and ocean, so NaN is less common
+
+### GRIB2 Parsing Dependencies ✅
+GRIB2 parsing is now implemented and active. Dependencies installed:
 ```
-pygrib>=2.1.4
+eccodes>=1.7.0        # Pre-built binaries, no system dependencies needed
+cfgrib>=0.9.10        # GRIB parsing library
+xarray>=2023.1.0      # N-dimensional array manipulation
+numpy>=1.26.0         # Numerical computing
+```
+
+Alternative (not used):
+```
+pygrib>=2.1.4         # Faster but requires system GRIB libraries
 ```
 
 ### Best Practices

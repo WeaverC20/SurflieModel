@@ -91,6 +91,8 @@ Backend API → Reads cache/DB → Returns forecasts → Frontend (web/mobile)
 - **Coverage**: US-focused but global data available
 - **License**: Free and open
 - **Forecast Range**: Up to 16 days
+- **Status**: ✅ GRIB2 parsing implemented with cfgrib/xarray
+- **NaN Handling**: Automatically falls back to nearest valid ocean point for coastal locations
 - **Future**: Consider GEFS-WAVE for ensemble uncertainty forecasts (16-day with probabilistic outputs)
 
 **Wind Data**:
@@ -99,6 +101,8 @@ Backend API → Reads cache/DB → Returns forecasts → Frontend (web/mobile)
 - **License**: Free and open
 - **Forecast Range**: Up to 16 days
 - **Resolution**: 0.25 degree (~25km)
+- **Status**: ✅ GRIB2 parsing implemented with cfgrib/xarray
+- **Parsed Values**: Wind speed (m/s and knots), direction, gusts
 - **Future**: Transition to GEFS for ensemble uncertainty
 
 #### Future Enhancements (Phase 2+)
@@ -450,6 +454,13 @@ Keep this updated as you make major decisions:
 - Chose Railway for backend hosting (pending final decision)
 - Decided to keep Surfline analysis private in `data/analysis/`
 - ML models stored in S3, loaded at runtime
+
+**2024-12-04**: GRIB2 parsing implementation completed
+- Implemented GRIB2 parsing using cfgrib + xarray + eccodes
+- Added automatic NaN handling for coastal/land grid points in Wave Watch 3 data
+- Wave fetcher now falls back to nearest valid ocean point when requested location is over land
+- Wind and wave data now return parsed values (height, period, direction, speed, etc.)
+- All GRIB parsing dependencies use pre-built binaries (no system library requirements)
 
 (Add future decisions here as they're made)
 
