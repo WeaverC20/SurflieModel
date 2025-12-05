@@ -14,6 +14,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from data.pipelines.noaa import NOAAFetcher
+from data.pipelines.buoy import NDBCBuoyFetcher
 
 app = FastAPI(
     title="Wave Forecast API",
@@ -50,8 +51,35 @@ async def root():
             forecast_hours=48
         )
 
+        # Fetch nearby buoy data
+        buoy_fetcher = NDBCBuoyFetcher()
+        nearby_buoys = buoy_fetcher.get_nearby_buoys(
+            latitude=DEFAULT_LOCATION["lat"],
+            longitude=DEFAULT_LOCATION["lon"],
+            max_distance_km=100
+        )
+
+        # Fetch data from nearest buoys (up to 3)
+        buoy_observations = []
+        for buoy_info in nearby_buoys[:3]:
+            try:
+                obs = await buoy_fetcher.fetch_latest_observation(buoy_info["station_id"])
+                buoy_observations.append({
+                    "info": buoy_info,
+                    "data": obs,
+                    "status": "success"
+                })
+            except Exception as e:
+                logger.warning(f"Could not fetch buoy {buoy_info['station_id']}: {e}")
+                buoy_observations.append({
+                    "info": buoy_info,
+                    "data": None,
+                    "status": "error",
+                    "error": str(e)
+                })
+
         # Generate HTML
-        html_content = generate_forecast_html(forecast, DEFAULT_LOCATION)
+        html_content = generate_forecast_html(forecast, DEFAULT_LOCATION, buoy_observations)
         return html_content
 
     except Exception as e:
@@ -67,8 +95,11 @@ async def root():
         """
 
 
-def generate_forecast_html(forecast: dict, location: dict) -> str:
-    """Generate HTML display for forecast data"""
+def generate_forecast_html(forecast: dict, location: dict, buoy_observations: list = None) -> str:
+    """Generate HTML display for forecast data and buoy observations"""
+
+    if buoy_observations is None:
+        buoy_observations = []
 
     # Extract tide data
     tide_html = ""
@@ -381,6 +412,178 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
             </div>
             """
 
+    # Build buoy observations HTML
+    buoy_html = ""
+    if buoy_observations:
+        buoy_html += """
+        <div style="background: #e0f2f1; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+            <h3 style="margin-top: 0; color: #00695c;">Real-time Buoy Observations</h3>
+        """
+
+        for buoy in buoy_observations:
+            info = buoy.get("info", {})
+            data = buoy.get("data", {})
+            status = buoy.get("status")
+
+            if status == "success" and data:
+                # Parse timestamp for data age
+                timestamp_str = data.get("timestamp", "")
+                data_age_str = ""
+                try:
+                    if timestamp_str:
+                        from datetime import datetime
+                        buoy_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                        now = datetime.now(buoy_time.tzinfo)
+                        age_minutes = int((now - buoy_time).total_seconds() / 60)
+                        if age_minutes < 60:
+                            data_age_str = f"{age_minutes} minutes ago"
+                        else:
+                            age_hours = age_minutes // 60
+                            data_age_str = f"{age_hours} hour{'s' if age_hours > 1 else ''} ago"
+                except:
+                    pass
+
+                buoy_html += f"""
+                <div style="background: white; padding: 15px; border-radius: 5px; margin-bottom: 10px; border-left: 4px solid #00897b;">
+                    <h4 style="margin: 0 0 10px 0; color: #00695c;">
+                        {info.get('name', 'Unknown')} (Station {info.get('station_id', 'N/A')})
+                    </h4>
+                    <p style="margin: 5px 0; font-size: 0.9em; color: #666;">
+                        Distance: {info.get('distance_km', 'N/A')} km |
+                        Last Updated: {timestamp_str[:19] if timestamp_str else 'N/A'} UTC
+                        {f' ({data_age_str})' if data_age_str else ''}
+                    </p>
+                    <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                """
+
+                # Wave data
+                if data.get("wave_height_m") is not None or data.get("dominant_wave_period_s") is not None:
+                    buoy_html += """
+                        <tr style="background: #b2dfdb;">
+                            <th colspan="2" style="padding: 8px; text-align: left; border: 1px solid #80cbc4;">Wave Conditions</th>
+                        </tr>
+                    """
+                    if data.get("wave_height_m") is not None:
+                        buoy_html += f"""
+                        <tr style="background: #e0f2f1;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Significant Wave Height</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-size: 1.2em; color: #00695c;">
+                                {data.get('wave_height_m')} m ({data.get('wave_height_ft', 'N/A')} ft)
+                            </td>
+                        </tr>
+                        """
+                    if data.get("dominant_wave_period_s") is not None:
+                        buoy_html += f"""
+                        <tr style="background: white;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Dominant Period</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">{data.get('dominant_wave_period_s')} s</td>
+                        </tr>
+                        """
+                    if data.get("average_wave_period_s") is not None:
+                        buoy_html += f"""
+                        <tr style="background: #e0f2f1;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Average Period</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">{data.get('average_wave_period_s')} s</td>
+                        </tr>
+                        """
+                    if data.get("mean_wave_direction_deg") is not None:
+                        buoy_html += f"""
+                        <tr style="background: white;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Mean Direction</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">{data.get('mean_wave_direction_deg')}°</td>
+                        </tr>
+                        """
+
+                # Wind data
+                if data.get("wind_speed_ms") is not None or data.get("wind_direction_deg") is not None:
+                    buoy_html += """
+                        <tr style="background: #b2dfdb;">
+                            <th colspan="2" style="padding: 8px; text-align: left; border: 1px solid #80cbc4;">Wind Conditions</th>
+                        </tr>
+                    """
+                    if data.get("wind_speed_ms") is not None:
+                        buoy_html += f"""
+                        <tr style="background: #e0f2f1;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Wind Speed</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">
+                                {data.get('wind_speed_kts', 'N/A')} kts ({data.get('wind_speed_ms')} m/s)
+                            </td>
+                        </tr>
+                        """
+                    if data.get("wind_direction_deg") is not None:
+                        buoy_html += f"""
+                        <tr style="background: white;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Wind Direction</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">{data.get('wind_direction_deg')}°</td>
+                        </tr>
+                        """
+                    if data.get("wind_gust_ms") is not None:
+                        buoy_html += f"""
+                        <tr style="background: #e0f2f1;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Wind Gust</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">
+                                {data.get('wind_gust_kts', 'N/A')} kts ({data.get('wind_gust_ms')} m/s)
+                            </td>
+                        </tr>
+                        """
+
+                # Temperature and pressure data
+                if data.get("water_temp_c") is not None or data.get("air_temp_c") is not None or data.get("air_pressure_hpa") is not None:
+                    buoy_html += """
+                        <tr style="background: #b2dfdb;">
+                            <th colspan="2" style="padding: 8px; text-align: left; border: 1px solid #80cbc4;">Temperature & Pressure</th>
+                        </tr>
+                    """
+                    if data.get("water_temp_c") is not None:
+                        water_temp_f = round(data.get("water_temp_c") * 9/5 + 32, 1)
+                        buoy_html += f"""
+                        <tr style="background: #e0f2f1;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Water Temperature</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">
+                                {data.get('water_temp_c')}°C ({water_temp_f}°F)
+                            </td>
+                        </tr>
+                        """
+                    if data.get("air_temp_c") is not None:
+                        air_temp_f = round(data.get("air_temp_c") * 9/5 + 32, 1)
+                        buoy_html += f"""
+                        <tr style="background: white;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Air Temperature</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">
+                                {data.get('air_temp_c')}°C ({air_temp_f}°F)
+                            </td>
+                        </tr>
+                        """
+                    if data.get("air_pressure_hpa") is not None:
+                        buoy_html += f"""
+                        <tr style="background: #e0f2f1;">
+                            <td style="padding: 8px; border: 1px solid #80cbc4; font-weight: bold;">Pressure</td>
+                            <td style="padding: 8px; border: 1px solid #80cbc4;">{data.get('air_pressure_hpa')} hPa</td>
+                        </tr>
+                        """
+
+                buoy_html += """
+                    </table>
+                </div>
+                """
+            else:
+                # Error case
+                buoy_html += f"""
+                <div style="background: #ffebee; padding: 15px; border-radius: 5px; margin-bottom: 10px; border-left: 4px solid #c62828;">
+                    <h4 style="margin: 0 0 10px 0; color: #c62828;">
+                        {info.get('name', 'Unknown')} (Station {info.get('station_id', 'N/A')})
+                    </h4>
+                    <p style="margin: 5px 0; color: #666;">
+                        Distance: {info.get('distance_km', 'N/A')} km
+                    </p>
+                    <p style="color: #c62828; margin: 10px 0 0 0;">
+                        Error fetching data: {buoy.get('error', 'Unknown error')}
+                    </p>
+                </div>
+                """
+
+        buoy_html += "</div>"
+
     # Build complete HTML
     return f"""
     <!DOCTYPE html>
@@ -445,6 +648,11 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
                 <h2>🌊 Tide Forecast (48 hours)</h2>
                 {tide_html}
             </div>
+
+            {f'''<div class="section">
+                <h2>🌊 Real-time Buoy Observations</h2>
+                {buoy_html}
+            </div>''' if buoy_html else ''}
 
             <div class="section">
                 <h2>🏄 Current Wave Conditions</h2>

@@ -24,6 +24,10 @@ from data.pipelines.noaa import (
     NOAAWaveWatch3Fetcher,
     NOAAWindFetcher,
 )
+from data.pipelines.buoy import (
+    NDBCBuoyFetcher,
+    CDIPBuoyFetcher,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -296,4 +300,205 @@ async def test_noaa_complete(
 
     except Exception as e:
         logger.error(f"Error testing complete forecast: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/test/buoy/ndbc/{station_id}", tags=["dev", "buoy"])
+async def test_ndbc_buoy(
+    station_id: str,
+    include_spectral: bool = Query(False, description="Include spectral wave data")
+):
+    """Test NDBC buoy data fetcher
+
+    Fetches real-time observation data from NDBC buoys.
+    Includes all available meteorological and oceanographic data.
+    """
+    logger.info(f"Testing NDBC buoy fetcher for station {station_id}")
+
+    try:
+        fetcher = NDBCBuoyFetcher()
+
+        # Fetch standard meteorological data
+        obs_data = await fetcher.fetch_latest_observation(station_id)
+
+        # Optionally fetch spectral wave data
+        spectral_data = None
+        if include_spectral:
+            try:
+                spectral_data = await fetcher.fetch_spectral_wave_data(station_id)
+            except Exception as e:
+                logger.warning(f"Could not fetch spectral data: {e}")
+                spectral_data = {"error": str(e)}
+
+        return {
+            "status": "success",
+            "station_id": station_id,
+            "observation": obs_data,
+            "spectral": spectral_data,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error testing NDBC buoy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/test/buoy/cdip/{station_id}", tags=["dev", "buoy"])
+async def test_cdip_buoy(station_id: str):
+    """Test CDIP buoy data fetcher
+
+    Note: CDIP data is in NetCDF format and requires additional libraries.
+    This endpoint returns metadata and access information.
+    """
+    logger.info(f"Testing CDIP buoy fetcher for station {station_id}")
+
+    try:
+        fetcher = CDIPBuoyFetcher()
+        data = await fetcher.fetch_latest_observation(station_id)
+
+        return {
+            "status": "success",
+            "station_id": station_id,
+            "data": data,
+            "timestamp": datetime.utcnow().isoformat(),
+            "note": "CDIP requires netCDF4 library for full data parsing"
+        }
+
+    except Exception as e:
+        logger.error(f"Error testing CDIP buoy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/test/buoy/nearby", tags=["dev", "buoy"])
+async def find_nearby_buoys(
+    lat: Optional[float] = Query(None, description="Latitude in decimal degrees"),
+    lon: Optional[float] = Query(None, description="Longitude in decimal degrees"),
+    location: Optional[str] = Query(None, description="Predefined location name"),
+    max_distance: float = Query(100, ge=1, le=500, description="Maximum distance in km"),
+    source: str = Query("ndbc", description="Buoy source: 'ndbc' or 'cdip' or 'both'")
+):
+    """Find nearby buoys for a location
+
+    Returns NDBC and/or CDIP buoys within the specified distance.
+    """
+    # Determine location
+    if location and location in TEST_LOCATIONS:
+        loc_data = TEST_LOCATIONS[location]
+        lat = loc_data["lat"]
+        lon = loc_data["lon"]
+        location_name = loc_data["name"]
+    elif lat is not None and lon is not None:
+        location_name = f"Custom ({lat}, {lon})"
+    else:
+        # Default to Huntington Beach
+        loc_data = TEST_LOCATIONS["huntington_beach"]
+        lat = loc_data["lat"]
+        lon = loc_data["lon"]
+        location_name = loc_data["name"]
+
+    logger.info(f"Finding nearby buoys for {location_name}")
+
+    try:
+        result = {
+            "status": "success",
+            "location": {
+                "name": location_name,
+                "lat": lat,
+                "lon": lon
+            },
+            "max_distance_km": max_distance,
+            "buoys": {}
+        }
+
+        # Find NDBC buoys
+        if source in ["ndbc", "both"]:
+            ndbc_fetcher = NDBCBuoyFetcher()
+            ndbc_buoys = ndbc_fetcher.get_nearby_buoys(lat, lon, max_distance)
+            result["buoys"]["ndbc"] = ndbc_buoys
+
+        # Find CDIP buoys
+        if source in ["cdip", "both"]:
+            cdip_fetcher = CDIPBuoyFetcher()
+            cdip_buoys = cdip_fetcher.get_nearby_buoys(lat, lon, max_distance)
+            result["buoys"]["cdip"] = cdip_buoys
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error finding nearby buoys: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/test/buoy/multi", tags=["dev", "buoy"])
+async def fetch_multiple_buoys(
+    lat: Optional[float] = Query(None, description="Latitude in decimal degrees"),
+    lon: Optional[float] = Query(None, description="Longitude in decimal degrees"),
+    location: Optional[str] = Query(None, description="Predefined location name"),
+    max_distance: float = Query(50, ge=1, le=500, description="Maximum distance in km"),
+    max_buoys: int = Query(3, ge=1, le=10, description="Maximum number of buoys to fetch")
+):
+    """Fetch data from multiple nearby NDBC buoys
+
+    Finds nearby buoys and fetches current observations from them.
+    Returns data sorted by distance from the location.
+    """
+    # Determine location
+    if location and location in TEST_LOCATIONS:
+        loc_data = TEST_LOCATIONS[location]
+        lat = loc_data["lat"]
+        lon = loc_data["lon"]
+        location_name = loc_data["name"]
+    elif lat is not None and lon is not None:
+        location_name = f"Custom ({lat}, {lon})"
+    else:
+        loc_data = TEST_LOCATIONS["huntington_beach"]
+        lat = loc_data["lat"]
+        lon = loc_data["lon"]
+        location_name = loc_data["name"]
+
+    logger.info(f"Fetching multiple buoys for {location_name}")
+
+    try:
+        fetcher = NDBCBuoyFetcher()
+
+        # Find nearby buoys
+        nearby = fetcher.get_nearby_buoys(lat, lon, max_distance)
+
+        # Limit to max_buoys
+        nearby = nearby[:max_buoys]
+
+        # Fetch data from each buoy
+        buoy_data = []
+        for buoy_info in nearby:
+            try:
+                obs = await fetcher.fetch_latest_observation(buoy_info["station_id"])
+                buoy_data.append({
+                    "buoy_info": buoy_info,
+                    "observation": obs,
+                    "status": "success"
+                })
+            except Exception as e:
+                logger.warning(f"Failed to fetch buoy {buoy_info['station_id']}: {e}")
+                buoy_data.append({
+                    "buoy_info": buoy_info,
+                    "observation": None,
+                    "status": "error",
+                    "error": str(e)
+                })
+
+        return {
+            "status": "success",
+            "location": {
+                "name": location_name,
+                "lat": lat,
+                "lon": lon
+            },
+            "buoys_found": len(nearby),
+            "buoys_fetched": len([b for b in buoy_data if b["status"] == "success"]),
+            "data": buoy_data,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching multiple buoys: {e}")
         raise HTTPException(status_code=500, detail=str(e))
