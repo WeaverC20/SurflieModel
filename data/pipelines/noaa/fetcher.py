@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Try to import GRIB parsing libraries
 try:
+    import numpy as np
     import xarray as xr
     import cfgrib
     GRIB_PARSING_AVAILABLE = True
@@ -202,8 +203,48 @@ def _parse_grib2_data(grib_bytes: bytes, latitude: float, longitude: float) -> O
             ds = xr.open_dataset(tmp_path, engine='cfgrib')
 
             # Extract values at nearest point
-            # Use sel with method='nearest' for robust point extraction
+            # First, try simple nearest neighbor selection
             point_data = ds.sel(latitude=latitude, longitude=longitude, method='nearest')
+
+            # Check if the selected point has NaN values
+            first_var = list(ds.data_vars.keys())[0]
+            selected_value = float(point_data[first_var].values)
+
+            # If the selected point is NaN, find the nearest valid (non-NaN) point
+            if np.isnan(selected_value):
+                logger.info(f"Selected point has NaN values, searching for nearest valid point...")
+
+                # Get the first variable's data array
+                data_array = ds[first_var]
+
+                # Create a mask of valid (non-NaN) points
+                valid_mask = ~np.isnan(data_array.values)
+
+                if valid_mask.any():
+                    # Find indices of valid points
+                    valid_indices = np.argwhere(valid_mask)
+
+                    # Get coordinates of all valid points
+                    valid_lats = ds.latitude.values[valid_indices[:, 0]]
+                    valid_lons = ds.longitude.values[valid_indices[:, 1]]
+
+                    # Calculate distances to all valid points (simple Euclidean in lat/lon space)
+                    # For more accuracy, use haversine, but for small regions this is fine
+                    distances = np.sqrt((valid_lats - latitude)**2 + (valid_lons - longitude)**2)
+
+                    # Find the nearest valid point
+                    nearest_idx = np.argmin(distances)
+                    nearest_lat = valid_lats[nearest_idx]
+                    nearest_lon = valid_lons[nearest_idx]
+
+                    # Select data at the nearest valid point
+                    point_data = ds.sel(latitude=nearest_lat, longitude=nearest_lon, method='nearest')
+
+                    logger.info(f"Found valid point at ({nearest_lat:.2f}, {nearest_lon:.2f}), "
+                               f"distance: {distances[nearest_idx]:.2f} degrees")
+                else:
+                    logger.warning("No valid (non-NaN) points found in the dataset")
+                    return None
 
             # Convert to dictionary, handling all variables
             result = {}
@@ -214,6 +255,10 @@ def _parse_grib2_data(grib_bytes: bytes, latitude: float, longitude: float) -> O
                 except (ValueError, TypeError):
                     # Skip variables that can't be converted to float
                     continue
+
+            # Log available variables for debugging
+            logger.info(f"GRIB2 variables found: {list(ds.data_vars.keys())}")
+            logger.info(f"Extracted values: {result}")
 
             # Also include coordinate information
             result['actual_latitude'] = float(point_data['latitude'].values)
