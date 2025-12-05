@@ -447,6 +447,44 @@ class NOAAWaveWatch3Fetcher:
 
         return await self.fetch_wave_data(latitude, longitude, forecast_hour, variables)
 
+    async def fetch_wave_timeseries(
+        self,
+        latitude: float,
+        longitude: float,
+        hours: int = 168  # 7 days default
+    ) -> Dict:
+        """Fetch wave forecast time series
+
+        Args:
+            latitude: Latitude in decimal degrees
+            longitude: Longitude in decimal degrees
+            hours: Number of forecast hours (max 384)
+
+        Returns:
+            Time series of wave forecasts with swell components
+        """
+        logger.info(f"Fetching wave time series for ({latitude}, {longitude}), {hours} hours")
+
+        # Wave Watch 3 has 3-hourly output
+        forecast_hours = list(range(0, min(hours, 384), 3))
+
+        results = []
+        for fhour in forecast_hours:
+            try:
+                data = await self.fetch_wave_spectrum(latitude, longitude, fhour)
+                if data.get("status") == "success":
+                    results.append(data)
+            except Exception as e:
+                logger.warning(f"Failed to fetch wave hour {fhour}: {e}")
+                continue
+
+        return {
+            "latitude": latitude,
+            "longitude": longitude,
+            "forecast_hours": forecast_hours,
+            "forecasts": results
+        }
+
 
 class NOAAWindFetcher:
     """Fetches wind data from NOAA GFS model
@@ -721,10 +759,10 @@ class NOAAFetcher:
             logger.error(f"Failed to fetch tide data: {e}")
             results["tide_error"] = str(e)
 
-        # Fetch wave data
+        # Fetch wave data (timeseries for forecast)
         try:
-            results["waves"] = await self.wave_fetcher.fetch_wave_spectrum(
-                latitude, longitude, forecast_hour=0
+            results["waves"] = await self.wave_fetcher.fetch_wave_timeseries(
+                latitude, longitude, hours=forecast_hours
             )
         except Exception as e:
             logger.error(f"Failed to fetch wave data: {e}")

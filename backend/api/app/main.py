@@ -99,48 +99,107 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
     wave_html = ""
     if "waves" in forecast:
         waves = forecast["waves"]
-        if waves.get("status") == "success":
-            # Show parsed wave values if available
-            if waves.get("parsed"):
+        if "forecasts" in waves and len(waves["forecasts"]) > 0:
+            # Get current conditions (first forecast)
+            current = waves["forecasts"][0]
+
+            if current.get("parsed") and current.get("values"):
+                values = current["values"]
+
+                # Current conditions - showing all components
                 wave_html += f"""
                 <div style="background: #e8f5e9; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
                     <h3 style="margin-top: 0; color: #2e7d32;">Current Conditions</h3>
                     <table style="width: 100%; border-collapse: collapse;">
+                        <tr style="background: #c8e6c9;">
+                            <th style="padding: 10px; border: 1px solid #a5d6a7; text-align: left;" colspan="2">Total Wave</th>
+                        </tr>
                         <tr style="background: #f1f8f4;">
-                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Wave Height</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Significant Height</td>
                             <td style="padding: 10px; border: 1px solid #a5d6a7; font-size: 1.3em; color: #1b5e20;">
-                                {waves.get('wave_height_m', 'N/A')} m ({waves.get('wave_height_m', 0) * 3.28084:.1f} ft)
+                                {values.get('swh', current.get('wave_height_m', 'N/A'))} m ({values.get('swh', current.get('wave_height_m', 0)) * 3.28084:.1f} ft)
                             </td>
                         </tr>
                         <tr style="background: #fff;">
-                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Wave Period</td>
-                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{waves.get('wave_period_s', 'N/A')} seconds</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Peak Period</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{values.get('perpw', current.get('wave_period_s', 'N/A'))} s</td>
                         </tr>
                         <tr style="background: #f1f8f4;">
-                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Wave Direction</td>
-                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{waves.get('wave_direction_deg', 'N/A')}°</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Direction</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{values.get('dirpw', current.get('wave_direction_deg', 'N/A'))}°</td>
                         </tr>
+                """
+
+                # Wind waves component
+                if 'wvhgt' in values or 'wvper' in values or 'wvdir' in values:
+                    wave_html += f"""
+                        <tr style="background: #c8e6c9;">
+                            <th style="padding: 10px; border: 1px solid #a5d6a7; text-align: left;" colspan="2">Wind Waves</th>
+                        </tr>
+                        <tr style="background: #fff;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Height</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">
+                                {values.get('wvhgt', 'N/A')} m ({values.get('wvhgt', 0) * 3.28084:.1f} ft)
+                            </td>
+                        </tr>
+                        <tr style="background: #f1f8f4;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Period</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{values.get('wvper', 'N/A')} s</td>
+                        </tr>
+                        <tr style="background: #fff;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Direction</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{values.get('wvdir', 'N/A')}°</td>
+                        </tr>
+                    """
+
+                # Swell component
+                if 'swell' in values or 'swper' in values or 'swdir' in values:
+                    wave_html += f"""
+                        <tr style="background: #c8e6c9;">
+                            <th style="padding: 10px; border: 1px solid #a5d6a7; text-align: left;" colspan="2">Swell</th>
+                        </tr>
+                        <tr style="background: #fff;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Height</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">
+                                {values.get('swell', 'N/A')} m ({values.get('swell', 0) * 3.28084:.1f} ft)
+                            </td>
+                        </tr>
+                        <tr style="background: #f1f8f4;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Period</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{values.get('swper', 'N/A')} s</td>
+                        </tr>
+                        <tr style="background: #fff;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Direction</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{values.get('swdir', 'N/A')}°</td>
+                        </tr>
+                    """
+
+                wave_html += """
                     </table>
                 </div>
+                """
+
+                # Add metadata
+                wave_html += f"""
                 <div style="background: #fff; padding: 10px; border-radius: 5px; font-size: 0.9em; color: #666;">
-                    <p style="margin: 5px 0;"><strong>Model Run:</strong> {waves.get('model_time', 'N/A')}</p>
-                    <p style="margin: 5px 0;"><strong>Valid Time:</strong> {waves.get('valid_time', 'N/A')}</p>
-                    {f"<p style='margin: 5px 0;'><strong>Note:</strong> Using {waves.get('fallback_hours')}h old model run</p>" if waves.get('fallback_hours') else ""}
+                    <p style="margin: 5px 0;"><strong>Model Run:</strong> {current.get('model_time', 'N/A')}</p>
+                    <p style="margin: 5px 0;"><strong>Valid Time:</strong> {current.get('valid_time', 'N/A')}</p>
+                    {f"<p style='margin: 5px 0;'><strong>Note:</strong> Using {current.get('fallback_hours')}h old model run</p>" if current.get('fallback_hours') else ""}
                 </div>
                 """
             else:
                 wave_html += f"""
                 <div style="background: #fff3e0; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
-                    <p><strong>Model Run:</strong> {waves.get('model_time', 'N/A')}</p>
-                    <p><strong>Valid Time:</strong> {waves.get('valid_time', 'N/A')}</p>
-                    <p><strong>Data Size:</strong> {waves.get('data_size_bytes', 0)} bytes</p>
-                    {f"<p><strong>Fallback:</strong> Used {waves.get('fallback_hours')}h old model run</p>" if waves.get('fallback_hours') else ""}
-                    <p style="color: #e65100; font-weight: bold;">{waves.get('note', 'GRIB2 parsing not available')}</p>
+                    <p><strong>Model Run:</strong> {current.get('model_time', 'N/A')}</p>
+                    <p><strong>Valid Time:</strong> {current.get('valid_time', 'N/A')}</p>
+                    <p><strong>Data Size:</strong> {current.get('data_size_bytes', 0)} bytes</p>
+                    {f"<p><strong>Fallback:</strong> Used {current.get('fallback_hours')}h old model run</p>" if current.get('fallback_hours') else ""}
+                    <p style="color: #e65100; font-weight: bold;">{current.get('note', 'GRIB2 parsing not available')}</p>
                     <p style="font-size: 0.9em;">Install cfgrib to see parsed values: <code>pip install cfgrib xarray</code></p>
                 </div>
                 """
         else:
-            wave_html += f"<p style='color: red;'>Error: {waves.get('error', 'Unknown error')}</p>"
+            wave_html += f"<p style='color: red;'>Error: {waves.get('error', 'No wave forecast data available')}</p>"
     elif "wave_error" in forecast:
         wave_html += f"<p style='color: red;'>Error: {forecast['wave_error']}</p>"
 
@@ -198,6 +257,76 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
                 wind_html += "<p style='color: red;'>No successful wind forecasts</p>"
     elif "wind_error" in forecast:
         wind_html += f"<p style='color: red;'>Error: {forecast['wind_error']}</p>"
+
+    # Build wave forecast table
+    wave_forecast_html = ""
+    if "waves" in forecast and "forecasts" in forecast["waves"]:
+        wave_forecasts = forecast["waves"]["forecasts"]
+        parsed_forecasts = [f for f in wave_forecasts if f.get("parsed") and f.get("values")]
+
+        if len(parsed_forecasts) > 0:
+            wave_forecast_html += """
+            <div style="background: #e3f2fd; padding: 15px; border-radius: 5px; margin-bottom: 15px; overflow-x: auto;">
+                <h3 style="margin-top: 0; color: #1565c0;">Wave Forecast</h3>
+                <table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">
+                    <tr style="background: #1976d2; color: white;">
+                        <th style="padding: 8px; border: 1px solid #90caf9;">Time (UTC)</th>
+                        <th style="padding: 8px; border: 1px solid #90caf9;">Total Height</th>
+                        <th style="padding: 8px; border: 1px solid #90caf9;">Period</th>
+                        <th style="padding: 8px; border: 1px solid #90caf9;">Direction</th>
+                        <th style="padding: 8px; border: 1px solid #90caf9;">Wind Wave</th>
+                        <th style="padding: 8px; border: 1px solid #90caf9;">Swell Height</th>
+                        <th style="padding: 8px; border: 1px solid #90caf9;">Swell Period</th>
+                        <th style="padding: 8px; border: 1px solid #90caf9;">Swell Dir</th>
+                    </tr>
+            """
+
+            # Show up to 24 forecast periods (3 days at 3-hour intervals)
+            for i, fc in enumerate(parsed_forecasts[:24]):
+                values = fc.get("values", {})
+                valid_time = fc.get("valid_time", "")
+                # Parse and format time
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(valid_time.replace('Z', '+00:00'))
+                    time_str = dt.strftime("%m/%d %H:%M")
+                except:
+                    time_str = valid_time[:16] if len(valid_time) > 16 else valid_time
+
+                # Alternate row colors
+                row_bg = "#e3f2fd" if i % 2 == 0 else "#fff"
+
+                wave_forecast_html += f"""
+                    <tr style="background: {row_bg};">
+                        <td style="padding: 8px; border: 1px solid #90caf9;">{time_str}</td>
+                        <td style="padding: 8px; border: 1px solid #90caf9; font-weight: bold;">
+                            {values.get('swh', 'N/A')} m ({values.get('swh', 0) * 3.28084:.1f} ft)
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #90caf9;">
+                            {values.get('perpw', 'N/A')} s
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #90caf9;">
+                            {values.get('dirpw', 'N/A')}°
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #90caf9;">
+                            {values.get('wvhgt', 'N/A')} m ({values.get('wvhgt', 0) * 3.28084:.1f} ft)
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #90caf9;">
+                            {values.get('swell', 'N/A')} m ({values.get('swell', 0) * 3.28084:.1f} ft)
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #90caf9;">
+                            {values.get('swper', 'N/A')} s
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #90caf9;">
+                            {values.get('swdir', 'N/A')}°
+                        </td>
+                    </tr>
+                """
+
+            wave_forecast_html += """
+                </table>
+            </div>
+            """
 
     # Build complete HTML
     return f"""
@@ -265,8 +394,13 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
             </div>
 
             <div class="section">
-                <h2>🏄 Wave Forecast</h2>
+                <h2>🏄 Current Wave Conditions</h2>
                 {wave_html}
+            </div>
+
+            <div class="section">
+                <h2>📊 Wave Forecast (Next 3 Days)</h2>
+                {wave_forecast_html if wave_forecast_html else '<p>No forecast data available</p>'}
             </div>
 
             <div class="section">
