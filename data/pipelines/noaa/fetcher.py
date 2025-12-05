@@ -9,12 +9,22 @@ Future expansion planned for GEFS-WAVE and regional high-res models.
 """
 
 import logging
+import tempfile
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Try to import GRIB parsing libraries
+try:
+    import xarray as xr
+    import cfgrib
+    GRIB_PARSING_AVAILABLE = True
+except ImportError:
+    GRIB_PARSING_AVAILABLE = False
+    logger.warning("cfgrib/xarray not available. GRIB2 data will not be parsed. Install with: pip install cfgrib xarray")
 
 
 class NOAATideFetcher:
@@ -167,6 +177,64 @@ class NOAATideFetcher:
         return nearest
 
 
+def _parse_grib2_data(grib_bytes: bytes, latitude: float, longitude: float) -> Optional[Dict]:
+    """Parse GRIB2 data and extract values at nearest point
+
+    Args:
+        grib_bytes: Raw GRIB2 data bytes
+        latitude: Target latitude
+        longitude: Target longitude (should be in 0-360 format)
+
+    Returns:
+        Dictionary of variable names to values, or None if parsing fails
+    """
+    if not GRIB_PARSING_AVAILABLE:
+        return None
+
+    try:
+        # cfgrib requires a file path, so write to temporary file
+        with tempfile.NamedTemporaryFile(suffix='.grib2', delete=False) as tmp_file:
+            tmp_file.write(grib_bytes)
+            tmp_path = tmp_file.name
+
+        try:
+            # Open with xarray/cfgrib
+            ds = xr.open_dataset(tmp_path, engine='cfgrib')
+
+            # Extract values at nearest point
+            # Use sel with method='nearest' for robust point extraction
+            point_data = ds.sel(latitude=latitude, longitude=longitude, method='nearest')
+
+            # Convert to dictionary, handling all variables
+            result = {}
+            for var in ds.data_vars:
+                try:
+                    value = float(point_data[var].values)
+                    result[var] = value
+                except (ValueError, TypeError):
+                    # Skip variables that can't be converted to float
+                    continue
+
+            # Also include coordinate information
+            result['actual_latitude'] = float(point_data['latitude'].values)
+            result['actual_longitude'] = float(point_data['longitude'].values)
+
+            ds.close()
+            return result
+
+        finally:
+            # Clean up temporary file
+            import os
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+
+    except Exception as e:
+        logger.warning(f"Failed to parse GRIB2 data: {e}")
+        return None
+
+
 class NOAAWaveWatch3Fetcher:
     """Fetches swell height and direction from NOAA Wave Watch 3 model
 
@@ -256,9 +324,10 @@ class NOAAWaveWatch3Fetcher:
                     response = await client.get(self.nomads_url, params=params)
                     response.raise_for_status()
 
-                    # Success! Return data
+                    # Success! Parse GRIB2 data
                     logger.info(f"Successfully fetched Wave Watch 3 data from {model_time.isoformat()} run")
-                    return {
+
+                    result = {
                         "model_time": model_time.isoformat(),
                         "forecast_hour": forecast_hour,
                         "valid_time": (model_time + timedelta(hours=forecast_hour)).isoformat(),
@@ -266,9 +335,26 @@ class NOAAWaveWatch3Fetcher:
                         "longitude": longitude,
                         "data_size_bytes": len(response.content),
                         "status": "success",
-                        "note": "GRIB2 data requires pygrib or cfgrib for parsing",
                         "fallback_hours": run_offset if run_offset > 0 else None
                     }
+
+                    # Parse GRIB2 data to extract values
+                    parsed_data = _parse_grib2_data(response.content, latitude, longitude)
+                    if parsed_data:
+                        result["values"] = parsed_data
+                        result["parsed"] = True
+                        # Extract common wave parameters for easy access
+                        if "swh" in parsed_data:  # Significant wave height
+                            result["wave_height_m"] = round(parsed_data["swh"], 2)
+                        if "perpw" in parsed_data:  # Peak wave period
+                            result["wave_period_s"] = round(parsed_data["perpw"], 1)
+                        if "dirpw" in parsed_data:  # Wave direction
+                            result["wave_direction_deg"] = round(parsed_data["dirpw"], 0)
+                    else:
+                        result["parsed"] = False
+                        result["note"] = "GRIB2 parsing not available. Install cfgrib: brew install eccodes && pip install cfgrib xarray"
+
+                    return result
             except httpx.HTTPError as e:
                 if run_offset < 12:  # Try next older run
                     logger.warning(f"Model run {model_time.isoformat()} not available, trying previous run...")
@@ -390,9 +476,10 @@ class NOAAWindFetcher:
                     response = await client.get(self.nomads_url, params=params)
                     response.raise_for_status()
 
-                    # Success! Return data
+                    # Success! Parse GRIB2 data
                     logger.info(f"Successfully fetched GFS wind data from {model_time.isoformat()} run")
-                    return {
+
+                    result = {
                         "model_time": model_time.isoformat(),
                         "forecast_hour": forecast_hour,
                         "valid_time": (model_time + timedelta(hours=forecast_hour)).isoformat(),
@@ -400,9 +487,34 @@ class NOAAWindFetcher:
                         "longitude": longitude,
                         "data_size_bytes": len(response.content),
                         "status": "success",
-                        "note": "GRIB2 data requires pygrib or cfgrib for parsing",
                         "fallback_hours": run_offset if run_offset > 0 else None
                     }
+
+                    # Parse GRIB2 data to extract values
+                    parsed_data = _parse_grib2_data(response.content, latitude, longitude)
+                    if parsed_data:
+                        result["values"] = parsed_data
+                        result["parsed"] = True
+                        # Calculate wind speed and direction from U/V components
+                        import math
+                        u = parsed_data.get("u10", 0)  # U-component (east-west)
+                        v = parsed_data.get("v10", 0)  # V-component (north-south)
+                        # Wind speed (m/s)
+                        wind_speed = math.sqrt(u**2 + v**2)
+                        result["wind_speed_ms"] = round(wind_speed, 1)
+                        result["wind_speed_kts"] = round(wind_speed * 1.94384, 1)  # Convert to knots
+                        # Wind direction (meteorological convention: direction FROM which wind blows)
+                        wind_dir = (270 - math.atan2(v, u) * 180 / math.pi) % 360
+                        result["wind_direction_deg"] = round(wind_dir, 0)
+                        # Wind gust if available
+                        if "gust" in parsed_data:
+                            result["wind_gust_ms"] = round(parsed_data["gust"], 1)
+                            result["wind_gust_kts"] = round(parsed_data["gust"] * 1.94384, 1)
+                    else:
+                        result["parsed"] = False
+                        result["note"] = "GRIB2 parsing not available. Install cfgrib: brew install eccodes && pip install cfgrib xarray"
+
+                    return result
             except httpx.HTTPError as e:
                 if run_offset < 12:  # Try next older run
                     logger.warning(f"Model run {model_time.isoformat()} not available, trying previous run...")

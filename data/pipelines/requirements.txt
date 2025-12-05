@@ -4,8 +4,8 @@ pandas>=2.1.4
 numpy>=1.26.0
 python-dotenv>=1.0.0
 
-# Optional: For parsing GRIB2 files from NOAA Wave Watch 3 and GFS
-# Uncomment when implementing GRIB2 parsing
-# cfgrib>=0.9.10
-# xarray>=2023.1.0
-# eccodes  # Required by cfgrib (install via conda or system package manager)
+# GRIB2 parsing for NOAA Wave Watch 3 and GFS
+# eccodes-python includes pre-built binaries - no system dependencies needed!
+eccodes>=1.7.0
+cfgrib>=0.9.10
+xarray>=2023.1.0

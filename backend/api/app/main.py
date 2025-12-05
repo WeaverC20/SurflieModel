@@ -100,15 +100,45 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
     if "waves" in forecast:
         waves = forecast["waves"]
         if waves.get("status") == "success":
-            wave_html += f"""
-            <div style="background: #e8f5e9; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
-                <p><strong>Model Run:</strong> {waves.get('model_time', 'N/A')}</p>
-                <p><strong>Valid Time:</strong> {waves.get('valid_time', 'N/A')}</p>
-                <p><strong>Data Size:</strong> {waves.get('data_size_bytes', 0)} bytes</p>
-                {f"<p><strong>Fallback:</strong> Used {waves.get('fallback_hours')}h old model run</p>" if waves.get('fallback_hours') else ""}
-                <p style="color: #666; font-size: 0.9em;">{waves.get('note', '')}</p>
-            </div>
-            """
+            # Show parsed wave values if available
+            if waves.get("parsed"):
+                wave_html += f"""
+                <div style="background: #e8f5e9; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+                    <h3 style="margin-top: 0; color: #2e7d32;">Current Conditions</h3>
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <tr style="background: #f1f8f4;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Wave Height</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-size: 1.3em; color: #1b5e20;">
+                                {waves.get('wave_height_m', 'N/A')} m ({waves.get('wave_height_m', 0) * 3.28084:.1f} ft)
+                            </td>
+                        </tr>
+                        <tr style="background: #fff;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Wave Period</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{waves.get('wave_period_s', 'N/A')} seconds</td>
+                        </tr>
+                        <tr style="background: #f1f8f4;">
+                            <td style="padding: 10px; border: 1px solid #a5d6a7; font-weight: bold;">Wave Direction</td>
+                            <td style="padding: 10px; border: 1px solid #a5d6a7;">{waves.get('wave_direction_deg', 'N/A')}°</td>
+                        </tr>
+                    </table>
+                </div>
+                <div style="background: #fff; padding: 10px; border-radius: 5px; font-size: 0.9em; color: #666;">
+                    <p style="margin: 5px 0;"><strong>Model Run:</strong> {waves.get('model_time', 'N/A')}</p>
+                    <p style="margin: 5px 0;"><strong>Valid Time:</strong> {waves.get('valid_time', 'N/A')}</p>
+                    {f"<p style='margin: 5px 0;'><strong>Note:</strong> Using {waves.get('fallback_hours')}h old model run</p>" if waves.get('fallback_hours') else ""}
+                </div>
+                """
+            else:
+                wave_html += f"""
+                <div style="background: #fff3e0; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
+                    <p><strong>Model Run:</strong> {waves.get('model_time', 'N/A')}</p>
+                    <p><strong>Valid Time:</strong> {waves.get('valid_time', 'N/A')}</p>
+                    <p><strong>Data Size:</strong> {waves.get('data_size_bytes', 0)} bytes</p>
+                    {f"<p><strong>Fallback:</strong> Used {waves.get('fallback_hours')}h old model run</p>" if waves.get('fallback_hours') else ""}
+                    <p style="color: #e65100; font-weight: bold;">{waves.get('note', 'GRIB2 parsing not available')}</p>
+                    <p style="font-size: 0.9em;">Install cfgrib to see parsed values: <code>pip install cfgrib xarray</code></p>
+                </div>
+                """
         else:
             wave_html += f"<p style='color: red;'>Error: {waves.get('error', 'Unknown error')}</p>"
     elif "wave_error" in forecast:
@@ -123,15 +153,47 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
             successful = [f for f in forecasts if f.get("status") == "success"]
             if successful:
                 first = successful[0]
-                wind_html += f"""
-                <div style="background: #fff3e0; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
-                    <p><strong>Model Run:</strong> {first.get('model_time', 'N/A')}</p>
-                    <p><strong>Forecast Hours:</strong> {len(successful)} hours available</p>
-                    <p><strong>Data Size (per hour):</strong> {first.get('data_size_bytes', 0)} bytes</p>
-                    {f"<p><strong>Fallback:</strong> Used {first.get('fallback_hours')}h old model run</p>" if first.get('fallback_hours') else ""}
-                    <p style="color: #666; font-size: 0.9em;">{first.get('note', '')}</p>
-                </div>
-                """
+
+                # Show parsed wind values if available
+                if first.get("parsed"):
+                    wind_html += f"""
+                    <div style="background: #fff3e0; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+                        <h3 style="margin-top: 0; color: #e65100;">Current Conditions</h3>
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <tr style="background: #fff8e1;">
+                                <td style="padding: 10px; border: 1px solid #ffcc80; font-weight: bold;">Wind Speed</td>
+                                <td style="padding: 10px; border: 1px solid #ffcc80; font-size: 1.3em; color: #e65100;">
+                                    {first.get('wind_speed_kts', 'N/A')} kts ({first.get('wind_speed_ms', 'N/A')} m/s)
+                                </td>
+                            </tr>
+                            <tr style="background: #fff;">
+                                <td style="padding: 10px; border: 1px solid #ffcc80; font-weight: bold;">Wind Direction</td>
+                                <td style="padding: 10px; border: 1px solid #ffcc80;">{first.get('wind_direction_deg', 'N/A')}°</td>
+                            </tr>
+                            {f'''<tr style="background: #fff8e1;">
+                                <td style="padding: 10px; border: 1px solid #ffcc80; font-weight: bold;">Wind Gust</td>
+                                <td style="padding: 10px; border: 1px solid #ffcc80;">{first.get('wind_gust_kts', 'N/A')} kts ({first.get('wind_gust_ms', 'N/A')} m/s)</td>
+                            </tr>''' if 'wind_gust_kts' in first else ''}
+                        </table>
+                    </div>
+                    <div style="background: #fff; padding: 10px; border-radius: 5px; font-size: 0.9em; color: #666;">
+                        <p style="margin: 5px 0;"><strong>Model Run:</strong> {first.get('model_time', 'N/A')}</p>
+                        <p style="margin: 5px 0;"><strong>Valid Time:</strong> {first.get('valid_time', 'N/A')}</p>
+                        <p style="margin: 5px 0;"><strong>Forecast Hours Available:</strong> {len(successful)}</p>
+                        {f"<p style='margin: 5px 0;'><strong>Note:</strong> Using {first.get('fallback_hours')}h old model run</p>" if first.get('fallback_hours') else ""}
+                    </div>
+                    """
+                else:
+                    wind_html += f"""
+                    <div style="background: #fff3e0; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
+                        <p><strong>Model Run:</strong> {first.get('model_time', 'N/A')}</p>
+                        <p><strong>Forecast Hours:</strong> {len(successful)} hours available</p>
+                        <p><strong>Data Size (per hour):</strong> {first.get('data_size_bytes', 0)} bytes</p>
+                        {f"<p><strong>Fallback:</strong> Used {first.get('fallback_hours')}h old model run</p>" if first.get('fallback_hours') else ""}
+                        <p style="color: #e65100; font-weight: bold;">{first.get('note', 'GRIB2 parsing not available')}</p>
+                        <p style="font-size: 0.9em;">Install cfgrib to see parsed values: <code>pip install cfgrib xarray</code></p>
+                    </div>
+                    """
             else:
                 wind_html += "<p style='color: red;'>No successful wind forecasts</p>"
     elif "wind_error" in forecast:
