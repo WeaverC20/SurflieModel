@@ -328,6 +328,59 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
             </div>
             """
 
+    # Build wind forecast table
+    wind_forecast_html = ""
+    if "wind" in forecast and "forecasts" in forecast["wind"]:
+        wind_forecasts = forecast["wind"]["forecasts"]
+        parsed_forecasts = [f for f in wind_forecasts if f.get("parsed") and f.get("status") == "success"]
+
+        if len(parsed_forecasts) > 0:
+            wind_forecast_html += """
+            <div style="background: #fff3e0; padding: 15px; border-radius: 5px; margin-bottom: 15px; overflow-x: auto;">
+                <h3 style="margin-top: 0; color: #e65100;">Wind Forecast</h3>
+                <table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">
+                    <tr style="background: #ff6f00; color: white;">
+                        <th style="padding: 8px; border: 1px solid #ffcc80;">Time (UTC)</th>
+                        <th style="padding: 8px; border: 1px solid #ffcc80;">Wind Speed</th>
+                        <th style="padding: 8px; border: 1px solid #ffcc80;">Direction</th>
+                        <th style="padding: 8px; border: 1px solid #ffcc80;">Wind Gust</th>
+                    </tr>
+            """
+
+            # Show up to 24 forecast periods
+            for i, fc in enumerate(parsed_forecasts[:24]):
+                valid_time = fc.get("valid_time", "")
+                # Parse and format time
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(valid_time.replace('Z', '+00:00'))
+                    time_str = dt.strftime("%m/%d %H:%M")
+                except:
+                    time_str = valid_time[:16] if len(valid_time) > 16 else valid_time
+
+                # Alternate row colors
+                row_bg = "#fff3e0" if i % 2 == 0 else "#fff"
+
+                wind_forecast_html += f"""
+                    <tr style="background: {row_bg};">
+                        <td style="padding: 8px; border: 1px solid #ffcc80;">{time_str}</td>
+                        <td style="padding: 8px; border: 1px solid #ffcc80; font-weight: bold;">
+                            {fc.get('wind_speed_kts', 'N/A')} kts ({fc.get('wind_speed_ms', 'N/A')} m/s)
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #ffcc80;">
+                            {fc.get('wind_direction_deg', 'N/A')}°
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #ffcc80;">
+                            {fc.get('wind_gust_kts', 'N/A') if 'wind_gust_kts' in fc else 'N/A'} kts
+                        </td>
+                    </tr>
+                """
+
+            wind_forecast_html += """
+                </table>
+            </div>
+            """
+
     # Build complete HTML
     return f"""
     <!DOCTYPE html>
@@ -404,8 +457,13 @@ def generate_forecast_html(forecast: dict, location: dict) -> str:
             </div>
 
             <div class="section">
-                <h2>💨 Wind Forecast</h2>
+                <h2>💨 Current Wind Conditions</h2>
                 {wind_html}
+            </div>
+
+            <div class="section">
+                <h2>🌬️ Wind Forecast (Next 3 Days)</h2>
+                {wind_forecast_html if wind_forecast_html else '<p>No forecast data available</p>'}
             </div>
 
             <div class="footer">
