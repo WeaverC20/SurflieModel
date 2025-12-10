@@ -31,11 +31,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Default location
+# Default location (Huntington Beach Pier)
 DEFAULT_LOCATION = {
     "name": "Huntington Beach, CA",
-    "lat": 33.6595,
-    "lon": -118.0007,
+    "lat": 33.6556,
+    "lon": -117.9999,
 }
 
 

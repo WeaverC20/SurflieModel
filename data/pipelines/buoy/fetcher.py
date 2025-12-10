@@ -233,6 +233,7 @@ class NDBCBuoyFetcher:
         # Common California buoys with their locations
         # This is a simplified static list - could be expanded or fetched dynamically
         known_buoys = {
+            "46256": {"name": "Long Beach Channel", "lat": 33.700, "lon": -118.201},
             "46237": {"name": "San Pedro", "lat": 33.218, "lon": -118.315},
             "46221": {"name": "Santa Monica Basin", "lat": 33.855, "lon": -119.048},
             "46025": {"name": "Santa Monica", "lat": 33.749, "lon": -119.053},
