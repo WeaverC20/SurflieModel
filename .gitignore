@@ -55,8 +55,10 @@ ml/experiments/
 *.parquet
 *.h5
 *.hdf5
+*.nc
 data/raw/
 data/processed/
+data/cache/
 
 # Jupyter
 .ipynb_checkpoints/

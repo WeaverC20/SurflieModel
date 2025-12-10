@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0f172a;
+  --foreground: #f1f5f9;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  margin: 0;
+  padding: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Map container styles */
+.map-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+/* Ensure mapbox/deck.gl canvases are full size */
+.map-container canvas {
+  outline: none;
+}
