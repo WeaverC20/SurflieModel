@@ -17,3 +17,9 @@ netCDF4>=1.6.0
 Pillow>=10.0.0  # Image processing for tiles
 shapely>=2.0.0  # Geographic shapes for nearshore zones
 scipy>=1.11.0   # Interpolation for tile rendering
+
+# Zarr storage for forecast data
+zarr>=2.16.0              # Chunked array storage
+fsspec>=2023.12.0         # Filesystem abstraction (local, S3, GCS)
+s3fs>=2023.12.0           # S3 backend for fsspec (optional, for cloud)
+gcsfs>=2023.12.0          # GCS backend for fsspec (optional, for cloud)

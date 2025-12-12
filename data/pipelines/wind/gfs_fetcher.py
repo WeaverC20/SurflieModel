@@ -2,17 +2,26 @@
 GFS Wind Forecast Fetcher
 
 Fetches wind forecast data from NOAA's Global Forecast System (GFS).
+Supports optional storage to Zarr via WindDataStore.
 """
 
 import logging
 import tempfile
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import numpy as np
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Try to import storage module
+try:
+    from data.storage import WindDataStore, MetadataDB, get_storage_config
+    STORAGE_AVAILABLE = True
+except ImportError:
+    STORAGE_AVAILABLE = False
+    logger.debug("Storage module not available - fetch-only mode")
 
 # Try to import GRIB parsing libraries
 try:
@@ -309,3 +318,80 @@ class GFSWindFetcher:
                 "lon": "degrees_east"
             }
         }
+
+    async def fetch_and_store(
+        self,
+        min_lat: float = 32.0,
+        max_lat: float = 42.0,
+        min_lon: float = -125.0,
+        max_lon: float = -117.0,
+        forecast_hours: Optional[List[int]] = None
+    ) -> Optional[str]:
+        """
+        Fetch wind forecast and store to Zarr.
+
+        Args:
+            min_lat: Minimum latitude
+            max_lat: Maximum latitude
+            min_lon: Minimum longitude
+            max_lon: Maximum longitude
+            forecast_hours: List of forecast hours to fetch (default: 0-72 every 3h)
+
+        Returns:
+            Path to Zarr store or None if storage unavailable
+        """
+        if not STORAGE_AVAILABLE:
+            logger.error("Storage module not available")
+            return None
+
+        if forecast_hours is None:
+            # 3-hourly for first 48 hours, then 24-hourly out to 16 days (384 hours)
+            forecast_hours = list(range(0, 49, 3)) + list(range(72, 385, 24))
+
+        cycle_time, _ = self._get_latest_cycle()
+        data_list = []
+
+        logger.info(f"Fetching GFS wind for {len(forecast_hours)} forecast hours")
+
+        for hour in forecast_hours:
+            try:
+                data = await self.fetch_wind_grid(
+                    min_lat=min_lat,
+                    max_lat=max_lat,
+                    min_lon=min_lon,
+                    max_lon=max_lon,
+                    forecast_hour=hour
+                )
+                if data and 'synthetic' not in data.get('model', '').lower():
+                    data_list.append(data)
+                    logger.info(f"Fetched forecast hour {hour}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch hour {hour}: {e}")
+
+        if not data_list:
+            logger.error("No data fetched successfully")
+            return None
+
+        # Store to Zarr
+        store = WindDataStore()
+        store.store_forecast_range(data_list, cycle_time)
+
+        # Record in metadata database
+        config = get_storage_config()
+        db = MetadataDB()
+        db.record_forecast_cycle(
+            model='gfs',
+            cycle_time=cycle_time,
+            store_path=store.store_path,
+            min_forecast_hour=min(forecast_hours),
+            max_forecast_hour=max(forecast_hours),
+            bounds={
+                'min_lat': min_lat,
+                'max_lat': max_lat,
+                'min_lon': min_lon,
+                'max_lon': max_lon
+            }
+        )
+
+        logger.info(f"Stored GFS wind forecast to {store.store_path}")
+        return store.store_path

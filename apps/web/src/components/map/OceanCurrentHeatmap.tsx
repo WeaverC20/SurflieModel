@@ -1,11 +1,11 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
+import ForecastHourSelector from '../ForecastHourSelector'
 
 interface OceanCurrentHeatmapProps {
   apiBaseUrl?: string
   region?: string
-  forecastHour?: number
 }
 
 interface GridData {
@@ -28,13 +28,13 @@ interface GridData {
 
 export default function OceanCurrentHeatmap({
   apiBaseUrl = 'http://localhost:8000',
-  region = 'california',
-  forecastHour = 0
+  region = 'california'
 }: OceanCurrentHeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [gridData, setGridData] = useState<GridData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [forecastHour, setForecastHour] = useState(0)
 
   // Fetch ocean current data
   useEffect(() => {
@@ -192,6 +192,16 @@ export default function OceanCurrentHeatmap({
 
   return (
     <div className="relative w-full min-h-full bg-slate-900 flex flex-col items-center p-8">
+      {/* Forecast Hour Selector */}
+      <div className="mb-4 self-start">
+        <ForecastHourSelector
+          value={forecastHour}
+          onChange={setForecastHour}
+          maxHours={192}
+          disabled={loading}
+        />
+      </div>
+
       {/* Canvas */}
       <div className="bg-slate-800 p-4 rounded-lg shadow-xl">
         <canvas

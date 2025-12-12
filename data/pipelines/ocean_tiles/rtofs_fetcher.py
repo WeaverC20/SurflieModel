@@ -2,6 +2,7 @@
 RTOFS (Real-Time Ocean Forecast System) Data Fetcher
 
 Fetches ocean current data from NOAA's Global RTOFS model for tile generation.
+Supports optional storage to Zarr via CurrentDataStore.
 
 Model Info:
 - Global HYCOM-based ocean forecast
@@ -17,7 +18,7 @@ import logging
 import math
 import tempfile
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import httpx
@@ -26,6 +27,14 @@ import numpy as np
 from .config import RTOFS_CONFIG, REGIONS, GRIB_CACHE_DIR
 
 logger = logging.getLogger(__name__)
+
+# Try to import storage module
+try:
+    from data.storage import CurrentDataStore, MetadataDB, get_storage_config
+    STORAGE_AVAILABLE = True
+except ImportError:
+    STORAGE_AVAILABLE = False
+    logger.debug("Storage module not available - fetch-only mode")
 
 # Try to import GRIB parsing libraries
 try:
@@ -380,3 +389,72 @@ class RTOFSFetcher:
     def knots_to_ms(speed_knots: float) -> float:
         """Convert speed from knots to m/s"""
         return speed_knots / 1.94384
+
+    async def fetch_and_store(
+        self,
+        region_name: str = "california",
+        forecast_hours: Optional[List[int]] = None
+    ) -> Optional[str]:
+        """
+        Fetch ocean current forecast and store to Zarr.
+
+        Args:
+            region_name: Name of region from config
+            forecast_hours: List of forecast hours to fetch (default: 0-48 every 6h)
+
+        Returns:
+            Path to Zarr store or None if storage unavailable
+        """
+        if not STORAGE_AVAILABLE:
+            logger.error("Storage module not available")
+            return None
+
+        if forecast_hours is None:
+            # 3-hourly for first 48 hours, then 24-hourly out to 8 days (192 hours)
+            forecast_hours = list(range(0, 49, 3)) + list(range(72, 193, 24))
+
+        model_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        data_list = []
+
+        logger.info(f"Fetching RTOFS currents for {len(forecast_hours)} forecast hours")
+
+        for hour in forecast_hours:
+            try:
+                data = await self.fetch_current_grid(
+                    region_name=region_name,
+                    forecast_hour=hour,
+                    model_date=model_date
+                )
+                if data is not None:
+                    data_list.append(data)
+                    logger.info(f"Fetched forecast hour {hour}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch hour {hour}: {e}")
+
+        if not data_list:
+            logger.error("No data fetched successfully")
+            return None
+
+        # Store to Zarr
+        store = CurrentDataStore()
+        store.store_forecast_range(data_list, model_date)
+
+        # Record in metadata database
+        if region_name in REGIONS:
+            region = REGIONS[region_name]
+            bounds = region.bounds
+        else:
+            bounds = None
+
+        db = MetadataDB()
+        db.record_forecast_cycle(
+            model='rtofs',
+            cycle_time=model_date,
+            store_path=store.store_path,
+            min_forecast_hour=min(forecast_hours),
+            max_forecast_hour=max(forecast_hours),
+            bounds=bounds
+        )
+
+        logger.info(f"Stored RTOFS current forecast to {store.store_path}")
+        return store.store_path

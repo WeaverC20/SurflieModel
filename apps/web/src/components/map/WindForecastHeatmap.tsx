@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
+import ForecastHourSelector from '../ForecastHourSelector'
 
 interface WindForecastHeatmapProps {
   apiBaseUrl?: string
@@ -33,6 +34,7 @@ export default function WindForecastHeatmap({
   const [gridData, setGridData] = useState<WindGridData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [forecastHour, setForecastHour] = useState(0)
 
   // Fetch wind grid data
   useEffect(() => {
@@ -41,7 +43,7 @@ export default function WindForecastHeatmap({
         setLoading(true)
         setError(null)
 
-        const response = await fetch(`${apiBaseUrl}/api/wind/grid`)
+        const response = await fetch(`${apiBaseUrl}/api/wind/grid?forecast_hour=${forecastHour}`)
 
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`)
@@ -65,7 +67,7 @@ export default function WindForecastHeatmap({
     }
 
     fetchData()
-  }, [apiBaseUrl])
+  }, [apiBaseUrl, forecastHour])
 
   // Render heatmap on canvas
   useEffect(() => {
@@ -187,6 +189,16 @@ export default function WindForecastHeatmap({
 
   return (
     <div className="relative w-full min-h-full bg-slate-900 flex flex-col items-center p-8">
+      {/* Forecast Hour Selector */}
+      <div className="mb-4 self-start">
+        <ForecastHourSelector
+          value={forecastHour}
+          onChange={setForecastHour}
+          maxHours={384}
+          disabled={loading}
+        />
+      </div>
+
       {/* Canvas */}
       <div className="bg-slate-800 p-4 rounded-lg shadow-xl">
         <canvas
