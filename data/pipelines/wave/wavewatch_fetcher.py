@@ -116,13 +116,19 @@ class WaveWatchFetcher:
             params = {
                 "file": f"gfswave.t{try_hour:02d}z.global.0p25.f{forecast_hour:03d}.grib2",
                 "lev_surface": "on",
-                "var_HTSGW": "on",  # Significant wave height
-                "var_PERPW": "on",  # Peak wave period
-                "var_DIRPW": "on",  # Mean wave direction
+                # Combined sea state
+                "var_HTSGW": "on",  # Significant wave height (combined)
+                "var_PERPW": "on",  # Peak wave period (combined)
+                "var_DIRPW": "on",  # Mean wave direction (combined)
+                # Wind waves
                 "var_WVHGT": "on",  # Wind wave height
-                "var_SWELL": "on",  # Swell height
-                "var_SWPER": "on",  # Swell period
-                "var_SWDIR": "on",  # Swell direction
+                "var_WVPER": "on",  # Wind wave period
+                "var_WVDIR": "on",  # Wind wave direction
+                # Primary swell (partition 1)
+                "var_SWELL": "on",  # Primary swell height
+                "var_SWPER": "on",  # Primary swell period
+                "var_SWDIR": "on",  # Primary swell direction
+                # Note: Secondary swell (var_SWELL_2, etc.) not available in global 0.25deg product
                 "subregion": "",
                 "leftlon": left_lon,
                 "rightlon": right_lon,
@@ -228,47 +234,115 @@ class WaveWatchFetcher:
                     logger.warning("Could not find wave direction variable")
                     mean_wave_direction = np.full((len(lats), len(lons)), 315.0)
 
-                # Extract wind sea height (if available)
+                # Extract wind wave components
                 if 'wvhgt' in ds:
-                    wind_sea_height = ds['wvhgt'].values
+                    wind_wave_height = ds['wvhgt'].values
                 else:
-                    wind_sea_height = significant_wave_height * 0.3
+                    wind_wave_height = significant_wave_height * 0.3
 
-                # Extract swell height (if available)
-                if 'swell' in ds:
-                    swell_height = ds['swell'].values
+                if 'wvper' in ds:
+                    wind_wave_period = ds['wvper'].values
                 else:
-                    swell_height = significant_wave_height * 0.7
+                    wind_wave_period = np.full_like(significant_wave_height, 5.0)
+
+                if 'wvdir' in ds:
+                    wind_wave_direction = ds['wvdir'].values
+                else:
+                    wind_wave_direction = mean_wave_direction.copy()
+
+                # Extract primary swell (partition 1)
+                if 'swell' in ds:
+                    primary_swell_height = ds['swell'].values
+                elif 'shts' in ds:  # Alternative variable name
+                    primary_swell_height = ds['shts'].values
+                else:
+                    primary_swell_height = significant_wave_height * 0.7
+
+                if 'swper' in ds:
+                    primary_swell_period = ds['swper'].values
+                elif 'mpts' in ds:
+                    primary_swell_period = ds['mpts'].values
+                else:
+                    primary_swell_period = peak_wave_period.copy()
+
+                if 'swdir' in ds:
+                    primary_swell_direction = ds['swdir'].values
+                elif 'mdts' in ds:
+                    primary_swell_direction = ds['mdts'].values
+                else:
+                    primary_swell_direction = mean_wave_direction.copy()
+
+                # Extract secondary swell (partition 2) - may not always be present
+                secondary_swell_height = None
+                secondary_swell_period = None
+                secondary_swell_direction = None
+
+                # Try different variable name patterns for secondary swell
+                for height_var in ['swell_2', 'shts_2', 'swh2']:
+                    if height_var in ds:
+                        secondary_swell_height = ds[height_var].values
+                        break
+
+                for period_var in ['swper_2', 'mpts_2', 'mwp2']:
+                    if period_var in ds:
+                        secondary_swell_period = ds[period_var].values
+                        break
+
+                for dir_var in ['swdir_2', 'mdts_2', 'mwd2']:
+                    if dir_var in ds:
+                        secondary_swell_direction = ds[dir_var].values
+                        break
 
                 forecast_time = cycle_time + timedelta(hours=forecast_hour)
 
                 ds.close()
 
                 logger.info(f"Successfully parsed WaveWatch III grid: {len(lats)} x {len(lons)} points")
+                logger.info(f"Secondary swell available: {secondary_swell_height is not None}")
 
-                return {
+                result = {
                     "lat": lats.tolist(),
                     "lon": lons.tolist(),
+                    # Combined sea state
                     "significant_wave_height": significant_wave_height.tolist(),
                     "peak_wave_period": peak_wave_period.tolist(),
                     "mean_wave_direction": mean_wave_direction.tolist(),
-                    "wind_sea_height": wind_sea_height.tolist(),
-                    "swell_height": swell_height.tolist(),
+                    # Wind waves
+                    "wind_wave_height": wind_wave_height.tolist(),
+                    "wind_wave_period": wind_wave_period.tolist(),
+                    "wind_wave_direction": wind_wave_direction.tolist(),
+                    # Primary swell
+                    "primary_swell_height": primary_swell_height.tolist(),
+                    "primary_swell_period": primary_swell_period.tolist(),
+                    "primary_swell_direction": primary_swell_direction.tolist(),
+                    # Metadata
                     "forecast_time": forecast_time.isoformat(),
                     "cycle_time": cycle_time.isoformat(),
                     "forecast_hour": forecast_hour,
                     "resolution_deg": 0.25,
                     "model": "WaveWatch III",
                     "units": {
-                        "significant_wave_height": "m",
-                        "peak_wave_period": "s",
-                        "mean_wave_direction": "degrees (direction from)",
-                        "wind_sea_height": "m",
-                        "swell_height": "m",
+                        "wave_height": "m",
+                        "wave_period": "s",
+                        "wave_direction": "degrees (direction from)",
                         "lat": "degrees_north",
                         "lon": "degrees_east"
                     }
                 }
+
+                # Add secondary swell if available
+                if secondary_swell_height is not None:
+                    result["secondary_swell_height"] = secondary_swell_height.tolist()
+                if secondary_swell_period is not None:
+                    result["secondary_swell_period"] = secondary_swell_period.tolist()
+                if secondary_swell_direction is not None:
+                    result["secondary_swell_direction"] = secondary_swell_direction.tolist()
+
+                # Keep legacy fields for backwards compatibility
+                result["wind_sea_height"] = result["wind_wave_height"]
+                result["swell_height"] = result["primary_swell_height"]
+
+                return result
 
             finally:
                 # Clean up temp file
@@ -334,38 +408,62 @@ class WaveWatchFetcher:
         # Mean direction (mostly from NW in California)
         mean_wave_direction = 315 + np.random.randn(height, width) * 20
 
-        # Wind sea vs swell (simplified)
-        wind_sea_height = significant_wave_height * 0.3
-        swell_height = significant_wave_height * 0.7
+        # Wind waves (short period, locally generated)
+        wind_wave_height = significant_wave_height * 0.3
+        wind_wave_period = np.full((height, width), 5.0) + np.random.randn(height, width) * 0.5
+        wind_wave_direction = mean_wave_direction + np.random.randn(height, width) * 30
+
+        # Primary swell (long period, from distant storms)
+        primary_swell_height = significant_wave_height * 0.6
+        primary_swell_period = peak_wave_period + np.random.randn(height, width) * 1
+        primary_swell_direction = 290 + np.random.randn(height, width) * 15  # WNW
+
+        # Secondary swell (weaker, different direction)
+        secondary_swell_height = significant_wave_height * 0.2
+        secondary_swell_period = np.full((height, width), 8.0) + np.random.randn(height, width) * 1
+        secondary_swell_direction = 200 + np.random.randn(height, width) * 15  # SSW
 
         # Mask land areas
-        significant_wave_height[is_land] = np.nan
-        peak_wave_period[is_land] = np.nan
-        mean_wave_direction[is_land] = np.nan
-        wind_sea_height[is_land] = np.nan
-        swell_height[is_land] = np.nan
+        for arr in [significant_wave_height, peak_wave_period, mean_wave_direction,
+                    wind_wave_height, wind_wave_period, wind_wave_direction,
+                    primary_swell_height, primary_swell_period, primary_swell_direction,
+                    secondary_swell_height, secondary_swell_period, secondary_swell_direction]:
+            arr[is_land] = np.nan
 
         forecast_time = cycle_time + timedelta(hours=forecast_hour)
 
         return {
             "lat": lats.tolist(),
             "lon": lons.tolist(),
+            # Combined sea state
             "significant_wave_height": significant_wave_height.tolist(),
             "peak_wave_period": peak_wave_period.tolist(),
             "mean_wave_direction": mean_wave_direction.tolist(),
-            "wind_sea_height": wind_sea_height.tolist(),
-            "swell_height": swell_height.tolist(),
+            # Wind waves
+            "wind_wave_height": wind_wave_height.tolist(),
+            "wind_wave_period": wind_wave_period.tolist(),
+            "wind_wave_direction": wind_wave_direction.tolist(),
+            # Primary swell
+            "primary_swell_height": primary_swell_height.tolist(),
+            "primary_swell_period": primary_swell_period.tolist(),
+            "primary_swell_direction": primary_swell_direction.tolist(),
+            # Secondary swell
+            "secondary_swell_height": secondary_swell_height.tolist(),
+            "secondary_swell_period": secondary_swell_period.tolist(),
+            "secondary_swell_direction": secondary_swell_direction.tolist(),
+            # Legacy compatibility
+            "wind_sea_height": wind_wave_height.tolist(),
+            "swell_height": primary_swell_height.tolist(),
+            # Metadata
             "forecast_time": forecast_time.isoformat(),
             "cycle_time": cycle_time.isoformat(),
             "forecast_hour": forecast_hour,
             "resolution_deg": lat_resolution,
             "model": "WaveWatch III (synthetic fallback)",
             "units": {
-                "significant_wave_height": "m",
-                "peak_wave_period": "s",
-                "mean_wave_direction": "degrees (direction from)",
-                "wind_sea_height": "m",
-                "swell_height": "m",
+                "wave_height": "m",
+                "wave_period": "s",
+                "wave_direction": "degrees (direction from)",
                 "lat": "degrees_north",
                 "lon": "degrees_east"
             }
