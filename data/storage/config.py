@@ -81,6 +81,9 @@ class StorageConfig:
     saved_runs_dir: str = 'saved_runs'
     bathymetry_dir: str = 'static/bathymetry'
 
+    # Historical data for validation
+    historical_wind_store: str = 'historical/wind/gfs_historical.zarr'
+
     # Cloud storage settings (for future S3/GCS support)
     storage_backend: str = 'local'  # 'local', 's3', 'gcs'
     s3_bucket: Optional[str] = None
@@ -141,12 +144,23 @@ class StorageConfig:
             return f"gcs://{self.gcs_bucket}/{self.gcs_prefix}/{self.saved_runs_dir}"
         return str(self.base_path / self.saved_runs_dir)
 
+    def get_historical_wind_store_path(self) -> str:
+        """Get full path to historical wind Zarr store"""
+        if self.storage_backend == 'local':
+            return str(self.base_path / self.historical_wind_store)
+        elif self.storage_backend == 's3':
+            return f"s3://{self.s3_bucket}/{self.s3_prefix}/{self.historical_wind_store}"
+        elif self.storage_backend == 'gcs':
+            return f"gcs://{self.gcs_bucket}/{self.gcs_prefix}/{self.historical_wind_store}"
+        return str(self.base_path / self.historical_wind_store)
+
     def ensure_directories(self):
         """Create necessary directories for local storage"""
         if self.storage_backend == 'local':
             (self.base_path / 'forecasts' / 'wind').mkdir(parents=True, exist_ok=True)
             (self.base_path / 'forecasts' / 'waves').mkdir(parents=True, exist_ok=True)
             (self.base_path / 'forecasts' / 'currents').mkdir(parents=True, exist_ok=True)
+            (self.base_path / 'historical' / 'wind').mkdir(parents=True, exist_ok=True)
             (self.base_path / self.saved_runs_dir).mkdir(parents=True, exist_ok=True)
             (self.base_path / self.bathymetry_dir).mkdir(parents=True, exist_ok=True)
             self.metadata_db_path.parent.mkdir(parents=True, exist_ok=True)
