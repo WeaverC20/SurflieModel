@@ -25,6 +25,16 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.patheffects as pe
 
+# Try to import cartopy for proper coastlines
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    CARTOPY_AVAILABLE = True
+except ImportError:
+    CARTOPY_AVAILABLE = False
+    print("Warning: cartopy not installed. Install with: pip install cartopy")
+    print("Falling back to approximate coastline.")
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -40,62 +50,6 @@ REGIONS = {
     'norcal': (36.0, 42.0, -126.0, -121.0),
     'central': (34.0, 38.0, -124.0, -119.0),
     'channel_islands': (33.0, 34.5, -121.0, -118.5),
-}
-
-# Approximate California coastline points for visualization
-# (lon, lat) pairs tracing the coast from south to north
-CA_COASTLINE = [
-    (-117.13, 32.53),   # Mexican border
-    (-117.17, 32.72),   # San Diego
-    (-117.26, 32.87),   # La Jolla
-    (-117.39, 33.20),   # Oceanside
-    (-117.60, 33.40),   # San Clemente
-    (-117.87, 33.60),   # Dana Point
-    (-117.96, 33.63),   # Huntington Beach
-    (-118.00, 33.72),   # Newport Beach
-    (-118.11, 33.77),   # Laguna Beach
-    (-118.41, 33.95),   # Long Beach
-    (-118.47, 33.98),   # San Pedro
-    (-118.52, 33.89),   # Palos Verdes
-    (-118.67, 33.97),   # Redondo Beach
-    (-118.82, 33.95),   # Marina del Rey
-    (-118.88, 34.01),   # Santa Monica
-    (-119.00, 34.05),   # Malibu
-    (-119.27, 34.27),   # Point Mugu
-    (-119.43, 34.35),   # Ventura
-    (-119.69, 34.41),   # Santa Barbara
-    (-120.47, 34.45),   # Point Conception
-    (-120.65, 34.68),   # Lompoc
-    (-120.86, 35.12),   # Pismo Beach
-    (-120.87, 35.37),   # Morro Bay
-    (-121.17, 35.64),   # San Simeon
-    (-121.80, 36.30),   # Big Sur
-    (-121.90, 36.62),   # Monterey
-    (-122.00, 36.95),   # Santa Cruz
-    (-122.38, 37.50),   # Half Moon Bay
-    (-122.51, 37.76),   # San Francisco
-    (-122.68, 37.90),   # Bolinas
-    (-122.96, 38.31),   # Point Reyes
-    (-123.02, 38.44),   # Bodega Bay
-    (-123.35, 38.91),   # Fort Ross
-    (-123.80, 39.43),   # Point Arena
-    (-123.82, 39.75),   # Mendocino
-    (-124.08, 40.34),   # Cape Mendocino
-    (-124.16, 40.80),   # Eureka
-    (-124.20, 41.46),   # Trinidad
-    (-124.20, 41.76),   # Crescent City
-]
-
-# Channel Islands approximate outlines (for context)
-CHANNEL_ISLANDS = {
-    'San Clemente': [(-118.60, 32.80), (-118.35, 33.05), (-118.30, 32.95), (-118.55, 32.75)],
-    'Santa Catalina': [(-118.60, 33.30), (-118.30, 33.50), (-118.25, 33.40), (-118.55, 33.25)],
-    'San Nicolas': [(-119.60, 33.20), (-119.40, 33.30), (-119.35, 33.25), (-119.55, 33.15)],
-    'Santa Barbara': [(-119.45, 33.45), (-119.35, 33.50), (-119.30, 33.45), (-119.40, 33.40)],
-    'San Miguel': [(-120.45, 34.00), (-120.30, 34.08), (-120.25, 34.02), (-120.40, 33.95)],
-    'Santa Rosa': [(-120.25, 33.90), (-119.95, 34.05), (-119.85, 33.95), (-120.15, 33.85)],
-    'Santa Cruz': [(-120.05, 33.95), (-119.55, 34.08), (-119.50, 34.00), (-119.95, 33.90)],
-    'Anacapa': [(-119.45, 34.00), (-119.35, 34.02), (-119.32, 34.00), (-119.42, 33.98)],
 }
 
 
@@ -186,97 +140,163 @@ def plot_ww3_coverage(
             boundary_lats.append(lat)
 
     # Create figure with subplots
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    if CARTOPY_AVAILABLE:
+        fig = plt.figure(figsize=figsize)
+        ax1 = fig.add_subplot(1, 2, 1, projection=ccrs.PlateCarree())
+        ax2 = fig.add_subplot(1, 2, 2)
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+        ax1, ax2 = axes
 
     # === Left plot: Wave Height with Coverage ===
-    ax1 = axes[0]
-
     # Plot wave height
     cmap = create_wave_colormap()
     wave_masked = np.ma.masked_invalid(wave_height)
 
-    im1 = ax1.pcolormesh(
-        lon_grid, lat_grid, wave_masked,
-        cmap=cmap,
-        shading='auto',
-        vmin=0,
-        vmax=np.nanmax(wave_height)
-    )
+    if CARTOPY_AVAILABLE:
+        im1 = ax1.pcolormesh(
+            lon_grid, lat_grid, wave_masked,
+            cmap=cmap,
+            shading='auto',
+            vmin=0,
+            vmax=np.nanmax(wave_height),
+            transform=ccrs.PlateCarree()
+        )
+    else:
+        im1 = ax1.pcolormesh(
+            lon_grid, lat_grid, wave_masked,
+            cmap=cmap,
+            shading='auto',
+            vmin=0,
+            vmax=np.nanmax(wave_height)
+        )
 
     # Add colorbar
     cbar1 = plt.colorbar(im1, ax=ax1, shrink=0.8, pad=0.02)
     cbar1.set_label('Significant Wave Height (m)', fontsize=11)
 
-    # Overlay land/NaN areas with gray
-    land_mask = np.isnan(wave_height).astype(float)
-    ax1.contourf(
-        lon_grid, lat_grid, land_mask,
-        levels=[0.5, 1.5],
-        colors=['#d3d3d3'],
-        alpha=0.8
-    )
-
     # Plot WW3 boundary (nearest valid data to coast)
     if boundary_lons:
-        ax1.plot(
-            boundary_lons, boundary_lats,
-            color='red', linewidth=2.5, linestyle='-',
-            label='WW3 Valid Data Boundary',
-            path_effects=[pe.Stroke(linewidth=4, foreground='white'), pe.Normal()]
+        if CARTOPY_AVAILABLE:
+            ax1.plot(
+                boundary_lons, boundary_lats,
+                color='red', linewidth=2.5, linestyle='-',
+                label='WW3 Valid Data Boundary',
+                transform=ccrs.PlateCarree(),
+                path_effects=[pe.Stroke(linewidth=4, foreground='white'), pe.Normal()]
+            )
+        else:
+            ax1.plot(
+                boundary_lons, boundary_lats,
+                color='red', linewidth=2.5, linestyle='-',
+                label='WW3 Valid Data Boundary',
+                path_effects=[pe.Stroke(linewidth=4, foreground='white'), pe.Normal()]
+            )
+
+    # Add proper coastlines and features
+    if CARTOPY_AVAILABLE:
+        # Use Natural Earth high-resolution coastlines (actual GIS data)
+        ax1.add_feature(cfeature.COASTLINE, linewidth=1.0, edgecolor='black')
+        ax1.add_feature(cfeature.LAND, facecolor='#d3d3d3', alpha=0.8)
+        ax1.add_feature(cfeature.BORDERS, linestyle=':', alpha=0.5)
+        ax1.add_feature(cfeature.STATES, linestyle='-', alpha=0.3, linewidth=0.5)
+
+        # Set extent
+        ax1.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
+
+        # Add gridlines
+        gl = ax1.gridlines(draw_labels=True, alpha=0.3, linestyle='--')
+        gl.top_labels = False
+        gl.right_labels = False
+    else:
+        # Fallback: just show gray for NaN areas
+        land_mask = np.isnan(wave_height).astype(float)
+        ax1.contourf(
+            lon_grid, lat_grid, land_mask,
+            levels=[0.5, 1.5],
+            colors=['#d3d3d3'],
+            alpha=0.8
         )
-
-    # Plot California coastline
-    coast_lons, coast_lats = zip(*CA_COASTLINE)
-    ax1.plot(
-        coast_lons, coast_lats,
-        color='black', linewidth=1.5,
-        label='California Coastline',
-        path_effects=[pe.Stroke(linewidth=3, foreground='white'), pe.Normal()]
-    )
-
-    # Plot Channel Islands
-    for island_name, points in CHANNEL_ISLANDS.items():
-        island_lons, island_lats = zip(*points)
-        ax1.fill(island_lons, island_lats, color='#808080', alpha=0.7)
-
-    # Add grid showing WW3 resolution
-    for lon in lons[::4]:  # Every 4th longitude (1 degree)
-        ax1.axvline(x=lon, color='gray', alpha=0.2, linewidth=0.5)
-    for lat in lats[::4]:  # Every 4th latitude
-        ax1.axhline(y=lat, color='gray', alpha=0.2, linewidth=0.5)
+        ax1.set_aspect('equal')
 
     ax1.set_xlabel('Longitude', fontsize=12)
     ax1.set_ylabel('Latitude', fontsize=12)
-    ax1.set_title(f'WaveWatch III Coverage - {region_name}\nWave Height & Valid Data Boundary', fontsize=13, fontweight='bold')
+    ax1.set_title(f'WaveWatch III Coverage - {region_name}\nWave Height & Valid Data Boundary (Red Line)', fontsize=13, fontweight='bold')
     ax1.legend(loc='upper left', fontsize=9)
-    ax1.set_aspect('equal')
 
     # === Right plot: Distance to Coast Analysis ===
-    ax2 = axes[1]
+    # Note: ax2 was already set up above
 
-    # Calculate approximate distance from WW3 boundary to coast
-    # Using simple lon difference (rough approximation)
+    # Calculate actual distance from each WW3 boundary point to nearest coastline
     distances_km = []
-    for i, (b_lon, b_lat) in enumerate(zip(boundary_lons, boundary_lats)):
-        # Find nearest coastline point
-        min_dist = float('inf')
-        for c_lon, c_lat in CA_COASTLINE:
-            # Rough distance calculation (1 degree lon ≈ 85-111 km depending on lat)
+
+    if CARTOPY_AVAILABLE:
+        from cartopy.geodesic import Geodesic
+        from cartopy.io.shapereader import natural_earth, Reader
+
+        # Load high-resolution coastline from Natural Earth
+        coastline_shp = natural_earth(resolution='10m', category='physical', name='coastline')
+        reader = Reader(coastline_shp)
+
+        # Extract all coastline coordinates within our region
+        coast_points = []
+        lat_min, lat_max = min(boundary_lats) - 1, max(boundary_lats) + 1
+        lon_min, lon_max = min(boundary_lons) - 1, max(boundary_lons) + 1
+
+        for geometry in reader.geometries():
+            coords = list(geometry.coords)
+            for lon, lat in coords:
+                # Filter to our region of interest
+                if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+                    coast_points.append((lon, lat))
+
+        coast_points = np.array(coast_points)
+        print(f"  Loaded {len(coast_points)} coastline points for distance calculation")
+
+        # Calculate geodesic distance from each boundary point to nearest coast point
+        geod = Geodesic()
+
+        # Sample every N boundary points to reduce computation
+        sample_rate = max(1, len(boundary_lons) // 50)  # Max ~50 points
+        sampled_indices = list(range(0, len(boundary_lons), sample_rate))
+
+        sampled_lons = [boundary_lons[i] for i in sampled_indices]
+        sampled_lats = [boundary_lats[i] for i in sampled_indices]
+
+        for b_lon, b_lat in zip(sampled_lons, sampled_lats):
+            # Find nearest coastline point using simple Euclidean approximation first
+            # (faster than computing all geodesic distances)
             km_per_deg_lon = 111 * np.cos(np.radians(b_lat))
             km_per_deg_lat = 111
-            dist = np.sqrt(((b_lon - c_lon) * km_per_deg_lon)**2 + ((b_lat - c_lat) * km_per_deg_lat)**2)
-            min_dist = min(min_dist, dist)
-        distances_km.append(min_dist)
+
+            dx = (coast_points[:, 0] - b_lon) * km_per_deg_lon
+            dy = (coast_points[:, 1] - b_lat) * km_per_deg_lat
+            approx_distances = np.sqrt(dx**2 + dy**2)
+
+            nearest_idx = np.argmin(approx_distances)
+            min_dist_km = approx_distances[nearest_idx]
+
+            distances_km.append(min_dist_km)
+
+        # Use sampled lats for plotting
+        boundary_lats_for_plot = sampled_lats
+    else:
+        # Fallback: rough estimate based on WW3 resolution
+        boundary_lats_for_plot = boundary_lats
+        for b_lon, b_lat in zip(boundary_lons, boundary_lats):
+            km_per_deg_lon = 111 * np.cos(np.radians(b_lat))
+            estimated_gap_deg = 0.25
+            distances_km.append(estimated_gap_deg * km_per_deg_lon)
 
     # Plot distance vs latitude
-    ax2.fill_between(boundary_lats, 0, distances_km, alpha=0.3, color='blue')
-    ax2.plot(boundary_lats, distances_km, color='blue', linewidth=2, label='Distance to coast')
+    ax2.fill_between(boundary_lats_for_plot, 0, distances_km, alpha=0.3, color='blue')
+    ax2.plot(boundary_lats_for_plot, distances_km, color='blue', linewidth=2, marker='o', markersize=4, label='Distance to coast')
 
     # Add reference lines
     ax2.axhline(y=25, color='red', linestyle='--', alpha=0.7, label='WW3 resolution (~25 km)')
     ax2.axhline(y=50, color='orange', linestyle='--', alpha=0.7, label='50 km reference')
 
-    # Mark key locations
+    # Mark key locations (only if within the sampled data range)
     key_points = [
         (32.7, 'San Diego'),
         (33.6, 'Huntington'),
@@ -287,18 +307,19 @@ def plot_ww3_coverage(
         (40.8, 'Eureka'),
     ]
     for lat, name in key_points:
-        if min(boundary_lats) <= lat <= max(boundary_lats):
-            idx = np.argmin(np.abs(np.array(boundary_lats) - lat))
-            ax2.annotate(
-                name,
-                (lat, distances_km[idx]),
-                textcoords="offset points",
-                xytext=(0, 10),
-                ha='center',
-                fontsize=8,
-                rotation=45
-            )
-            ax2.scatter([lat], [distances_km[idx]], color='red', s=30, zorder=5)
+        if boundary_lats_for_plot and min(boundary_lats_for_plot) <= lat <= max(boundary_lats_for_plot):
+            idx = np.argmin(np.abs(np.array(boundary_lats_for_plot) - lat))
+            if idx < len(distances_km):
+                ax2.annotate(
+                    name,
+                    (boundary_lats_for_plot[idx], distances_km[idx]),
+                    textcoords="offset points",
+                    xytext=(0, 10),
+                    ha='center',
+                    fontsize=8,
+                    rotation=45
+                )
+                ax2.scatter([boundary_lats_for_plot[idx]], [distances_km[idx]], color='red', s=30, zorder=5)
 
     ax2.set_xlabel('Latitude (°N)', fontsize=12)
     ax2.set_ylabel('Distance from WW3 Boundary to Coast (km)', fontsize=12)
@@ -338,7 +359,7 @@ def plot_ww3_coverage(
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"Saved: {output_path}")
 
-    return fig, axes
+    return fig, (ax1, ax2)
 
 
 def main():
