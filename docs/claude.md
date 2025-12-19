@@ -424,6 +424,186 @@ python evaluate.py --model path/to/model --test-data path/to/test.csv
 - Use environment variables for all secrets
 - Validate all user input in API
 
+## Surf Zone Forecasting Architecture (SWAN Integration)
+
+### Overview
+
+The ultimate goal is to predict **actual surf conditions** at specific spots by propagating offshore wave energy through multiple model domains with increasing resolution, ultimately outputting **swell component breakdowns** (e.g., "1.9ft at 15s @ 250°, 0.7ft at 9s @ 180°").
+
+### Multi-Resolution Wave Propagation Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Wave Watch 3 (WW3) - NOAA Global Wave Model                                │
+│  Resolution: ~0.25° (~25km)                                                 │
+│  Domain: Global/Pacific basin                                               │
+│  Output: Wave spectra at domain edges → Boundary conditions for SWAN        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  SWAN Model - Regional Wave Propagation                                     │
+│  Resolution: ~100-500m (variable)                                           │
+│  Domain: ~50-200km offshore to ~1-2km from shore                            │
+│  Purpose: Propagate wave spectra accounting for:                            │
+│    - Refraction (bathymetry-induced bending)                                │
+│    - Shoaling (wave height changes with depth)                              │
+│    - Wind-wave generation                                                   │
+│    - White-capping dissipation                                              │
+│  Output: Nearshore wave spectra with swell component partitioning           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Surf Zone Physics Model - Nearshore Breaking                               │
+│  Resolution: 1-50m (using USACE LiDAR bathymetry)                           │
+│  Domain: ~1km from shore to beach                                           │
+│  Purpose: Model actual wave breaking physics:                               │
+│    - Breaking wave height (Hb)                                              │
+│    - Surf zone width                                                        │
+│    - Wave setup/setdown                                                     │
+│    - Longshore currents                                                     │
+│  Output: Surfable wave height, quality metrics, swell breakdown             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Swell Component Output Format
+
+The final output should decompose total wave energy into discrete swell trains:
+
+```python
+{
+    "spot_id": "huntington-pier",
+    "timestamp": "2024-12-19T12:00:00Z",
+    "swell_components": [
+        {"height_ft": 1.9, "period_s": 15, "direction_deg": 250, "energy_pct": 65},
+        {"height_ft": 0.7, "period_s": 9, "direction_deg": 180, "energy_pct": 25},
+        {"height_ft": 0.3, "period_s": 6, "direction_deg": 220, "energy_pct": 10}
+    ],
+    "combined_height_ft": 2.1,
+    "dominant_period_s": 15,
+    "dominant_direction_deg": 250,
+    "surf_quality_rating": 7.5,
+    "breaking_wave_height_ft": 3.2  # Actual breaking height (differs from open ocean)
+}
+```
+
+### Bathymetry Data Requirements
+
+Three resolution tiers are needed:
+
+| Tier | Domain | Resolution | Source | Purpose |
+|------|--------|------------|--------|---------|
+| **Offshore** | WW3 boundary → 50km offshore | ~500m-1km | GEBCO/ETOPO/NCEI CRM | SWAN outer domain |
+| **Mid-range** | 50km → 2km offshore | ~100-200m | NCEI Coastal Relief Model | SWAN refinement zone |
+| **Nearshore** | 2km → beach | 1-50m | USACE NCMP LiDAR (existing) | Surf zone physics |
+
+### Data Storage Structure (Planned)
+
+```
+data/
+├── raw/
+│   └── bathymetry/
+│       ├── USACE_CA_DEM_2009_9488/     # ✅ Existing: 1m nearshore LiDAR
+│       ├── ncei_coastal_relief/         # TODO: 3 arc-second (~90m) CRM
+│       └── gebco_2024/                  # TODO: 15 arc-second (~450m) global
+├── processed/
+│   └── bathymetry/
+│       ├── swan_grids/                  # Rectified SWAN-format bathymetry
+│       │   ├── socal_outer.grd          # ~500m resolution outer domain
+│       │   └── socal_inner.grd          # ~100m resolution inner domain
+│       └── surf_zone/                   # High-res nearshore grids
+│           ├── huntington.grd
+│           └── malibu.grd
+└── zarr/
+    └── static/
+        └── bathymetry/
+            └── multi_resolution.zarr    # Combined multi-res bathymetry store
+```
+
+### Multi-Resolution Mesh Visualization Tool
+
+A key development tool for validating coverage and identifying gaps:
+
+```python
+# Concept: Visualize all three resolution tiers overlaid
+class BathymetryMeshVisualizer:
+    """
+    Visualize multi-resolution bathymetry coverage with:
+    - Color-coded resolution zones (offshore/mid/nearshore)
+    - Grid cell boundaries showing mesh fidelity
+    - Gap detection highlighting missing or low-quality areas
+    - Interactive zoom to specific coordinates
+    - Export snapshots for documentation
+    """
+
+    def plot_coverage_overview(self, region: str) -> Figure:
+        """Show all resolution tiers with coverage boundaries."""
+        pass
+
+    def plot_mesh_fidelity(self, bounds: tuple) -> Figure:
+        """Show actual grid cells/triangles in specified region."""
+        pass
+
+    def identify_gaps(self) -> List[GapRegion]:
+        """Find areas with missing or insufficient resolution data."""
+        pass
+
+    def snapshot_for_coordinates(self, lat: float, lon: float, radius_km: float) -> Figure:
+        """Generate zoomed visualization around specific point."""
+        pass
+```
+
+### SWAN Model Integration Notes
+
+**SWAN** (Simulating WAves Nearshore) is a third-generation spectral wave model:
+- **Website**: https://swanmodel.sourceforge.io/
+- **License**: GPL (free for research and commercial use)
+- **Format**: Requires bathymetry in specific grid formats (.grd, .bot)
+- **Boundary Conditions**: Can ingest WW3 spectral output
+- **Output**: Full 2D wave spectra that can be partitioned into swell components
+
+**Key SWAN Capabilities We'll Use**:
+1. Wave refraction over complex bathymetry
+2. Spectral partitioning (separating wind sea from swell)
+3. Nested grids (coarse outer → fine inner)
+4. Directional spreading and frequency resolution
+
+### Input Data Integration
+
+The surf zone model will combine:
+- **SWAN output**: Nearshore wave spectra (partitioned swells)
+- **Buoy data**: Real-time validation and data assimilation
+- **Wind data**: Local wind effects on wave quality
+- **Tide data**: Water level affects breaking location
+- **Bathymetry**: Local beach/reef shape determines wave quality
+
+### Implementation Phases
+
+**Phase 1: Bathymetry Pipeline** (Current Focus)
+- [ ] Download NCEI Coastal Relief Model for California
+- [ ] Create bathymetry rectification/interpolation tools
+- [ ] Build multi-resolution mesh visualization
+- [ ] Define SWAN grid domains for target spots
+
+**Phase 2: SWAN Model Setup**
+- [ ] Install and configure SWAN model
+- [ ] Create WW3 → SWAN boundary condition converter
+- [ ] Set up nested grid configurations
+- [ ] Validate against buoy observations
+
+**Phase 3: Surf Zone Physics**
+- [ ] Implement breaking wave height calculations
+- [ ] Add wave quality metrics (shape, power)
+- [ ] Integrate tide and wind effects
+- [ ] ML model for surf quality prediction
+
+**Phase 4: Production Integration**
+- [ ] Automated SWAN runs in worker pipeline
+- [ ] Swell component API endpoints
+- [ ] Frontend visualization of swell breakdown
+- [ ] Accuracy tracking vs actual conditions
+
 ## Roadmap & Future Ideas
 
 These are ideas to consider, not requirements:
@@ -461,6 +641,14 @@ Keep this updated as you make major decisions:
 - Wave fetcher now falls back to nearest valid ocean point when requested location is over land
 - Wind and wave data now return parsed values (height, period, direction, speed, etc.)
 - All GRIB parsing dependencies use pre-built binaries (no system library requirements)
+
+**2024-12-19**: SWAN model integration architecture defined
+- Designed multi-resolution wave propagation pipeline: WW3 → SWAN → Surf Zone
+- Three-tier bathymetry strategy: offshore (~500m), mid-range (~100m), nearshore (1-50m existing LiDAR)
+- Swell component decomposition output format defined (height/period/direction per swell train)
+- NCEI Coastal Relief Model identified as primary source for SWAN domain bathymetry
+- Multi-resolution mesh visualization tool concept documented for gap detection
+- Implementation phased: Bathymetry Pipeline → SWAN Setup → Surf Zone Physics → Production
 
 (Add future decisions here as they're made)
 
