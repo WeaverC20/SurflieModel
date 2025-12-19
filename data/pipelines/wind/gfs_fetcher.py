@@ -579,6 +579,7 @@ class GFSWindFetcher:
         min_lon: float = -125.0,
         max_lon: float = -117.0,
         store_path: Optional[str] = None,
+        append: bool = False,
     ) -> Optional[str]:
         """Fetch and store a range of historical GFS data for validation
 
@@ -591,6 +592,7 @@ class GFSWindFetcher:
             resolution_hours: Time resolution (3 or 6 hours)
             min_lat, max_lat, min_lon, max_lon: Region bounds
             store_path: Optional custom path for Zarr store
+            append: If True, append to existing dataset instead of overwriting
 
         Returns:
             Path to Zarr store or None if failed
@@ -668,7 +670,7 @@ class GFSWindFetcher:
 
         # Store to Zarr
         logger.info(f"Storing {len(all_data)} historical wind snapshots")
-        self._store_historical_to_zarr(all_data, store_path)
+        self._store_historical_to_zarr(all_data, store_path, append=append)
 
         # Record in metadata database
         db = MetadataDB()
@@ -741,14 +743,16 @@ class GFSWindFetcher:
             logger.warning(f"Failed to fetch f{forecast_hour:03d}: {e}")
             return None
 
-    def _store_historical_to_zarr(self, data_list: List[Dict], store_path: str):
+    def _store_historical_to_zarr(self, data_list: List[Dict], store_path: str, append: bool = False):
         """Store historical wind data to Zarr format
 
         Args:
             data_list: List of wind data dictionaries
             store_path: Path to Zarr store
+            append: If True, append to existing dataset
         """
         import pandas as pd
+        from pathlib import Path
 
         # Sort by time
         data_list.sort(key=lambda x: x['time'])
@@ -791,14 +795,38 @@ class GFSWindFetcher:
         ds['wind_speed'].attrs = {'units': 'm/s', 'long_name': 'Wind speed at 10m'}
         ds['wind_direction'].attrs = {'units': 'degrees', 'long_name': 'Wind direction (meteorological)'}
 
-        # Chunking strategy
+        # Chunking strategy via encoding (works without dask)
         time_chunk = min(24, len(times))
-        chunks = {
-            'time': time_chunk,
-            'latitude': len(lats),
-            'longitude': len(lons),
+        encoding = {
+            'u10': {'chunks': (time_chunk, len(lats), len(lons))},
+            'v10': {'chunks': (time_chunk, len(lats), len(lons))},
+            'wind_speed': {'chunks': (time_chunk, len(lats), len(lons))},
+            'wind_direction': {'chunks': (time_chunk, len(lats), len(lons))},
         }
 
         # Write to Zarr
-        ds.to_zarr(store_path, mode='w', consolidated=True, chunks=chunks)
-        logger.info(f"Wrote historical data to {store_path}: {len(times)} time steps")
+        store_exists = Path(store_path).exists()
+
+        if append and store_exists:
+            # Load existing dataset and merge
+            existing_ds = xr.open_zarr(store_path)
+            existing_times = set(existing_ds.time.values)
+            new_times = set(ds.time.values)
+
+            # Filter out times that already exist
+            times_to_add = new_times - existing_times
+            if not times_to_add:
+                logger.info("All requested times already exist in dataset, nothing to append")
+                existing_ds.close()
+                return
+
+            # Filter new data to only include new times
+            ds = ds.sel(time=sorted(list(times_to_add)))
+
+            # Append along time dimension
+            ds.to_zarr(store_path, mode='a', append_dim='time', consolidated=True)
+            logger.info(f"Appended {len(times_to_add)} new time steps to {store_path}")
+            existing_ds.close()
+        else:
+            ds.to_zarr(store_path, mode='w', consolidated=True, encoding=encoding)
+            logger.info(f"Wrote historical data to {store_path}: {len(times)} time steps")
