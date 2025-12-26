@@ -21,7 +21,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 import numpy as np
 
@@ -389,9 +389,19 @@ class SwanRunner:
         print(f"\nWritten TPAR file: {tpar_path}")
         return tpar_path
 
-    def prepare_swan_input(self, tpar_path: Path) -> Path:
+    def prepare_swan_input(
+        self,
+        tpar_path: Path,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> Path:
         """
         Prepare SWAN input file for this run.
+
+        Args:
+            tpar_path: Path to TPAR boundary condition file
+            start_time: Start time for nonstationary computation
+            end_time: End time for nonstationary computation
         """
         # Copy grid file to run directory
         grd_src = Path(self.config["file_grd"])
@@ -403,11 +413,22 @@ class SwanRunner:
         with open(template_path) as f:
             swan_input = f.read()
 
-        # Update boundary condition line
-        swan_input = swan_input.replace(
-            "BOUNDSPEC SIDE W CCW CONSTANT PAR 2.0 12.0 270.0 25.0",
-            f"BOUNDSPEC SIDE W CCW VARIABLE FILE '{tpar_path.name}'"
-        )
+        # Update boundary condition - use constant parametric boundary (simplified)
+        # Read first line of TPAR file to get initial conditions
+        with open(tpar_path) as f:
+            lines = f.readlines()
+        # Skip header, get first data line
+        for line in lines:
+            if not line.startswith("TPAR") and not line.strip().startswith("$"):
+                parts = line.split()
+                if len(parts) >= 4:
+                    hs, tp, dir_val = float(parts[1]), float(parts[2]), float(parts[3])
+                    break
+        else:
+            hs, tp, dir_val = 2.0, 12.0, 270.0  # fallback defaults
+
+        tpar_boundary = f"BOUNDSPEC SIDE W CCW CONSTANT PAR {hs:.2f} {tp:.1f} {dir_val:.1f} 25.0"
+        swan_input = swan_input.replace("{{BOUNDSPEC_COMMANDS}}", tpar_boundary)
 
         # Update grid file path
         swan_input = swan_input.replace(
@@ -415,11 +436,21 @@ class SwanRunner:
             f"READINP BOTTOM 1.0 '{grd_dst.name}' 1 0 FREE"
         )
 
-        # Update project name
+        # Update project name (SWAN limits: name=16 chars, run_id=4 chars)
+        short_name = self.domain_name[:16] if len(self.domain_name) > 16 else self.domain_name
+        short_run_id = self.run_id[-4:]  # Use last 4 chars for uniqueness
         swan_input = swan_input.replace(
-            f"PROJECT '{self.domain_name}' 'run01'",
-            f"PROJECT '{self.domain_name}' '{self.run_id}'"
+            f"PROJECT '{short_name}' 'run01'",
+            f"PROJECT '{short_name}' '{short_run_id}'"
         )
+
+        # Update time placeholders for nonstationary run
+        # SWAN time format: YYYYMMDD.HHMMSS
+        start_str = start_time.strftime("%Y%m%d.%H%M%S")
+        end_str = end_time.strftime("%Y%m%d.%H%M%S")
+
+        swan_input = swan_input.replace("{{START_TIME}}", start_str)
+        swan_input = swan_input.replace("{{END_TIME}}", end_str)
 
         # Write to run directory
         swan_input_path = self.run_dir / "swan_run.swn"
@@ -427,28 +458,235 @@ class SwanRunner:
             f.write(swan_input)
 
         print(f"Written SWAN input: {swan_input_path}")
+        print(f"  Nonstationary: {start_time} to {end_time}")
         return swan_input_path
+
+    def generate_spectral_boundaries(
+        self,
+        ww3_ds: xr.Dataset,
+        boundary_points: List[Dict],
+    ) -> Tuple[List[Path], str]:
+        """
+        Generate spectral boundary condition files from WW3 data.
+
+        Args:
+            ww3_ds: xarray Dataset with WW3 data
+            boundary_points: List of boundary points
+
+        Returns:
+            Tuple of (list of .sp2 file paths, BOUNDSPEC commands string)
+        """
+        from data.pipelines.swan.spectral_boundary import SpectralBoundaryGenerator
+
+        print("\nGenerating spectral boundary conditions...")
+
+        generator = SpectralBoundaryGenerator(self.config)
+
+        # Generate spectral files
+        sp2_files = generator.generate_boundary_spectra(
+            ww3_ds, boundary_points, self.run_dir
+        )
+
+        # Generate BOUNDSPEC commands for SWAN input
+        boundspec_commands = generator.generate_boundspec_commands(
+            boundary_points, sp2_files
+        )
+
+        print(f"  Generated {len(sp2_files)} spectral boundary files")
+        return sp2_files, boundspec_commands
+
+    def prepare_swan_input_spectral(
+        self,
+        boundspec_commands: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> Path:
+        """
+        Prepare SWAN input file with spectral boundary conditions.
+
+        Args:
+            boundspec_commands: BOUNDSPEC commands string
+            start_time: Start time for nonstationary computation
+            end_time: End time for nonstationary computation
+        """
+        # Copy grid file to run directory
+        grd_src = Path(self.config["file_grd"])
+        grd_dst = self.run_dir / grd_src.name
+        shutil.copy(grd_src, grd_dst)
+
+        # Read template and customize
+        template_path = Path(self.config["file_swan_input"])
+        with open(template_path) as f:
+            swan_input = f.read()
+
+        # Update grid file path
+        swan_input = swan_input.replace(
+            f"READINP BOTTOM 1.0 '{grd_src.name}' 1 0 FREE",
+            f"READINP BOTTOM 1.0 '{grd_dst.name}' 1 0 FREE"
+        )
+
+        # Update project name (SWAN limits: name=16 chars, run_id=4 chars)
+        short_name = self.domain_name[:16] if len(self.domain_name) > 16 else self.domain_name
+        short_run_id = self.run_id[-4:]  # Use last 4 chars for uniqueness
+        swan_input = swan_input.replace(
+            f"PROJECT '{short_name}' 'run01'",
+            f"PROJECT '{short_name}' '{short_run_id}'"
+        )
+
+        # Replace boundary condition placeholder with spectral commands
+        swan_input = swan_input.replace("{{BOUNDSPEC_COMMANDS}}", boundspec_commands)
+
+        # Update time placeholders for nonstationary run
+        start_str = start_time.strftime("%Y%m%d.%H%M%S")
+        end_str = end_time.strftime("%Y%m%d.%H%M%S")
+
+        swan_input = swan_input.replace("{{START_TIME}}", start_str)
+        swan_input = swan_input.replace("{{END_TIME}}", end_str)
+
+        # Write to run directory
+        swan_input_path = self.run_dir / "swan_run.swn"
+        with open(swan_input_path, "w") as f:
+            f.write(swan_input)
+
+        print(f"Written SWAN input (spectral): {swan_input_path}")
+        print(f"  Nonstationary: {start_time} to {end_time}")
+        return swan_input_path
+
+    def parse_swan_output(self) -> Optional[Dict]:
+        """
+        Parse SWAN output files and return results as dictionary.
+
+        Returns dict with:
+            - combined: {hsig, tpeak, dir} grids
+            - windsea: {hs, tp, dir} grids
+            - swell1-6: {hs, tp, dir} grids for each swell partition
+            - metadata: grid info
+        """
+        print("\nParsing SWAN output...")
+
+        output_files = {
+            "hsig": self.run_dir / "hsig.mat",
+            "tpeak": self.run_dir / "tpeak.mat",
+            "dir": self.run_dir / "dir.mat",
+            "depth": self.run_dir / "depth.mat",
+            # Wind sea
+            "hs_windsea": self.run_dir / "hs_windsea.mat",
+            "tp_windsea": self.run_dir / "tp_windsea.mat",
+            "dir_windsea": self.run_dir / "dir_windsea.mat",
+        }
+
+        # Add 6 swell partitions
+        for i in range(1, 7):
+            output_files[f"hs_swell{i}"] = self.run_dir / f"hs_swell{i}.mat"
+            output_files[f"tp_swell{i}"] = self.run_dir / f"tp_swell{i}.mat"
+            output_files[f"dir_swell{i}"] = self.run_dir / f"dir_swell{i}.mat"
+
+        # Check which files exist
+        existing = {k: v for k, v in output_files.items() if v.exists()}
+        if not existing:
+            print("  No SWAN output files found")
+            return None
+
+        print(f"  Found {len(existing)} output files")
+
+        # Parse SWAN .mat format (ASCII)
+        def read_swan_mat(path: Path) -> Optional[np.ndarray]:
+            """Read SWAN block output in ASCII format."""
+            try:
+                # SWAN outputs as space-separated values
+                data = np.loadtxt(path)
+                return data
+            except Exception as e:
+                print(f"  Error reading {path.name}: {e}")
+                return None
+
+        results = {
+            "combined": {},
+            "windsea": {},
+            "metadata": {
+                "domain": self.domain_name,
+                "run_id": self.run_id,
+                "grid_nx": self.config.get("n_lon", 0),
+                "grid_ny": self.config.get("n_lat", 0),
+                "n_swell_partitions": 6,
+            }
+        }
+
+        # Initialize 6 swell partitions
+        for i in range(1, 7):
+            results[f"swell{i}"] = {}
+
+        # Read combined outputs
+        for var in ["hsig", "tpeak", "dir", "depth"]:
+            if var in existing:
+                data = read_swan_mat(existing[var])
+                if data is not None:
+                    results["combined"][var] = data.tolist()
+                    print(f"  {var}: shape {data.shape}")
+
+        # Read wind sea outputs
+        for var, suffix in [("hs", "hs_"), ("tp", "tp_"), ("dir", "dir_")]:
+            key = f"{suffix}windsea"
+            if key in existing:
+                data = read_swan_mat(existing[key])
+                if data is not None:
+                    results["windsea"][var] = data.tolist()
+
+        # Read 6 swell partition outputs
+        for i in range(1, 7):
+            for var, suffix in [("hs", "hs_"), ("tp", "tp_"), ("dir", "dir_")]:
+                key = f"{suffix}swell{i}"
+                if key in existing:
+                    data = read_swan_mat(existing[key])
+                    if data is not None:
+                        results[f"swell{i}"][var] = data.tolist()
+
+        return results
+
+    def save_swan_output(self, results: Dict) -> Path:
+        """Save parsed SWAN output to JSON for API access."""
+        output_path = self.run_dir / "swan_output.json"
+
+        # Add coordinate arrays from domain config
+        nc_path = Path(self.config["file_nc"])
+        ds = xr.open_dataset(nc_path)
+        results["lat"] = ds["lat"].values.tolist()
+        results["lon"] = ds["lon"].values.tolist()
+        ds.close()
+
+        with open(output_path, "w") as f:
+            json.dump(results, f)
+
+        print(f"Saved SWAN output: {output_path}")
+        return output_path
 
     def run_swan(self, swan_input_path: Path) -> bool:
         """
         Run SWAN model if installed.
-        """
-        # Check if SWAN is available
-        swan_cmd = shutil.which("swan") or shutil.which("swanrun")
 
-        if swan_cmd is None:
+        SWAN expects input in a file called INPUT in the working directory.
+        """
+        # Check if SWAN executable is available
+        swan_exe = shutil.which("swan.exe") or shutil.which("swan")
+
+        if swan_exe is None:
             print("\nSWAN executable not found in PATH.")
             print("To run SWAN manually:")
             print(f"  cd {self.run_dir}")
-            print(f"  swan -input {swan_input_path.name}")
+            print(f"  cp {swan_input_path.name} INPUT")
+            print("  swan.exe")
             return False
 
-        print(f"\nRunning SWAN: {swan_cmd}")
+        print(f"\nRunning SWAN: {swan_exe}")
         print(f"  Working directory: {self.run_dir}")
+
+        # SWAN reads from a file named INPUT in the current directory
+        input_file = self.run_dir / "INPUT"
+        shutil.copy(swan_input_path, input_file)
 
         try:
             result = subprocess.run(
-                [swan_cmd, "-input", swan_input_path.name],
+                [swan_exe],
                 cwd=self.run_dir,
                 capture_output=True,
                 text=True,
@@ -460,7 +698,12 @@ class SwanRunner:
                 return True
             else:
                 print(f"SWAN failed with code {result.returncode}")
-                print(f"STDERR: {result.stderr}")
+                if result.stderr:
+                    print(f"STDERR: {result.stderr}")
+                # Check error file for more details
+                errfile = self.run_dir / "Errfile"
+                if errfile.exists():
+                    print(f"Error details: {errfile.read_text()}")
                 return False
 
         except subprocess.TimeoutExpired:
@@ -580,8 +823,8 @@ Workflow:
     parser.add_argument(
         "--domain", "-d",
         type=str,
-        default="california_swan_2000m",
-        help="SWAN domain name (default: california_swan_2000m)",
+        default="california_swan_14000m",
+        help="SWAN domain name (default: california_swan_14000m)",
     )
     parser.add_argument(
         "--prepare-only", "-p",
@@ -609,6 +852,11 @@ Workflow:
         "--no-islands",
         action="store_true",
         help="Exclude island boundary points (Channel Islands)",
+    )
+    parser.add_argument(
+        "--parametric",
+        action="store_true",
+        help="Use parametric (TPAR) boundary conditions instead of spectral (SPEC)",
     )
 
     args = parser.parse_args()
@@ -673,25 +921,54 @@ Workflow:
     # Save boundary points for API access
     runner.save_boundary_points(boundary_points)
 
-    # Extract boundary conditions
-    boundary_data = runner.extract_boundary_conditions(ww3_ds, boundary_points)
+    # Parse start/end times from WW3 data
+    ww3_times = ww3_ds["time"].values
+    start_time = datetime.fromisoformat(str(ww3_times[0])[:19])
+    end_time = datetime.fromisoformat(str(ww3_times[-1])[:19])
 
-    # Get time range for metadata
-    times = list(boundary_data.keys())
-    time_range = (times[0], times[-1]) if times else (None, None)
+    # Generate boundary conditions (spectral by default, parametric with --parametric flag)
+    if args.parametric:
+        print("\nUsing PARAMETRIC boundary conditions (TPAR format)")
+        # Extract boundary conditions
+        boundary_data = runner.extract_boundary_conditions(ww3_ds, boundary_points)
 
-    ww3_ds.close()
+        # Get time range for metadata
+        times = list(boundary_data.keys())
+        time_range = (times[0], times[-1]) if times else (None, None)
 
-    # Write TPAR file
-    tpar_path = runner.write_tpar_file(boundary_data)
+        ww3_ds.close()
 
-    # Prepare SWAN input
-    swan_input_path = runner.prepare_swan_input(tpar_path)
+        # Write TPAR file
+        tpar_path = runner.write_tpar_file(boundary_data)
+
+        # Prepare SWAN input with time range
+        swan_input_path = runner.prepare_swan_input(tpar_path, start_time, end_time)
+    else:
+        print("\nUsing SPECTRAL boundary conditions (SPEC format) [default]")
+        # Generate spectral boundary files
+        sp2_files, boundspec_commands = runner.generate_spectral_boundaries(
+            ww3_ds, boundary_points
+        )
+        ww3_ds.close()
+
+        # Prepare SWAN input with spectral boundaries
+        swan_input_path = runner.prepare_swan_input_spectral(
+            boundspec_commands, start_time, end_time
+        )
+        tpar_path = None  # No TPAR file in spectral mode
+        time_range = (str(ww3_times[0])[:19], str(ww3_times[-1])[:19])
 
     # Run SWAN (unless prepare-only)
     swan_completed = False
+    swan_output = None
     if not args.prepare_only:
         swan_completed = runner.run_swan(swan_input_path)
+
+        # Parse and save SWAN output if run completed
+        if swan_completed:
+            swan_output = runner.parse_swan_output()
+            if swan_output:
+                runner.save_swan_output(swan_output)
 
     # Save metadata
     runner.save_run_metadata(
@@ -710,7 +987,12 @@ Workflow:
     print(f"  Run directory: {runner.run_dir}")
     print()
     print("Files created:")
-    print(f"  - {tpar_path.name} (boundary conditions)")
+    if tpar_path:
+        print(f"  - {tpar_path.name} (boundary conditions)")
+    else:
+        # Spectral mode - count .sp2 files
+        sp2_count = len(list(runner.run_dir.glob("*.sp2")))
+        print(f"  - {sp2_count} .sp2 files (spectral boundary conditions)")
     print(f"  - {swan_input_path.name} (SWAN input)")
     print(f"  - {Path(runner.config['file_grd']).name} (bathymetry grid)")
     print()

@@ -362,22 +362,21 @@ class SwanDomainGenerator:
         lons: np.ndarray,
         path: Path,
     ):
-        """Save SWAN bathymetry grid."""
+        """
+        Save SWAN bathymetry grid in FREE format (no headers).
+
+        SWAN FREE format expects only numbers.
+        Depth values: positive = water depth, -999 = land/outside domain.
+        """
         # Convert to SWAN depth (positive down, exception for land/out-of-domain)
         depth = np.where(
             np.isnan(elevation) | (elevation >= 0),
-            -999.0,  # Exception value
-            -elevation,  # Positive depth
+            -999.0,  # Exception value for land/outside domain
+            -elevation,  # Positive depth (negate negative elevation)
         )
 
         with open(path, "w") as f:
-            f.write(f"$ SWAN bathymetry for computational domain\n")
-            f.write(f"$ Grid: {depth.shape[0]} x {depth.shape[1]}\n")
-            f.write(f"$ Lat: {lats.min():.4f} to {lats.max():.4f}\n")
-            f.write(f"$ Lon: {lons.min():.4f} to {lons.max():.4f}\n")
-            f.write(f"$ Exception value: -999.0 (land/outside domain)\n")
-            f.write("$\n")
-
+            # No header - SWAN FREE format expects only numbers
             for row in depth:
                 f.write(" ".join(f"{v:.2f}" for v in row) + "\n")
 
@@ -407,8 +406,21 @@ class SwanDomainGenerator:
         n_lon = len(lons)
         lat_min, lat_max = lats.min(), lats.max()
         lon_min, lon_max = lons.min(), lons.max()
-        dx = resolution_m
-        dy = resolution_m
+
+        # For SPHERICAL coordinates, xlenc/ylenc are in DEGREES
+        xlenc = lon_max - lon_min  # Domain width in degrees
+        ylenc = lat_max - lat_min  # Domain height in degrees
+
+        # Number of cells (not points)
+        mxc = n_lon - 1
+        myc = n_lat - 1
+
+        # Grid spacing in degrees
+        dx_deg = xlenc / mxc
+        dy_deg = ylenc / myc
+
+        # Shorten project name for SWAN (max ~16 chars)
+        short_name = name[:16] if len(name) > 16 else name
 
         swan_input = f"""$ SWAN input file for {name}
 $ Generated: {datetime.now().isoformat()}
@@ -418,7 +430,7 @@ $
 $----------------------------------------------------------
 $ PROJECT INFO
 $----------------------------------------------------------
-PROJECT '{name}' 'run01'
+PROJECT '{short_name}' 'run01'
 
 $----------------------------------------------------------
 $ COMPUTATIONAL GRID
@@ -429,14 +441,19 @@ $ Origin at SW corner, grid aligned with lat/lon
 SET LEVEL 0.0
 SET NAUTICAL
 SET DEPMIN 0.05
+SET MAXERR 3
 
 MODE NONSTATIONARY TWODIMENSIONAL
 
 COORDINATES SPHERICAL
 
 $ Computational grid definition
-$ CGRID: origin (lon, lat), rotation, nx, ny, dx, dy
-CGRID REGULAR {lon_min:.4f} {lat_min:.4f} 0.0 {n_lon-1} {n_lat-1} {dx:.1f} {dy:.1f} &
+$ CGRID REGULAR: xpc ypc alpc xlenc ylenc mxc myc
+$   xpc, ypc = origin (lon, lat)
+$   alpc = rotation angle (0 = aligned with lat/lon)
+$   xlenc, ylenc = domain size in degrees
+$   mxc, myc = number of cells in x, y direction
+CGRID REGULAR {lon_min:.4f} {lat_min:.4f} 0.0 {xlenc:.6f} {ylenc:.6f} {mxc} {myc} &
       CIRCLE 36 0.04 1.0
 
 $----------------------------------------------------------
@@ -445,28 +462,27 @@ $----------------------------------------------------------
 $ Read bathymetry from SWAN grid file
 $ Exception value -999 marks land/outside domain
 
-INPGRID BOTTOM REGULAR {lon_min:.4f} {lat_min:.4f} 0.0 {n_lon-1} {n_lat-1} {dx:.1f} {dy:.1f} &
+INPGRID BOTTOM REGULAR {lon_min:.4f} {lat_min:.4f} 0.0 {mxc} {myc} {dx_deg:.6f} {dy_deg:.6f} &
         EXCEPTION -999.0
 
 READINP BOTTOM 1.0 '{grd_path.name}' 1 0 FREE
 
 $----------------------------------------------------------
-$ BOUNDARY CONDITIONS FROM WW3
+$ BOUNDARY CONDITIONS FROM WW3 (SPECTRAL FORMAT)
 $----------------------------------------------------------
-$ The offshore (western) boundary receives wave spectra from WW3
-$ This boundary is at approximately {offshore_km}km from the coast
+$ The offshore (western) boundary receives 2D wave spectra from WW3
+$ This preserves the full spectral shape including multiple swell systems
 $
-$ Option 1: Parametric boundary (simpler)
-$ BOUNDSPEC SIDE W CCW CONSTANT PAR Hs Tp Dir spread
+$ SPEC format advantages over TPAR:
+$ - Preserves full 2D energy density spectrum E(f,theta)
+$ - Multiple swell partitions maintained through propagation
+$ - More accurate nearshore wave transformation
 $
-$ Option 2: Spectral boundary from file (more accurate)
-$ BOUNDSPEC SIDE W CCW VARIABLE FILE 'ww3_spectra.sp2'
+$ Boundary specification is generated at runtime by run_swan.py
+$ using spectral files (.sp2) at each boundary point
 $
-$ For operational use, WW3 spectra would be extracted at the
-$ offshore boundary points and provided in SWAN spectral format
-
-$ Placeholder - replace with actual WW3 data:
-BOUNDSPEC SIDE W CCW CONSTANT PAR 2.0 12.0 270.0 25.0
+$ Placeholder - replaced at runtime:
+{{{{BOUNDSPEC_COMMANDS}}}}
 
 $----------------------------------------------------------
 $ PHYSICS
@@ -474,14 +490,14 @@ $----------------------------------------------------------
 $ Wave breaking
 BREAKING CONSTANT 1.0 0.73
 
-$ Bottom friction (JONSWAP)
+$ Bottom friction (JONSWAP coefficient)
 FRICTION JONSWAP 0.067
 
-$ Triad wave-wave interactions (for shallow water)
+$ Triad wave-wave interactions (shallow water)
 TRIAD
 
-$ Whitecapping
-WCAPPING WESTH 3.6E-5 1.0
+$ Whitecapping (Komen formulation)
+WCAPPING KOMEN
 
 $----------------------------------------------------------
 $ NUMERICS
@@ -491,27 +507,23 @@ NUMERIC ACCUR 0.02 0.02 0.02 95 NONSTAT 10
 $----------------------------------------------------------
 $ OUTPUT
 $----------------------------------------------------------
-$ Output locations (nearshore points for surf forecasting)
-$ Add specific output points here:
-$ POINTS 'pt1' -117.5 33.6
-$ TABLE 'pt1' HEADER 'output_pt1.tab' TIME XP YP DEPTH HS TM01 DIR
-
-$ Block output of wave parameters
+$
+$ Combined wave parameters (full grid)
+$
 BLOCK 'COMPGRID' NOHEAD 'hsig.mat' LAY 3 HSIG 1.
 BLOCK 'COMPGRID' NOHEAD 'tm01.mat' LAY 3 TM01 1.
+BLOCK 'COMPGRID' NOHEAD 'tpeak.mat' LAY 3 RTP 1.
 BLOCK 'COMPGRID' NOHEAD 'dir.mat' LAY 3 DIR 1.
+BLOCK 'COMPGRID' NOHEAD 'depth.mat' LAY 3 DEPTH 1.
 
 $----------------------------------------------------------
 $ COMPUTATION
 $----------------------------------------------------------
-$ For stationary run:
-$ COMPUTE
-
-$ For non-stationary run:
-$ COMPUTE NONSTAT yyyymmdd.hhmmss dt yyyymmdd.hhmmss
+$ Nonstationary run through all forecast hours
+$ Time stepping is set at runtime by run_swan.py
 
 TEST 1 0
-COMPUTE
+COMPUTE NONSTAT {{{{START_TIME}}}} 3.0 HR {{{{END_TIME}}}}
 
 STOP
 """
