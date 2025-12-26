@@ -490,36 +490,101 @@ The final output should decompose total wave energy into discrete swell trains:
 
 ### Bathymetry Data Requirements
 
-Three resolution tiers are needed:
+Two-tier SWAN bathymetry stitched from different sources:
 
 | Tier | Domain | Resolution | Source | Purpose |
 |------|--------|------------|--------|---------|
-| **Offshore** | WW3 boundary → 50km offshore | ~500m-1km | GEBCO/ETOPO/NCEI CRM | SWAN outer domain |
-| **Mid-range** | 50km → 2km offshore | ~100-200m | NCEI Coastal Relief Model | SWAN refinement zone |
-| **Nearshore** | 2km → beach | 1-50m | USACE NCMP LiDAR (existing) | Surf zone physics |
+| **Outer SWAN** | 25km → 3km offshore | ~450m (15 arc-sec) | GEBCO 2024 | Offshore wave propagation |
+| **Inner SWAN** | 3km → 500m offshore | ~90m (3 arc-sec) | NCEI Coastal Relief Model | Nearshore refinement |
+| **Surf Zone** | 500m → beach | 1m (downsampled to 10-20m) | USACE NCMP LiDAR (existing) | Breaking wave physics |
 
-### Data Storage Structure (Planned)
+**Note**: SWAN output terminates at 500m offshore. The surf zone physics model uses the existing USACE LiDAR data (1m resolution, extending to 15-21m depth).
+
+### Bathymetry Stitching Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  GEBCO 2024 (~450m resolution)                                               │
+│  Domain: 25km → 3km offshore                                                 │
+│  Format: NetCDF from GEBCO website                                           │
+│  Download: Subset for California coast region                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼ (stitch at 3km boundary)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  NCEI Coastal Relief Model (~90m resolution)                                 │
+│  Domain: 3km → 500m offshore                                                 │
+│  Format: NetCDF from NCEI THREDDS server                                     │
+│  Download: Subset for California coast region                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼ (SWAN output terminates here)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  USACE LiDAR (1m resolution, existing)                                       │
+│  Domain: 500m → beach                                                        │
+│  Depth range: 0 to ~21m depth                                                │
+│  Purpose: Surf zone physics model (separate from SWAN)                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Storage Structure
 
 ```
 data/
 ├── raw/
 │   └── bathymetry/
 │       ├── USACE_CA_DEM_2009_9488/     # ✅ Existing: 1m nearshore LiDAR
-│       ├── ncei_coastal_relief/         # TODO: 3 arc-second (~90m) CRM
-│       └── gebco_2024/                  # TODO: 15 arc-second (~450m) global
+│       ├── gebco_2024/                  # TODO: 15 arc-second (~450m) global subset
+│       │   └── gebco_2024_california.nc
+│       └── ncei_crm/                    # TODO: 3 arc-second (~90m) coastal relief
+│           └── crm_california.nc
 ├── processed/
 │   └── bathymetry/
-│       ├── swan_grids/                  # Rectified SWAN-format bathymetry
-│       │   ├── socal_outer.grd          # ~500m resolution outer domain
-│       │   └── socal_inner.grd          # ~100m resolution inner domain
-│       └── surf_zone/                   # High-res nearshore grids
-│           ├── huntington.grd
-│           └── malibu.grd
-└── zarr/
-    └── static/
-        └── bathymetry/
-            └── multi_resolution.zarr    # Combined multi-res bathymetry store
+│       ├── swan_stitched/               # Combined GEBCO + NCEI grid
+│       │   ├── california_swan.nc       # Full stitched grid (NetCDF)
+│       │   ├── california_swan.grd      # SWAN format (.grd)
+│       │   └── metadata.json            # Grid specs, sources, bounds
+│       ├── regional/                    # Region-specific subsets
+│       │   ├── socal_swan.grd
+│       │   ├── norcal_swan.grd
+│       │   └── central_swan.grd
+│       └── visualizations/              # Pre-generated figures
+│           ├── coverage_overview.png
+│           └── resolution_comparison.png
+├── cache/
+│   └── swan/                            # Cached SWAN model outputs
+│       ├── socal_2024-12-19T00.nc       # Timestamped outputs
+│       └── boundary_conditions/         # Extracted WW3 boundary data
+└── pipelines/
+    └── bathymetry/                      # Bathymetry fetching & processing
+        ├── __init__.py
+        ├── gebco_fetcher.py             # GEBCO data download
+        ├── ncei_fetcher.py              # NCEI CRM data download
+        ├── stitcher.py                  # Grid stitching logic
+        └── visualizer.py                # Visualization tools
 ```
+
+### Local Processing Pipeline
+
+The bathymetry data is pre-processed and stored locally to avoid re-fetching:
+
+```python
+# One-time setup (run manually)
+python -m data.pipelines.bathymetry.gebco_fetcher --region california
+python -m data.pipelines.bathymetry.ncei_fetcher --region california
+python -m data.pipelines.bathymetry.stitcher --output california_swan.nc
+
+# Visualization
+python -m data.pipelines.bathymetry.visualizer --show-ww3-boundary
+```
+
+### Cached SWAN Outputs
+
+SWAN model runs are computationally expensive. Outputs are cached locally:
+- **Pre-computed forecasts**: Run SWAN for standard forecast times
+- **Stored in `data/cache/swan/`**: Timestamped NetCDF files
+- **Loaded by backend worker**: No need to run SWAN at request time
+- **Update schedule**: Run SWAN when new WW3 forecasts available (~4x daily)
 
 ### Multi-Resolution Mesh Visualization Tool
 
@@ -581,28 +646,32 @@ The surf zone model will combine:
 ### Implementation Phases
 
 **Phase 1: Bathymetry Pipeline** (Current Focus)
-- [ ] Download NCEI Coastal Relief Model for California
-- [ ] Create bathymetry rectification/interpolation tools
-- [ ] Build multi-resolution mesh visualization
-- [ ] Define SWAN grid domains for target spots
+- [ ] Download GEBCO 2024 subset for California (25km → 3km offshore)
+- [ ] Download NCEI CRM for California (3km → 500m offshore)
+- [ ] Create bathymetry stitching module (merge at 3km boundary)
+- [ ] Build visualization showing stitched grid + WW3 boundary overlay
+- [ ] Store processed grids locally in `data/processed/bathymetry/`
+- [ ] Create regional subsets for target areas (SoCal, NorCal, Central)
 
 **Phase 2: SWAN Model Setup**
-- [ ] Install and configure SWAN model
+- [ ] Install and configure SWAN model (via Homebrew gcc or Docker)
 - [ ] Create WW3 → SWAN boundary condition converter
-- [ ] Set up nested grid configurations
-- [ ] Validate against buoy observations
+- [ ] Configure SWAN to read stitched bathymetry grid
+- [ ] Test SWAN runs for sample timestamps
+- [ ] Validate output against buoy observations
 
 **Phase 3: Surf Zone Physics**
+- [ ] Interface SWAN 500m output with USACE LiDAR data
 - [ ] Implement breaking wave height calculations
 - [ ] Add wave quality metrics (shape, power)
 - [ ] Integrate tide and wind effects
-- [ ] ML model for surf quality prediction
 
 **Phase 4: Production Integration**
-- [ ] Automated SWAN runs in worker pipeline
+- [ ] Automated SWAN runs triggered by WW3 forecast updates
+- [ ] Cache SWAN outputs in `data/cache/swan/`
+- [ ] Backend loads cached outputs (no runtime SWAN execution)
 - [ ] Swell component API endpoints
 - [ ] Frontend visualization of swell breakdown
-- [ ] Accuracy tracking vs actual conditions
 
 ## Roadmap & Future Ideas
 
@@ -644,11 +713,18 @@ Keep this updated as you make major decisions:
 
 **2024-12-19**: SWAN model integration architecture defined
 - Designed multi-resolution wave propagation pipeline: WW3 → SWAN → Surf Zone
-- Three-tier bathymetry strategy: offshore (~500m), mid-range (~100m), nearshore (1-50m existing LiDAR)
+- Initial three-tier bathymetry concept documented
 - Swell component decomposition output format defined (height/period/direction per swell train)
-- NCEI Coastal Relief Model identified as primary source for SWAN domain bathymetry
-- Multi-resolution mesh visualization tool concept documented for gap detection
-- Implementation phased: Bathymetry Pipeline → SWAN Setup → Surf Zone Physics → Production
+- Created WW3 coverage visualization script (`data/analysis/visualize_ww3_coverage.py`)
+
+**2024-12-19**: Bathymetry stitching architecture finalized
+- GEBCO 2024 for outer SWAN domain (25km → 3km offshore, ~450m resolution)
+- NCEI CRM for inner SWAN domain (3km → 500m offshore, ~90m resolution)
+- Existing USACE LiDAR for surf zone physics (500m → beach, 1m resolution)
+- SWAN output terminates at 500m offshore boundary
+- Created bathymetry pipeline structure: `data/pipelines/bathymetry/`
+- Local caching strategy: processed grids stored in `data/processed/bathymetry/`
+- SWAN outputs cached in `data/cache/swan/` for backend consumption
 
 (Add future decisions here as they're made)
 

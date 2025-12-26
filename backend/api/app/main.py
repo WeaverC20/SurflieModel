@@ -697,13 +697,14 @@ async def health_check():
 
 
 # Include routers
-from app.routers import dev, ocean_currents, buoys, wind, waves
+from app.routers import dev, ocean_currents, buoys, wind, waves, swan
 
 app.include_router(dev.router, prefix="/api/v1/dev", tags=["dev"])
 app.include_router(ocean_currents.router, prefix="/api", tags=["ocean-currents"])
 app.include_router(buoys.router, prefix="/api", tags=["buoys"])
 app.include_router(wind.router, prefix="/api", tags=["wind"])
 app.include_router(waves.router, prefix="/api", tags=["waves"])
+app.include_router(swan.router, prefix="/api", tags=["swan"])
 
 # TODO: Add production routers
 # from app.routers import forecast, spots, users
