@@ -589,25 +589,77 @@ class SwanRunner:
 
         print(f"  Found {len(existing)} output files")
 
-        # Parse SWAN .mat format (ASCII)
+        # Get grid dimensions from config
+        nx = self.config.get("n_lon", 0)
+        ny = self.config.get("n_lat", 0)
+
+        if nx == 0 or ny == 0:
+            print("  Error: Grid dimensions not found in config")
+            return None
+
+        # Parse SWAN .mat format (binary LAY 3 with 208-byte header)
         def read_swan_mat(path: Path) -> Optional[np.ndarray]:
-            """Read SWAN block output in ASCII format."""
+            """
+            Read SWAN block output in binary format (LAY 3).
+
+            SWAN LAY 3 format:
+            - 208-byte ASCII header (metadata)
+            - Single-precision IEEE float32 data
+            - Data stored in Fortran column-major order
+
+            Note: SWAN is written in Fortran and outputs data in column-major order.
+            We need to reshape with order='F' and flip vertically to match the
+            expected geographic orientation (lat increasing from south to north).
+            """
             try:
-                # SWAN outputs as space-separated values
-                data = np.loadtxt(path)
+                with open(path, "rb") as f:
+                    raw = f.read()
+
+                # Skip 208-byte header, read as float32
+                header_size = 208
+                data = np.frombuffer(raw[header_size:], dtype=np.float32)
+
+                # Reshape to grid dimensions using Fortran order (column-major)
+                expected_size = nx * ny
+                if data.size != expected_size:
+                    print(f"  Warning: {path.name} has {data.size} values, expected {expected_size}")
+                    if data.size >= expected_size:
+                        data = data[:expected_size]
+                    else:
+                        return None
+
+                # Reshape with Fortran order and flip vertically to match geographic coords
+                data = data.reshape((ny, nx), order='F')
+                data = np.flipud(data)
+
+                # Replace SWAN exception values with NaN
+                # SWAN uses very large negative values for land/exception
+                data = np.where(np.isnan(data) | (data < -900) | (data > 1e10), np.nan, data)
+
                 return data
             except Exception as e:
                 print(f"  Error reading {path.name}: {e}")
                 return None
 
+        # Generate lat/lon arrays for georeferencing
+        lat_min = self.config.get("lat_min", 32.0)
+        lat_max = self.config.get("lat_max", 42.0)
+        lon_min = self.config.get("lon_min", -126.0)
+        lon_max = self.config.get("lon_max", -117.0)
+
+        lats = np.linspace(lat_min, lat_max, ny).tolist()
+        lons = np.linspace(lon_min, lon_max, nx).tolist()
+
         results = {
             "combined": {},
             "windsea": {},
+            "lat": lats,
+            "lon": lons,
             "metadata": {
                 "domain": self.domain_name,
                 "run_id": self.run_id,
-                "grid_nx": self.config.get("n_lon", 0),
-                "grid_ny": self.config.get("n_lat", 0),
+                "grid_nx": nx,
+                "grid_ny": ny,
                 "n_swell_partitions": 6,
             }
         }
@@ -622,9 +674,9 @@ class SwanRunner:
                 data = read_swan_mat(existing[var])
                 if data is not None:
                     results["combined"][var] = data.tolist()
-                    print(f"  {var}: shape {data.shape}")
+                    print(f"  {var}: shape {data.shape}, range [{np.nanmin(data):.2f}, {np.nanmax(data):.2f}]")
 
-        # Read wind sea outputs
+        # Read wind sea outputs (treated as swell0 / wind chop)
         for var, suffix in [("hs", "hs_"), ("tp", "tp_"), ("dir", "dir_")]:
             key = f"{suffix}windsea"
             if key in existing:
@@ -653,6 +705,19 @@ class SwanRunner:
         results["lat"] = ds["lat"].values.tolist()
         results["lon"] = ds["lon"].values.tolist()
         ds.close()
+
+        # Convert NaN to None for JSON serialization
+        def convert_nan(obj):
+            """Recursively convert NaN values to None for JSON."""
+            if isinstance(obj, dict):
+                return {k: convert_nan(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_nan(item) for item in obj]
+            elif isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+                return None
+            return obj
+
+        results = convert_nan(results)
 
         with open(output_path, "w") as f:
             json.dump(results, f)

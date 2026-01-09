@@ -229,6 +229,11 @@ class SwanDomainGenerator:
         # and seaward of nearshore_boundary_km
         domain_mask = (distance_km <= offshore_boundary_km) & (distance_km >= nearshore_boundary_km) & (out_elevation < 0)
 
+        # Post-process domain mask to fix connectivity issues
+        domain_mask = self._postprocess_domain_mask(
+            domain_mask, out_elevation, out_lats, out_lons, resolution_m
+        )
+
         # Apply mask - set out-of-domain cells to NaN
         masked_elevation = np.where(domain_mask, out_elevation, np.nan)
 
@@ -296,6 +301,142 @@ class SwanDomainGenerator:
         print(f"  SWAN input: {swan_input_path}")
 
         return config
+
+    def _postprocess_domain_mask(
+        self,
+        domain_mask: np.ndarray,
+        elevation: np.ndarray,
+        lats: np.ndarray,
+        lons: np.ndarray,
+        resolution_m: float,
+    ) -> np.ndarray:
+        """
+        Post-process domain mask to fix connectivity issues.
+
+        1. Remove disconnected inland bays/inlets (keep only main ocean)
+        2. Fill gaps in Channel Islands area to connect regions
+        """
+        from scipy import ndimage
+
+        print("\n  Post-processing domain mask...")
+
+        # Step 1: Find connected components
+        labeled, num_features = ndimage.label(domain_mask)
+        print(f"    Found {num_features} connected regions")
+
+        if num_features <= 1:
+            return domain_mask
+
+        # Find the largest component (main ocean)
+        component_sizes = ndimage.sum(domain_mask, labeled, range(1, num_features + 1))
+        largest_component = np.argmax(component_sizes) + 1
+        main_ocean_size = int(component_sizes[largest_component - 1])
+
+        # Step 2: Identify significant disconnected regions that should be connected
+        # (e.g., Channel Islands area around San Nicolas)
+        regions_to_connect = []
+        for region_id in range(1, num_features + 1):
+            if region_id == largest_component:
+                continue
+
+            region_mask = labeled == region_id
+            size = int(np.sum(region_mask))
+
+            # Find region location
+            rows, cols = np.where(region_mask)
+            avg_lat = lats[rows].mean()
+            avg_lon = lons[cols].mean()
+
+            # Southern CA Channel Islands region (lat 32-35, lon -120 to -118)
+            is_channel_islands = (32.0 <= avg_lat <= 35.0) and (-120.5 <= avg_lon <= -118.0)
+
+            if is_channel_islands and size >= 20:
+                print(f"    Region {region_id}: {size} cells at ({avg_lat:.2f}°N, {avg_lon:.2f}°W) - Channel Islands, will connect")
+                regions_to_connect.append(region_id)
+            else:
+                reason = "small" if size < 20 else "inland bay"
+                print(f"    Region {region_id}: {size} cells at ({avg_lat:.2f}°N, {avg_lon:.2f}°W) - {reason}, removing")
+
+        # Create new mask with only main ocean
+        new_mask = labeled == largest_component
+
+        # Step 3: Connect Channel Islands regions by filling gaps
+        if regions_to_connect:
+            print(f"    Connecting {len(regions_to_connect)} Channel Islands regions...")
+
+            # Add the regions to connect
+            for region_id in regions_to_connect:
+                new_mask |= (labeled == region_id)
+
+            # Fill gaps between regions using morphological operations
+            # Dilate to connect nearby regions, then erode back
+            # Use a larger structuring element for better connectivity
+            struct = ndimage.generate_binary_structure(2, 2)  # 8-connectivity
+
+            # Multiple iterations of dilation to bridge larger gaps
+            dilated = ndimage.binary_dilation(new_mask, struct, iterations=3)
+
+            # Only keep dilated cells that are over water (negative elevation)
+            dilated = dilated & (elevation < 0)
+
+            # Check if this connects the regions
+            labeled_dilated, num_dilated = ndimage.label(dilated)
+            if num_dilated < num_features:
+                print(f"    Dilation connected regions: {num_features} -> {num_dilated}")
+                new_mask = dilated
+
+        # Step 4: Fill gaps in Southern CA (below San Clemente) by extending the domain
+        # Look for the "upside-down U" pattern and fill it
+        new_mask = self._fill_channel_islands_gaps(new_mask, elevation, lats, lons)
+
+        # Step 5: Final cleanup - keep only the largest connected region
+        # This removes any small artifacts created by dilation
+        labeled_final, num_final = ndimage.label(new_mask)
+        if num_final > 1:
+            component_sizes_final = ndimage.sum(new_mask, labeled_final, range(1, num_final + 1))
+            largest_final = np.argmax(component_sizes_final) + 1
+            removed = num_final - 1
+            new_mask = labeled_final == largest_final
+            print(f"    Final cleanup: removed {removed} small artifact regions")
+
+        final_size = int(np.sum(new_mask))
+        print(f"    Final domain: {final_size} cells (was {main_ocean_size})")
+
+        return new_mask
+
+    def _fill_channel_islands_gaps(
+        self,
+        mask: np.ndarray,
+        elevation: np.ndarray,
+        lats: np.ndarray,
+        lons: np.ndarray,
+    ) -> np.ndarray:
+        """Fill gaps in the Channel Islands area to create a contiguous domain."""
+        from scipy import ndimage
+
+        # Focus on Southern CA (lat 32-35)
+        lat_idx_min = np.searchsorted(lats, 32.0)
+        lat_idx_max = np.searchsorted(lats, 35.0)
+
+        # For each row in this region, fill horizontal gaps in ocean areas
+        for i in range(lat_idx_min, min(lat_idx_max, len(lats))):
+            row = mask[i, :].copy()
+            ocean_row = elevation[i, :] < 0  # Where there's water
+
+            # Find leftmost and rightmost ocean cells in the mask
+            ocean_indices = np.where(row)[0]
+            if len(ocean_indices) < 2:
+                continue
+
+            left_idx = ocean_indices[0]
+            right_idx = ocean_indices[-1]
+
+            # Fill gaps between left and right if they're over water
+            for j in range(left_idx, right_idx + 1):
+                if ocean_row[j] and not row[j]:
+                    mask[i, j] = True
+
+        return mask
 
     def _find_var(self, ds, candidates):
         for name in candidates:

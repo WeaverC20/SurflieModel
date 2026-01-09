@@ -81,6 +81,22 @@ const SwanDomainVisualization = dynamic(() => import('@/components/map/SwanDomai
   ),
 })
 
+const SwanOutputVisualization = dynamic(() => import('@/components/map/SwanOutputVisualization'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full min-h-[600px] items-center justify-center bg-slate-900">
+      <div className="text-center">
+        <h1 className="text-xl font-bold text-white mb-2">
+          Loading SWAN Output...
+        </h1>
+        <p className="text-slate-400 text-sm">
+          Fetching wave model results
+        </p>
+      </div>
+    </div>
+  ),
+})
+
 export default function Home() {
   return (
     <main className="min-h-screen w-screen bg-slate-900">
@@ -114,7 +130,12 @@ export default function Home() {
 
         {/* Full Width: SWAN Outer Domain Visualization */}
         <div className="mt-6 border border-slate-700 rounded-lg overflow-hidden">
-          <SwanDomainVisualization />
+          <SwanDomainVisualization domainName="california_swan_5000m" />
+        </div>
+
+        {/* Full Width: SWAN Wave Output Visualization */}
+        <div className="mt-6 border border-slate-700 rounded-lg overflow-hidden">
+          <SwanOutputVisualization domainName="california_swan_5000m" />
         </div>
       </div>
     </main>
