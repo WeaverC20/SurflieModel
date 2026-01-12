@@ -1,0 +1,242 @@
+# California Region Configuration
+# Master configuration for the California coastline SWAN modeling domain
+# Version: 1.0.0
+# Last updated: 2026-01-12
+
+name: california
+display_name: "California Coast"
+version: "1.0.0"
+
+# Geographic bounds (WGS84)
+bounds:
+  lat_min: 32.0
+  lat_max: 42.0
+  lon_min: -126.0
+  lon_max: -117.0
+
+# Sub-regions for convenience (for UI filtering and nested domains)
+sub_regions:
+  socal:
+    display_name: "Southern California"
+    bounds:
+      lat_min: 32.0
+      lat_max: 35.0
+      lon_min: -122.0
+      lon_max: -117.0
+  norcal:
+    display_name: "Northern California"
+    bounds:
+      lat_min: 36.0
+      lat_max: 42.0
+      lon_min: -126.0
+      lon_max: -121.0
+  central:
+    display_name: "Central California"
+    bounds:
+      lat_min: 34.0
+      lat_max: 38.0
+      lon_min: -124.0
+      lon_max: -119.0
+  channel_islands:
+    display_name: "Channel Islands"
+    bounds:
+      lat_min: 33.0
+      lat_max: 34.5
+      lon_min: -121.0
+      lon_max: -118.5
+  la_area:
+    display_name: "Los Angeles Area"
+    bounds:
+      lat_min: 33.5
+      lat_max: 34.2
+      lon_min: -119.0
+      lon_max: -117.5
+  san_diego:
+    display_name: "San Diego"
+    bounds:
+      lat_min: 32.5
+      lat_max: 33.3
+      lon_min: -118.0
+      lon_max: -117.0
+
+# WW3 data source configuration
+ww3_source:
+  description: "NOAA WaveWatch III Global Model"
+  endpoint: "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
+  model: "gfswave.global"
+  native_resolution_deg: 0.25  # ~28km
+  variables:
+    - htsgwsfc   # Significant wave height
+    - perpwsfc   # Peak period
+    - dirpwsfc   # Peak direction
+  # Bounds to fetch (slightly larger than region for interpolation)
+  fetch_bounds:
+    lat_min: 30.0
+    lat_max: 44.0
+    lon_min: -130.0
+    lon_max: -115.0
+
+# Channel Islands configuration (for boundary point generation)
+channel_islands:
+  - id: catalina
+    name: "Santa Catalina Island"
+    center_lat: 33.38
+    center_lon: -118.42
+    radius_km: 16.0
+  - id: san_clemente
+    name: "San Clemente Island"
+    center_lat: 32.90
+    center_lon: -118.50
+    radius_km: 20.0
+  - id: san_nicolas
+    name: "San Nicolas Island"
+    center_lat: 33.25
+    center_lon: -119.50
+    radius_km: 12.0
+  - id: santa_barbara_island
+    name: "Santa Barbara Island"
+    center_lat: 33.47
+    center_lon: -119.03
+    radius_km: 6.0
+  - id: anacapa
+    name: "Anacapa Island"
+    center_lat: 34.01
+    center_lon: -119.40
+    radius_km: 5.0
+  - id: santa_cruz
+    name: "Santa Cruz Island"
+    center_lat: 34.02
+    center_lon: -119.73
+    radius_km: 18.0
+  - id: santa_rosa
+    name: "Santa Rosa Island"
+    center_lat: 33.96
+    center_lon: -120.05
+    radius_km: 14.0
+  - id: san_miguel
+    name: "San Miguel Island"
+    center_lat: 34.03
+    center_lon: -120.36
+    radius_km: 10.0
+
+# Reference to WW3 extraction points (cemented boundary condition points)
+boundaries:
+  ww3_extraction: "boundaries/ww3_extraction_points.json"
+  extraction_point_count: 71  # Validated count - do not change without updating JSON
+
+# Domain hierarchy
+domains:
+  outer:
+    path: "domains/outer"
+    description: "Coarse mesh bridging WW3 (~25km offshore) to nearshore"
+    active_mesh: "v1"
+  inner:
+    path: "domains/inner"
+    description: "Fine mesh for nearshore wave propagation (future)"
+    active_mesh: null  # Not yet implemented
+  spots:
+    path: "domains/spots"
+    description: "Very fine meshes for surf spot wave breaking (future)"
+    active_meshes: {}  # Map of spot_id -> mesh version
+
+# Bathymetry source priority (highest priority = lowest number)
+# Higher resolution sources are used where available
+bathymetry_sources:
+  - name: "usace_lidar_2009"
+    description: "USACE LiDAR Digital Elevation Model for Southern California"
+    type: "local"
+    path: "raw/bathymetry/USACE_CA_DEM_2009_9488"
+    resolution_m: 1
+    priority: 1
+    use_for:
+      - spots
+    coverage_notes: "Southern California coastal areas only"
+
+  - name: "ncei_crm"
+    description: "NOAA Coastal Relief Model (volumes 6-8)"
+    type: "opendap"
+    endpoint: "https://www.ngdc.noaa.gov/thredds/dodsC/crm/crm_vol6.nc"
+    resolution_m: 90
+    priority: 2
+    use_for:
+      - inner
+      - spots
+    coverage_notes: "Full California coast"
+
+  - name: "gebco_2024"
+    description: "GEBCO 2024 Global Bathymetry"
+    type: "local"
+    path: "raw/bathymetry/gebco_2024/gebco_2024_california.nc"
+    resolution_m: 450
+    priority: 3
+    use_for:
+      - outer
+      - inner
+    coverage_notes: "Global coverage, used for offshore areas"
+
+# Surf spots within this region
+# These will eventually have their own fine-resolution meshes
+surf_spots:
+  - id: huntington_pier
+    name: "Huntington Pier"
+    lat: 33.655
+    lon: -117.999
+    sub_region: socal
+    inner_domain: null
+    spot_mesh: null
+
+  - id: trestles
+    name: "Trestles"
+    lat: 33.382
+    lon: -117.589
+    sub_region: socal
+    inner_domain: null
+    spot_mesh: null
+
+  - id: malibu
+    name: "Malibu (First Point)"
+    lat: 34.035
+    lon: -118.677
+    sub_region: la_area
+    inner_domain: null
+    spot_mesh: null
+
+  - id: rincon
+    name: "Rincon"
+    lat: 34.374
+    lon: -119.476
+    sub_region: central
+    inner_domain: null
+    spot_mesh: null
+
+  - id: steamer_lane
+    name: "Steamer Lane"
+    lat: 36.951
+    lon: -122.026
+    sub_region: central
+    inner_domain: null
+    spot_mesh: null
+
+  - id: mavericks
+    name: "Mavericks"
+    lat: 37.495
+    lon: -122.496
+    sub_region: norcal
+    inner_domain: null
+    spot_mesh: null
+
+  - id: ocean_beach_sf
+    name: "Ocean Beach SF"
+    lat: 37.759
+    lon: -122.511
+    sub_region: norcal
+    inner_domain: null
+    spot_mesh: null
+
+  - id: blacks_beach
+    name: "Blacks Beach"
+    lat: 32.889
+    lon: -117.253
+    sub_region: san_diego
+    inner_domain: null
+    spot_mesh: null

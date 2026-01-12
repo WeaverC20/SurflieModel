@@ -1,0 +1,86 @@
+# Domain Configuration Template
+# Copy this to regions/<region>/domains/<type>/domain.yaml
+# Version: 1.0.0
+
+name: "region_domain_type"
+region: "region_name"
+domain_type: "outer"  # outer | inner | spot
+version: "1.0.0"
+description: "Description of this domain"
+
+# Grid specification
+grid:
+  type: "regular"  # regular | curvilinear | unstructured
+  projection: "WGS84"
+
+  lat_min: 0.0
+  lat_max: 0.0
+  lon_min: 0.0
+  lon_max: 0.0
+
+  resolution_m: 0
+  n_lat: 0
+  n_lon: 0
+  n_cells: 0
+  n_wet_cells: 0
+  n_dry_cells: 0
+
+# Mesh versioning
+meshes: {}
+  # v1:
+  #   description: "Initial mesh"
+  #   grd_file: "mesh_v1.grd"
+  #   nc_file: "mesh_v1.nc"
+  #   swn_template: "mesh_v1.swn"
+  #   generated_at: "2026-01-01T00:00:00Z"
+  #   bathymetry_sources: ["gebco_2024"]
+  #   immutable: true
+  #   is_active: true
+
+active_mesh: null
+
+# Boundary configuration
+boundaries:
+  source: "ww3"  # For outer domain; use parent domain name for inner
+  extraction_points_ref: "../../boundaries/ww3_extraction_points.json"
+  offshore_boundary_km: 25.0
+  swan_boundary_type: "TPAR"  # TPAR | SPEC2D
+
+  spectral_config:
+    n_frequencies: 36
+    freq_min_hz: 0.04
+    freq_max_hz: 1.0
+    n_directions: 36
+    spreading_degrees: 25.0
+    spectral_shape: "JONSWAP"
+
+# SWAN physics settings
+swan_physics:
+  generation:
+    model: "WESTH"
+    whitecapping: true
+  breaking:
+    model: "BKD"
+    alpha: 1.0
+    gamma: 0.73
+  friction:
+    model: "JONSWAP"
+    coefficient: 0.067
+  triads:
+    enabled: false
+  quadruplets:
+    enabled: true
+
+# Output specification
+outputs:
+  variables:
+    - name: "Hsig"
+      description: "Significant wave height"
+    - name: "TPsmoo"
+      description: "Smoothed peak period"
+    - name: "Dir"
+      description: "Mean wave direction"
+    - name: "Depth"
+      description: "Water depth"
+  partition_count: 6
+  format: "LAY3"

@@ -1,0 +1,71 @@
+# Region Configuration Template
+# Copy this to regions/<region_name>/region.yaml and customize
+# Version: 1.0.0
+
+name: region_name                    # Lowercase with underscores
+display_name: "Region Display Name"
+version: "1.0.0"
+
+# Geographic bounds (WGS84)
+bounds:
+  lat_min: 0.0
+  lat_max: 0.0
+  lon_min: 0.0
+  lon_max: 0.0
+
+# Optional sub-regions
+sub_regions: {}
+
+# WW3 data source configuration
+ww3_source:
+  description: "NOAA WaveWatch III Global Model"
+  endpoint: "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
+  model: "gfswave.global"
+  native_resolution_deg: 0.25
+  variables:
+    - htsgwsfc
+    - perpwsfc
+    - dirpwsfc
+  fetch_bounds:
+    lat_min: 0.0
+    lat_max: 0.0
+    lon_min: 0.0
+    lon_max: 0.0
+
+# Islands or other features requiring boundary points (optional)
+channel_islands: []
+
+# WW3 extraction points - MUST BE GENERATED BEFORE USE
+boundaries:
+  ww3_extraction: "boundaries/ww3_extraction_points.json"
+  extraction_point_count: 0  # Update after generating points
+
+# Domain hierarchy
+domains:
+  outer:
+    path: "domains/outer"
+    description: "Coarse mesh bridging WW3 to nearshore"
+    active_mesh: null
+  inner:
+    path: "domains/inner"
+    description: "Fine mesh for nearshore wave propagation"
+    active_mesh: null
+  spots:
+    path: "domains/spots"
+    description: "Very fine meshes for surf spot wave breaking"
+    active_meshes: {}
+
+# Bathymetry source priority
+bathymetry_sources:
+  - name: "gebco_2024"
+    description: "GEBCO 2024 Global Bathymetry"
+    type: "local"
+    path: "raw/bathymetry/gebco_2024/gebco_2024.nc"
+    resolution_m: 450
+    priority: 1
+    use_for:
+      - outer
+      - inner
+
+# Surf spots within this region
+surf_spots: []
