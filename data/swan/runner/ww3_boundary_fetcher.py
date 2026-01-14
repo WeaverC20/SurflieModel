@@ -1,8 +1,8 @@
 """
 WW3 Boundary Fetcher for SWAN
 
-Fetches WaveWatch III data at specific boundary points and formats
-it for SWAN boundary conditions (TPAR format).
+Fetches WaveWatch III data at specific boundary points for SWAN
+boundary conditions in stationary mode.
 """
 
 import asyncio
@@ -10,7 +10,7 @@ import json
 import logging
 import numpy as np
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BoundaryPoint:
-    """A single boundary point with its wave data time series."""
+    """A single boundary point with its wave data."""
     lon: float
     lat: float
     index: int  # Index along the boundary (0 = first point)
 
-    # Time series data (populated after fetch)
+    # Wave data (populated after fetch)
     times: Optional[List[datetime]] = None
     hs: Optional[List[float]] = None  # Significant wave height (m)
     tp: Optional[List[float]] = None  # Peak period (s)
@@ -37,24 +37,18 @@ class BoundaryPoint:
 
 class WW3BoundaryFetcher:
     """
-    Fetches WW3 data at boundary points and formats for SWAN.
+    Fetches WW3 data at boundary points for SWAN stationary runs.
 
     Uses the existing WaveWatchFetcher to get grid data, then extracts
     values at the specific boundary points defined in the boundary JSON files.
 
-    Output format is TPAR (parametric) which requires:
-    - Hs: Significant wave height (m)
-    - Tp: Peak wave period (s)
-    - Dir: Wave direction (degrees, direction FROM)
-    - Spread: Directional spreading (degrees)
-
     Example usage:
         fetcher = WW3BoundaryFetcher()
-        boundary_data = await fetcher.fetch_boundary(
+        metadata, points = await fetcher.fetch_boundary(
             boundary_file="data/swan/ww3_endpoints/socal/ww3_boundary_west.json",
-            forecast_hours=[0, 3, 6, 12, 24, 48]
+            forecast_hours=[0]  # Single hour for stationary mode
         )
-        fetcher.write_tpar_files(boundary_data, output_dir="path/to/run")
+        # Use points[i].hs[0], points[i].tp[0], etc. for wave parameters
     """
 
     # Default directional spreading when not available from WW3
@@ -159,13 +153,13 @@ class WW3BoundaryFetcher:
 
         Args:
             boundary_file: Path to boundary JSON file
-            forecast_hours: List of forecast hours to fetch (default: 0-72 every 3h)
+            forecast_hours: List of forecast hours to fetch (default: [0] for stationary)
 
         Returns:
             Tuple of (metadata dict, list of BoundaryPoint objects with data)
         """
         if forecast_hours is None:
-            forecast_hours = list(range(0, 73, 3))  # 0 to 72 hours, every 3 hours
+            forecast_hours = [0]  # Default to current hour for stationary mode
 
         # Load boundary definition
         metadata, points = self.load_boundary_points(boundary_file)
@@ -235,124 +229,3 @@ class WW3BoundaryFetcher:
                     point.spread.append(np.nan)
 
         return metadata, points
-
-    def format_tpar_time(self, dt: datetime) -> str:
-        """Format datetime for TPAR file: YYYYMMDD.HHMMSS"""
-        return dt.strftime("%Y%m%d.%H%M%S")
-
-    def write_tpar_files(
-        self,
-        points: List[BoundaryPoint],
-        output_dir: str | Path,
-        filename_prefix: str = "boundary"
-    ) -> List[Path]:
-        """
-        Write TPAR files for each boundary point.
-
-        Creates one file per boundary point with time series of wave parameters.
-
-        TPAR format:
-            TPAR
-            yyyymmdd.hhmmss Hs Tp Dir spread
-            yyyymmdd.hhmmss Hs Tp Dir spread
-            ...
-
-        Args:
-            points: List of BoundaryPoint objects with data
-            output_dir: Directory to write files
-            filename_prefix: Prefix for output files
-
-        Returns:
-            List of paths to written files
-        """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        written_files = []
-
-        for point in points:
-            filename = f"{filename_prefix}_{point.index:03d}.tpar"
-            filepath = output_dir / filename
-
-            with open(filepath, 'w') as f:
-                f.write("TPAR\n")
-
-                for i, time in enumerate(point.times):
-                    if time is None:
-                        continue
-
-                    hs = point.hs[i]
-                    tp = point.tp[i]
-                    wave_dir = point.dir[i]
-                    spread = point.spread[i]
-
-                    # Skip if any values are NaN
-                    if any(np.isnan(v) for v in [hs, tp, wave_dir, spread]):
-                        logger.warning(f"Skipping NaN values at {time} for point {point.index}")
-                        continue
-
-                    time_str = self.format_tpar_time(time)
-                    f.write(f"{time_str} {hs:.2f} {tp:.1f} {wave_dir:.1f} {spread:.1f}\n")
-
-            written_files.append(filepath)
-            logger.info(f"Wrote {filepath.name}: {len(point.times)} timesteps")
-
-        return written_files
-
-    def get_time_range(self, points: List[BoundaryPoint]) -> Tuple[datetime, datetime]:
-        """
-        Get the time range of the fetched data.
-
-        Returns:
-            Tuple of (start_time, end_time)
-        """
-        all_times = []
-        for point in points:
-            all_times.extend([t for t in point.times if t is not None])
-
-        return min(all_times), max(all_times)
-
-
-def fetch_boundary_sync(
-    boundary_file: str | Path,
-    output_dir: str | Path,
-    forecast_hours: Optional[List[int]] = None
-) -> List[Path]:
-    """
-    Synchronous wrapper for fetching boundary data.
-
-    Convenience function that handles the async event loop.
-
-    Args:
-        boundary_file: Path to boundary JSON file
-        output_dir: Directory to write TPAR files
-        forecast_hours: List of forecast hours (default: 0-72 every 3h)
-
-    Returns:
-        List of paths to written TPAR files
-    """
-    fetcher = WW3BoundaryFetcher()
-
-    async def _fetch():
-        metadata, points = await fetcher.fetch_boundary(boundary_file, forecast_hours)
-        return fetcher.write_tpar_files(points, output_dir)
-
-    return asyncio.run(_fetch())
-
-
-# CLI for testing
-if __name__ == "__main__":
-    import argparse
-
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-    parser = argparse.ArgumentParser(description="Fetch WW3 boundary conditions for SWAN")
-    parser.add_argument("boundary_file", help="Path to boundary JSON file")
-    parser.add_argument("--output-dir", "-o", default=".", help="Output directory for TPAR files")
-    parser.add_argument("--hours", type=int, nargs="+", default=None,
-                       help="Forecast hours to fetch (default: 0-72 every 3h)")
-
-    args = parser.parse_args()
-
-    files = fetch_boundary_sync(args.boundary_file, args.output_dir, args.hours)
-    print(f"\nWrote {len(files)} TPAR files to {args.output_dir}")

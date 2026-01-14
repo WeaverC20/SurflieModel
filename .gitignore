@@ -67,6 +67,7 @@ data/downloaded_weather_data/
 data/grids/
 data/swan_runs/
 data/swan/runs/
+data/swan/analysis/plots/
 *.grd
 *.swn
 *.tpar

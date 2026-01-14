@@ -10,15 +10,19 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import numpy as np
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# Meters per degree of latitude (approximately constant)
-METERS_PER_DEG_LAT = 111_000
+@dataclass
+class BoundaryWaveParams:
+    """Wave parameters at a single boundary point."""
+    distance: float  # Distance along boundary (degrees for spherical coords)
+    hs: float        # Significant wave height (m)
+    tp: float        # Peak period (s)
+    dir: float       # Wave direction (degrees, nautical convention)
+    spread: float    # Directional spreading (degrees)
 
 
 @dataclass
@@ -26,8 +30,11 @@ class PhysicsSettings:
     """
     Physics settings for SWAN simulation.
 
-    These are reasonable defaults for nearshore wave modeling.
-    Can be customized per-run if needed.
+    Defaults are for boundary-driven nearshore wave modeling without wind:
+    - Bottom friction enabled (JONSWAP)
+    - Depth-limited breaking enabled
+    - Whitecapping/GEN3 disabled (requires wind input)
+    - Triads disabled (for swell propagation)
     """
     # Bottom friction
     friction: str = "JONSWAP"
@@ -38,15 +45,20 @@ class PhysicsSettings:
     breaking_alpha: float = 1.0
     breaking_gamma: float = 0.73
 
-    # Whitecapping
-    whitecapping: bool = True
+    # Whitecapping (GEN3) - disabled by default since it requires wind input
+    # and enables quadruplets which also need wind
+    whitecapping: bool = False
 
     # Triads (shallow water nonlinear interactions)
-    triads: bool = True
+    triads: bool = False
 
     def to_swan_commands(self) -> List[str]:
         """Generate SWAN physics command strings."""
         commands = []
+
+        # For boundary-driven runs without wind, turn off wind growth and quadruplets
+        commands.append("OFF WINDGROWTH")
+        commands.append("OFF QUAD")
 
         # Friction
         if self.friction.upper() == "JONSWAP":
@@ -60,9 +72,9 @@ class PhysicsSettings:
         if self.breaking:
             commands.append(f"BREAKING CONSTANT {self.breaking_alpha} {self.breaking_gamma}")
 
-        # Whitecapping
+        # Whitecapping - use GEN3 which bundles source terms (requires wind)
         if self.whitecapping:
-            commands.append("WHITECAPPING KOMEN")
+            commands.append("GEN3 KOMEN")
 
         # Triads
         if self.triads:
@@ -78,7 +90,7 @@ class SwanInputGenerator:
 
     Combines:
     - Mesh (CGRID, INPGRID, READINP for bathymetry)
-    - Boundary conditions (BOUNDSPEC with TPAR files)
+    - Boundary conditions (BOUNDSPEC with PAR parametric values)
     - Physics settings
 
     Example usage:
@@ -86,9 +98,10 @@ class SwanInputGenerator:
             mesh_dir="data/meshes/socal/coarse",
             boundary_file="data/swan/ww3_endpoints/socal/ww3_boundary_west.json"
         )
+        wave_params = [BoundaryWaveParams(...), ...]
         generator.generate(
             output_dir="data/swan/runs/socal/latest",
-            tpar_files=["west_000.tpar", "west_001.tpar", ...]
+            wave_params=wave_params
         )
     """
 
@@ -144,10 +157,11 @@ class SwanInputGenerator:
         """
         Calculate cumulative distances along boundary for each point.
 
-        SWAN requires distances in meters from the first corner of the side.
+        For spherical coordinates (COORD SPHE), SWAN expects distances
+        in degrees along the boundary side.
 
         Returns:
-            List of distances in meters
+            List of distances in degrees
         """
         points = self.boundary_metadata["points"]
         side = self._get_boundary_side_code()
@@ -157,68 +171,69 @@ class SwanInputGenerator:
 
         for point in points:
             if side in ["W", "E"]:
-                # Vertical boundary - distance is in latitude direction
+                # Vertical boundary - distance is latitude difference in degrees
                 delta_lat = point[1] - first_point[1]
-                distance = abs(delta_lat) * METERS_PER_DEG_LAT
+                distance = abs(delta_lat)
             else:
-                # Horizontal boundary - distance is in longitude direction
-                # Need to account for longitude spacing varying with latitude
-                center_lat = (point[1] + first_point[1]) / 2
-                meters_per_deg_lon = METERS_PER_DEG_LAT * np.cos(np.radians(center_lat))
+                # Horizontal boundary - distance is longitude difference in degrees
                 delta_lon = point[0] - first_point[0]
-                distance = abs(delta_lon) * meters_per_deg_lon
+                distance = abs(delta_lon)
 
             distances.append(distance)
 
         return distances
 
-    def generate_boundspec_command(self, tpar_files: List[str]) -> List[str]:
+    def _generate_boundspec_command(self, wave_params: List[BoundaryWaveParams]) -> List[str]:
         """
-        Generate BOUNDSPEC command with VARIABLE TPAR files.
+        Generate BOUNDSPEC command with PAR (parametric values) for stationary mode.
+
+        This embeds wave parameters directly in the INPUT file.
+        Required for stationary mode in SWAN.
 
         Args:
-            tpar_files: List of TPAR filenames (one per boundary point)
+            wave_params: List of BoundaryWaveParams (one per boundary point)
 
         Returns:
             List of SWAN command lines for boundary specification
         """
-        if len(tpar_files) != self.boundary_metadata["n_points"]:
+        if len(wave_params) != self.boundary_metadata["n_points"]:
             raise ValueError(
-                f"Number of TPAR files ({len(tpar_files)}) doesn't match "
+                f"Number of wave params ({len(wave_params)}) doesn't match "
                 f"boundary points ({self.boundary_metadata['n_points']})"
             )
 
         side = self._get_boundary_side_code()
-        distances = self._calculate_boundary_distances()
 
-        # Build BOUNDSPEC command
-        # BOUNDSPEC SIDE <side> CCW VARIABLE FILE &
-        #     <dist1> '<file1>' &
-        #     <dist2> '<file2>' ...
-        lines = [f"BOUNDSPEC SIDE {side} CCW VARIABLE FILE &"]
+        # Build BOUNDSPEC command with PAR
+        # BOUNDSPEC SIDE <side> CCW VARIABLE PAR &
+        #     <dist1> <hs1> <per1> <dir1> <dd1> &
+        #     <dist2> <hs2> <per2> <dir2> <dd2> ...
+        lines = [f"BOUNDSPEC SIDE {side} CCW VARIABLE PAR &"]
 
-        for i, (dist, tpar_file) in enumerate(zip(distances, tpar_files)):
+        for i, params in enumerate(wave_params):
+            # Distance in degrees needs more precision than meters
+            param_str = f"    {params.distance:.4f} {params.hs:.2f} {params.tp:.1f} {params.dir:.1f} {params.spread:.1f}"
             # Last line doesn't need continuation
-            if i == len(tpar_files) - 1:
-                lines.append(f"    {dist:.1f} '{tpar_file}'")
+            if i == len(wave_params) - 1:
+                lines.append(param_str)
             else:
-                lines.append(f"    {dist:.1f} '{tpar_file}' &")
+                lines.append(f"{param_str} &")
 
         return lines
 
     def generate(
         self,
         output_dir: str | Path,
-        tpar_files: List[str],
+        wave_params: List[BoundaryWaveParams],
         project_name: Optional[str] = None,
         run_id: str = "001"
     ) -> Path:
         """
-        Generate complete SWAN INPUT file.
+        Generate SWAN INPUT file for stationary mode.
 
         Args:
             output_dir: Directory to write INPUT file
-            tpar_files: List of TPAR boundary condition filenames
+            wave_params: List of BoundaryWaveParams (one per boundary point)
             project_name: Project name (default: mesh name)
             run_id: Run identifier (default: "001")
 
@@ -267,9 +282,9 @@ class SwanInputGenerator:
         lines.append(self.mesh_metadata["swan_commands"]["readinp"])
         lines.append("")
 
-        # Boundary conditions
-        lines.append("$ Boundary conditions (WW3 TPAR format)")
-        boundspec_lines = self.generate_boundspec_command(tpar_files)
+        # Boundary conditions - using PAR syntax for stationary mode
+        lines.append("$ Boundary conditions (WW3 parametric)")
+        boundspec_lines = self._generate_boundspec_command(wave_params)
         lines.extend(boundspec_lines)
         lines.append("")
 
@@ -284,17 +299,16 @@ class SwanInputGenerator:
         lines.append("NUM ACCUR 0.02 0.02 0.02 95 STAT 50")
         lines.append("")
 
-        # Output - table output at all grid points
+        # Output - ASCII format (LAY 3) for easy reading with numpy
         lines.append("$ Output")
-        lines.append("OUTPUT OPTIONS BLOCK 4")
-        lines.append("BLOCK 'COMPGRID' NOHEAD 'hsig.mat' LAY 4 HSIG 1.")
-        lines.append("BLOCK 'COMPGRID' NOHEAD 'tps.mat' LAY 4 TPS 1.")
-        lines.append("BLOCK 'COMPGRID' NOHEAD 'dir.mat' LAY 4 DIR 1.")
+        lines.append("BLOCK 'COMPGRID' NOHEAD 'hsig.mat' LAY 3 HSIG 1.")
+        lines.append("BLOCK 'COMPGRID' NOHEAD 'tps.mat' LAY 3 TPS 1.")
+        lines.append("BLOCK 'COMPGRID' NOHEAD 'dir.mat' LAY 3 DIR 1.")
         lines.append("")
 
-        # Compute
+        # Compute - just COMPUTE for stationary mode
         lines.append("$ Compute")
-        lines.append("COMPUTE STAT")
+        lines.append("COMPUTE")
         lines.append("")
 
         # Stop
@@ -326,65 +340,3 @@ class SwanInputGenerator:
             f"  Triads: {self.physics.triads}",
         ]
         return '\n'.join(lines)
-
-
-def generate_swan_input(
-    mesh_dir: str | Path,
-    boundary_file: str | Path,
-    output_dir: str | Path,
-    tpar_files: List[str],
-    physics: Optional[PhysicsSettings] = None
-) -> Path:
-    """
-    Convenience function to generate SWAN INPUT file.
-
-    Args:
-        mesh_dir: Directory containing mesh files
-        boundary_file: Path to boundary JSON file
-        output_dir: Directory for output
-        tpar_files: List of TPAR boundary condition filenames
-        physics: Physics settings (uses defaults if None)
-
-    Returns:
-        Path to generated INPUT file
-    """
-    if physics is None:
-        physics = PhysicsSettings()
-
-    generator = SwanInputGenerator(
-        mesh_dir=str(mesh_dir),
-        boundary_file=str(boundary_file),
-        physics=physics
-    )
-
-    return generator.generate(output_dir, tpar_files)
-
-
-# CLI for testing
-if __name__ == "__main__":
-    import argparse
-
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-    parser = argparse.ArgumentParser(description="Generate SWAN INPUT file")
-    parser.add_argument("mesh_dir", help="Directory containing mesh files")
-    parser.add_argument("boundary_file", help="Path to boundary JSON file")
-    parser.add_argument("--output-dir", "-o", default=".", help="Output directory")
-    parser.add_argument("--tpar-prefix", default="west", help="TPAR file prefix")
-    parser.add_argument("--n-points", type=int, default=11, help="Number of boundary points")
-
-    args = parser.parse_args()
-
-    # Generate TPAR file list
-    tpar_files = [f"{args.tpar_prefix}_{i:03d}.tpar" for i in range(args.n_points)]
-
-    generator = SwanInputGenerator(
-        mesh_dir=args.mesh_dir,
-        boundary_file=args.boundary_file
-    )
-
-    print(generator.summary())
-    print()
-
-    input_path = generator.generate(args.output_dir, tpar_files)
-    print(f"\nGenerated: {input_path}")

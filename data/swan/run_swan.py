@@ -30,7 +30,13 @@ from typing import List, Optional
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from data.swan.runner import WW3BoundaryFetcher, SwanInputGenerator, PhysicsSettings
+from data.swan.runner import (
+    WW3BoundaryFetcher,
+    BoundaryPoint,
+    SwanInputGenerator,
+    PhysicsSettings,
+    BoundaryWaveParams,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,12 +121,12 @@ class SwanRunner:
             raise FileNotFoundError(f"No mesh metadata found in {self.mesh_dir}")
         return json_files[0].stem
 
-    async def fetch_boundary_conditions(self) -> List[Path]:
+    async def fetch_boundary_conditions(self) -> List[BoundaryPoint]:
         """
-        Fetch WW3 boundary conditions and write TPAR files.
+        Fetch WW3 boundary conditions.
 
         Returns:
-            List of paths to generated TPAR files
+            List of BoundaryPoint objects with wave data
         """
         logger.info(f"Fetching WW3 boundary conditions for hours: {self.forecast_hours}")
 
@@ -130,22 +136,21 @@ class SwanRunner:
             forecast_hours=self.forecast_hours
         )
 
-        # Write TPAR files to run directory
-        tpar_files = fetcher.write_tpar_files(
-            points,
-            self.run_dir,
-            filename_prefix=self.boundary_side
-        )
+        # Log summary of fetched data
+        if points and points[0].hs:
+            avg_hs = sum(p.hs[0] for p in points) / len(points)
+            avg_tp = sum(p.tp[0] for p in points) / len(points)
+            avg_dir = sum(p.dir[0] for p in points) / len(points)
+            logger.info(f"Boundary conditions: avg Hs={avg_hs:.2f}m, Tp={avg_tp:.1f}s, Dir={avg_dir:.0f}°")
 
-        logger.info(f"Wrote {len(tpar_files)} TPAR files to {self.run_dir}")
-        return tpar_files
+        return points
 
-    def generate_input_file(self, tpar_files: List[Path]) -> Path:
+    def generate_input_file(self, boundary_points: List[BoundaryPoint]) -> Path:
         """
-        Generate SWAN INPUT file.
+        Generate SWAN INPUT file for stationary mode.
 
         Args:
-            tpar_files: List of TPAR file paths
+            boundary_points: List of BoundaryPoint objects with wave data
 
         Returns:
             Path to generated INPUT file
@@ -158,12 +163,26 @@ class SwanRunner:
             physics=self.physics
         )
 
-        # Use just filenames (not full paths) for INPUT file
-        tpar_filenames = [f.name for f in tpar_files]
+        # Calculate distances along boundary
+        distances = generator._calculate_boundary_distances()
 
+        # Convert boundary points to BoundaryWaveParams
+        # Use first timestep (index 0) since we're in stationary mode
+        wave_params = []
+        for i, (point, distance) in enumerate(zip(boundary_points, distances)):
+            params = BoundaryWaveParams(
+                distance=distance,
+                hs=point.hs[0],      # First timestep
+                tp=point.tp[0],
+                dir=point.dir[0],
+                spread=point.spread[0]
+            )
+            wave_params.append(params)
+
+        # Generate INPUT file (PAR syntax for stationary mode)
         input_path = generator.generate(
             output_dir=self.run_dir,
-            tpar_files=tpar_filenames,
+            wave_params=wave_params,
             project_name=f"{self.region}_{self.mesh}",
             run_id="001"
         )
@@ -229,10 +248,10 @@ class SwanRunner:
 
         try:
             # Step 1: Fetch boundary conditions
-            tpar_files = await self.fetch_boundary_conditions()
+            boundary_points = await self.fetch_boundary_conditions()
 
-            # Step 2: Generate INPUT file
-            input_path = self.generate_input_file(tpar_files)
+            # Step 2: Generate INPUT file (uses PAR syntax for stationary mode)
+            input_path = self.generate_input_file(boundary_points)
 
             # Step 3: Copy bathymetry
             self.copy_bathymetry()

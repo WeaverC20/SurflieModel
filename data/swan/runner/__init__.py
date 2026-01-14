@@ -7,12 +7,13 @@ Orchestrates SWAN simulations including:
 - Model execution
 """
 
-from .ww3_boundary_fetcher import WW3BoundaryFetcher
-from .input_generator import SwanInputGenerator, PhysicsSettings, generate_swan_input
+from .ww3_boundary_fetcher import WW3BoundaryFetcher, BoundaryPoint
+from .input_generator import SwanInputGenerator, PhysicsSettings, BoundaryWaveParams
 
 __all__ = [
     "WW3BoundaryFetcher",
+    "BoundaryPoint",
     "SwanInputGenerator",
     "PhysicsSettings",
-    "generate_swan_input",
+    "BoundaryWaveParams",
 ]
