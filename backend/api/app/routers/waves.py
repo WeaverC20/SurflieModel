@@ -2,22 +2,32 @@
 Wave Forecast Router
 
 Serves wave forecast data from WaveWatch III model for visualization.
+Reads from local NetCDF files first, falls back to external API if unavailable.
 """
 
+import json
 import sys
 import logging
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 import numpy as np
+import pandas as pd
+import xarray as xr
 
 logger = logging.getLogger(__name__)
 
 # Add data pipelines to path
 project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root / "data" / "pipelines"))
+
+# Local data paths
+LOCAL_DATA_DIR = project_root / "data" / "downloaded_weather_data"
+LOCAL_WAVES_DIR = LOCAL_DATA_DIR / "waves"
+LOCAL_INDEX_FILE = LOCAL_DATA_DIR / "index.json"
 
 try:
     from wave.wavewatch_fetcher import WaveWatchFetcher
@@ -26,6 +36,101 @@ except ImportError as e:
     WaveWatchFetcher = None
 
 router = APIRouter(prefix="/waves", tags=["waves"])
+
+
+def get_latest_wave_file() -> Optional[Path]:
+    """Get the most recent local wave NetCDF file."""
+    if not LOCAL_WAVES_DIR.exists():
+        return None
+    files = sorted(LOCAL_WAVES_DIR.glob("ww3_*.nc"))
+    return files[-1] if files else None
+
+
+def read_local_wave_grid(
+    forecast_hour: int,
+    min_lat: float,
+    max_lat: float,
+    min_lon: float,
+    max_lon: float,
+) -> Optional[Dict[str, Any]]:
+    """Read wave grid from local NetCDF file."""
+    filepath = get_latest_wave_file()
+    if not filepath:
+        return None
+
+    try:
+        ds = xr.open_dataset(filepath)
+
+        # Get cycle time and calculate forecast hours
+        cycle_time = datetime.fromisoformat(ds.attrs.get("cycle_time", ""))
+        times = pd.to_datetime(ds.time.values)
+        forecast_hours = [(t - cycle_time).total_seconds() / 3600 for t in times]
+
+        # Find closest forecast hour
+        time_idx = min(
+            range(len(forecast_hours)),
+            key=lambda i: abs(forecast_hours[i] - forecast_hour)
+        )
+
+        # Subset by lat/lon bounds
+        ds_subset = ds.sel(
+            lat=slice(min_lat, max_lat),
+            lon=slice(min_lon, max_lon)
+        )
+
+        lat = ds_subset.lat.values.tolist()
+        lon = ds_subset.lon.values.tolist()
+
+        def extract_var(var_name: str) -> List[List[float]]:
+            """Extract 2D variable at time index."""
+            if var_name not in ds_subset:
+                return [[None] * len(lon) for _ in range(len(lat))]
+            data = ds_subset[var_name].isel(time=time_idx).values
+            return [
+                [None if np.isnan(v) else float(v) for v in row]
+                for row in data
+            ]
+
+        forecast_time = times[time_idx]
+
+        result = {
+            "lat": lat,
+            "lon": lon,
+            "significant_wave_height": extract_var("significant_wave_height"),
+            "peak_wave_period": extract_var("peak_wave_period"),
+            "mean_wave_direction": extract_var("mean_wave_direction"),
+            "wind_wave_height": extract_var("wind_wave_height"),
+            "wind_wave_period": extract_var("wind_wave_period"),
+            "wind_wave_direction": extract_var("wind_wave_direction"),
+            "primary_swell_height": extract_var("primary_swell_height"),
+            "primary_swell_period": extract_var("primary_swell_period"),
+            "primary_swell_direction": extract_var("primary_swell_direction"),
+            "wind_sea_height": extract_var("wind_wave_height"),
+            "swell_height": extract_var("primary_swell_height"),
+            "forecast_time": forecast_time.isoformat(),
+            "cycle_time": cycle_time.isoformat(),
+            "forecast_hour": int(forecast_hours[time_idx]),
+            "resolution_deg": 0.25,
+            "model": "WaveWatch III",
+            "source": "local",
+            "units": {
+                "significant_wave_height": "m",
+                "peak_wave_period": "s",
+                "mean_wave_direction": "degrees",
+                "wind_wave_height": "m",
+                "primary_swell_height": "m",
+                "lat": "degrees",
+                "lon": "degrees"
+            }
+        }
+
+        ds.close()
+        logger.info(f"Loaded wave data from local file: {filepath.name}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error reading local wave data: {e}")
+        return None
 
 
 @router.get("/grid")
@@ -37,7 +142,9 @@ async def get_wave_grid(
     forecast_hour: int = Query(0, description="Forecast hour (0, 3, 6, etc.)"),
 ):
     """
-    Get wave forecast grid from WaveWatch III model
+    Get wave forecast grid from WaveWatch III model.
+
+    Reads from local NetCDF files first (fast), falls back to external API if unavailable.
 
     Returns a grid of wave forecast data including:
     - Significant wave height
@@ -46,85 +153,87 @@ async def get_wave_grid(
     - Wind sea and swell components
     - Forecast and cycle times
     """
-    if WaveWatchFetcher is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Wave fetcher not available. Check server logs."
-        )
-
     def serialize_array(arr):
         """Convert array to JSON-serializable list, handling NaN"""
         if isinstance(arr, list):
-            # Already a list - check if it's 2D
             if arr and isinstance(arr[0], list):
-                # 2D list
                 return [
                     [None if (isinstance(val, float) and np.isnan(val)) else val for val in row]
                     for row in arr
                 ]
             else:
-                # 1D list
                 return [None if (isinstance(val, float) and np.isnan(val)) else val for val in arr]
         return arr
 
-    try:
-        fetcher = WaveWatchFetcher()
-        grid_data = await fetcher.fetch_wave_grid(
-            min_lat=min_lat,
-            max_lat=max_lat,
-            min_lon=min_lon,
-            max_lon=max_lon,
-            forecast_hour=forecast_hour
-        )
+    # Try local data first
+    grid_data = read_local_wave_grid(
+        forecast_hour=forecast_hour,
+        min_lat=min_lat,
+        max_lat=max_lat,
+        min_lon=min_lon,
+        max_lon=max_lon,
+    )
 
-        logger.info(
-            f"Serving wave grid: {len(grid_data['lat'])} x {len(grid_data['lon'])} points"
-        )
+    # Fall back to external API if local data unavailable
+    if grid_data is None:
+        if WaveWatchFetcher is None:
+            raise HTTPException(
+                status_code=500,
+                detail="No local wave data and wave fetcher not available."
+            )
 
-        # Serialize arrays to handle NaN values
-        serialized_data = {
-            "lat": serialize_array(grid_data["lat"]),
-            "lon": serialize_array(grid_data["lon"]),
-            # Combined sea state
-            "significant_wave_height": serialize_array(grid_data["significant_wave_height"]),
-            "peak_wave_period": serialize_array(grid_data["peak_wave_period"]),
-            "mean_wave_direction": serialize_array(grid_data["mean_wave_direction"]),
-            # Wind waves
-            "wind_wave_height": serialize_array(grid_data.get("wind_wave_height", grid_data.get("wind_sea_height"))),
-            "wind_wave_period": serialize_array(grid_data.get("wind_wave_period")),
-            "wind_wave_direction": serialize_array(grid_data.get("wind_wave_direction")),
-            # Primary swell
-            "primary_swell_height": serialize_array(grid_data.get("primary_swell_height", grid_data.get("swell_height"))),
-            "primary_swell_period": serialize_array(grid_data.get("primary_swell_period")),
-            "primary_swell_direction": serialize_array(grid_data.get("primary_swell_direction")),
-            # Legacy fields
-            "wind_sea_height": serialize_array(grid_data.get("wind_sea_height", grid_data.get("wind_wave_height"))),
-            "swell_height": serialize_array(grid_data.get("swell_height", grid_data.get("primary_swell_height"))),
-            # Metadata
-            "forecast_time": grid_data["forecast_time"],
-            "cycle_time": grid_data["cycle_time"],
-            "forecast_hour": grid_data["forecast_hour"],
-            "resolution_deg": grid_data["resolution_deg"],
-            "model": grid_data["model"],
-            "units": grid_data["units"]
-        }
+        try:
+            logger.info("No local wave data, fetching from external API...")
+            fetcher = WaveWatchFetcher()
+            grid_data = await fetcher.fetch_wave_grid(
+                min_lat=min_lat,
+                max_lat=max_lat,
+                min_lon=min_lon,
+                max_lon=max_lon,
+                forecast_hour=forecast_hour
+            )
+        except Exception as e:
+            logger.error(f"Error fetching wave grid: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch wave data: {str(e)}"
+            )
 
-        # Add secondary swell if available
-        if "secondary_swell_height" in grid_data:
-            serialized_data["secondary_swell_height"] = serialize_array(grid_data["secondary_swell_height"])
-        if "secondary_swell_period" in grid_data:
-            serialized_data["secondary_swell_period"] = serialize_array(grid_data["secondary_swell_period"])
-        if "secondary_swell_direction" in grid_data:
-            serialized_data["secondary_swell_direction"] = serialize_array(grid_data["secondary_swell_direction"])
+    logger.info(
+        f"Serving wave grid: {len(grid_data['lat'])} x {len(grid_data['lon'])} points"
+    )
 
-        return JSONResponse(content=serialized_data)
+    # Serialize arrays to handle NaN values
+    serialized_data = {
+        "lat": serialize_array(grid_data["lat"]),
+        "lon": serialize_array(grid_data["lon"]),
+        "significant_wave_height": serialize_array(grid_data["significant_wave_height"]),
+        "peak_wave_period": serialize_array(grid_data["peak_wave_period"]),
+        "mean_wave_direction": serialize_array(grid_data["mean_wave_direction"]),
+        "wind_wave_height": serialize_array(grid_data.get("wind_wave_height", grid_data.get("wind_sea_height"))),
+        "wind_wave_period": serialize_array(grid_data.get("wind_wave_period")),
+        "wind_wave_direction": serialize_array(grid_data.get("wind_wave_direction")),
+        "primary_swell_height": serialize_array(grid_data.get("primary_swell_height", grid_data.get("swell_height"))),
+        "primary_swell_period": serialize_array(grid_data.get("primary_swell_period")),
+        "primary_swell_direction": serialize_array(grid_data.get("primary_swell_direction")),
+        "wind_sea_height": serialize_array(grid_data.get("wind_sea_height", grid_data.get("wind_wave_height"))),
+        "swell_height": serialize_array(grid_data.get("swell_height", grid_data.get("primary_swell_height"))),
+        "forecast_time": grid_data["forecast_time"],
+        "cycle_time": grid_data["cycle_time"],
+        "forecast_hour": grid_data["forecast_hour"],
+        "resolution_deg": grid_data["resolution_deg"],
+        "model": grid_data["model"],
+        "units": grid_data["units"]
+    }
 
-    except Exception as e:
-        logger.error(f"Error fetching wave grid: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch wave data: {str(e)}"
-        )
+    if "secondary_swell_height" in grid_data:
+        serialized_data["secondary_swell_height"] = serialize_array(grid_data["secondary_swell_height"])
+    if "secondary_swell_period" in grid_data:
+        serialized_data["secondary_swell_period"] = serialize_array(grid_data["secondary_swell_period"])
+    if "secondary_swell_direction" in grid_data:
+        serialized_data["secondary_swell_direction"] = serialize_array(grid_data["secondary_swell_direction"])
+
+    return JSONResponse(content=serialized_data)
 
 
 def direction_to_compass(degrees: float) -> str:
