@@ -66,10 +66,13 @@ data/downloaded_weather_data/
 # SWAN/Grid files
 data/grids/
 data/swan_runs/
+data/swan/runs/
 *.grd
 *.swn
 *.tpar
 *.sp2
+*.bot
+*.mat
 
 # Jupyter
 .ipynb_checkpoints/
