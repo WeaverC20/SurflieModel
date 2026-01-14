@@ -61,6 +61,7 @@ data/raw/
 data/processed/
 data/cache/
 data/zarr/
+data/downloaded_weather_data/
 
 # SWAN/Grid files
 data/grids/
