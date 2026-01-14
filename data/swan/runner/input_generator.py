@@ -30,11 +30,14 @@ class PhysicsSettings:
     """
     Physics settings for SWAN simulation.
 
-    Defaults are for boundary-driven nearshore wave modeling without wind:
+    Defaults are for wind-driven nearshore wave modeling:
+    - GEN3 WESTH for wind-wave generation (van der Westhuysen formulation)
     - Bottom friction enabled (JONSWAP)
     - Depth-limited breaking enabled
-    - Whitecapping/GEN3 disabled (requires wind input)
     - Triads disabled (for swell propagation)
+
+    The WESTH formulation is preferred over KOMEN for nearshore applications
+    as it better handles mixed sea states (swell + wind sea).
     """
     # Bottom friction
     friction: str = "JONSWAP"
@@ -45,9 +48,8 @@ class PhysicsSettings:
     breaking_alpha: float = 1.0
     breaking_gamma: float = 0.73
 
-    # Whitecapping (GEN3) - disabled by default since it requires wind input
-    # and enables quadruplets which also need wind
-    whitecapping: bool = False
+    # GEN3 formulation: "WESTH" (recommended) or "KOMEN" (classic)
+    gen3_formulation: str = "WESTH"
 
     # Triads (shallow water nonlinear interactions)
     triads: bool = False
@@ -56,9 +58,10 @@ class PhysicsSettings:
         """Generate SWAN physics command strings."""
         commands = []
 
-        # For boundary-driven runs without wind, turn off wind growth and quadruplets
-        commands.append("OFF WINDGROWTH")
-        commands.append("OFF QUAD")
+        # GEN3 enables wind-wave generation, whitecapping, and quadruplets
+        # WESTH = van der Westhuysen formulation (better for mixed sea states)
+        # KOMEN = classic Komen formulation
+        commands.append(f"GEN3 {self.gen3_formulation.upper()}")
 
         # Friction
         if self.friction.upper() == "JONSWAP":
@@ -71,10 +74,6 @@ class PhysicsSettings:
         # Breaking
         if self.breaking:
             commands.append(f"BREAKING CONSTANT {self.breaking_alpha} {self.breaking_gamma}")
-
-        # Whitecapping - use GEN3 which bundles source terms (requires wind)
-        if self.whitecapping:
-            commands.append("GEN3 KOMEN")
 
         # Triads
         if self.triads:
@@ -225,6 +224,7 @@ class SwanInputGenerator:
         self,
         output_dir: str | Path,
         wave_params: List[BoundaryWaveParams],
+        wind_commands: Optional[List[str]] = None,
         project_name: Optional[str] = None,
         run_id: str = "001"
     ) -> Path:
@@ -234,6 +234,7 @@ class SwanInputGenerator:
         Args:
             output_dir: Directory to write INPUT file
             wave_params: List of BoundaryWaveParams (one per boundary point)
+            wind_commands: List of SWAN wind commands (INPGRID WIND, READINP WIND)
             project_name: Project name (default: mesh name)
             run_id: Run identifier (default: "001")
 
@@ -281,6 +282,12 @@ class SwanInputGenerator:
         lines.append(self.mesh_metadata["swan_commands"]["inpgrid"])
         lines.append(self.mesh_metadata["swan_commands"]["readinp"])
         lines.append("")
+
+        # Wind input (if provided)
+        if wind_commands:
+            lines.append("$ Wind forcing (GFS)")
+            lines.extend(wind_commands)
+            lines.append("")
 
         # Boundary conditions - using PAR syntax for stationary mode
         lines.append("$ Boundary conditions (WW3 parametric)")
@@ -334,9 +341,9 @@ class SwanInputGenerator:
             f"  Boundary points: {self.boundary_metadata['n_points']}",
             "",
             "Physics:",
+            f"  GEN3: {self.physics.gen3_formulation}",
             f"  Friction: {self.physics.friction} ({self.physics.friction_coefficient})",
             f"  Breaking: {self.physics.breaking}",
-            f"  Whitecapping: {self.physics.whitecapping}",
             f"  Triads: {self.physics.triads}",
         ]
         return '\n'.join(lines)
