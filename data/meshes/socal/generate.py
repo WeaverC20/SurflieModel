@@ -15,8 +15,16 @@ Region Bounds:
     Latitude:  32.0°N to 34.5°N (Mexico border to Point Conception)
     Longitude: 121.0°W to 117.0°W
 
+Output Structure:
+    data/meshes/socal/
+    ├── generate.py              # This script
+    └── coarse/                  # Coarse mesh (5km)
+        ├── socal_coarse.bot     # SWAN bathymetry
+        ├── socal_coarse.json    # Mesh metadata
+        └── socal_coarse.png     # Visualization
+
 Available Meshes:
-    - socal_coarse: 5km resolution (default)
+    - coarse: 5km resolution (default)
 """
 
 import sys
@@ -36,27 +44,36 @@ from data.meshes.generate_mesh import generate_mesh, load_mesh
 # =============================================================================
 
 REGION_NAME = "socal"
-OUTPUT_DIR = Path(__file__).parent  # data/meshes/socal/
+BASE_DIR = Path(__file__).parent  # data/meshes/socal/
 
-# Mesh configurations
+# Mesh configurations - each gets its own subfolder
 MESH_CONFIGS = {
     "coarse": {
         "name": "socal_coarse",
         "resolution_km": 5.0,
         "description": "Coarse mesh for initial testing and rapid iteration",
+        "folder": "coarse",
     },
     # Future mesh configurations can be added here:
     # "medium": {
     #     "name": "socal_medium",
     #     "resolution_km": 2.5,
     #     "description": "Medium resolution for production runs",
+    #     "folder": "medium",
     # },
     # "fine": {
     #     "name": "socal_fine",
     #     "resolution_km": 1.0,
     #     "description": "Fine resolution for detailed nearshore modeling",
+    #     "folder": "fine",
     # },
 }
+
+def get_mesh_dir(mesh_type: str) -> Path:
+    """Get the output directory for a mesh type."""
+    if mesh_type not in MESH_CONFIGS:
+        raise ValueError(f"Unknown mesh type: {mesh_type}")
+    return BASE_DIR / MESH_CONFIGS[mesh_type]["folder"]
 
 
 def generate_socal_mesh(
@@ -82,6 +99,7 @@ def generate_socal_mesh(
         raise ValueError(f"Unknown mesh type: {mesh_type}. Available: {available}")
 
     config = MESH_CONFIGS[mesh_type]
+    output_dir = get_mesh_dir(mesh_type)
 
     # Allow resolution override
     resolution = resolution_km if resolution_km is not None else config["resolution_km"]
@@ -95,13 +113,14 @@ def generate_socal_mesh(
     print(f"=" * 60)
     print(f"Generating SoCal Mesh: {name}")
     print(f"Description: {config['description']}")
+    print(f"Output: {output_dir}")
     print(f"=" * 60)
 
     mesh = generate_mesh(
         name=name,
         region_name=REGION_NAME,
         resolution_km=resolution,
-        output_dir=OUTPUT_DIR,
+        output_dir=output_dir,
         plot=plot,
         save_plot=save_plot,
     )
@@ -109,18 +128,44 @@ def generate_socal_mesh(
     return mesh
 
 
-def load_socal_mesh(name: str = None):
+def load_socal_mesh(mesh_type: str = "coarse", name: str = None):
     """
     Load a previously generated SoCal mesh.
 
     Args:
-        name: Mesh name (e.g., "socal_coarse"). If None, loads the only mesh
-              in the directory or raises an error if multiple exist.
+        mesh_type: Type of mesh ("coarse", "medium", "fine")
+        name: Mesh name (optional, uses config name by default)
 
     Returns:
         Loaded Mesh object
     """
-    return load_mesh(OUTPUT_DIR, name)
+    if mesh_type not in MESH_CONFIGS:
+        raise ValueError(f"Unknown mesh type: {mesh_type}")
+
+    mesh_dir = get_mesh_dir(mesh_type)
+
+    # Use configured name if not specified
+    if name is None:
+        name = MESH_CONFIGS[mesh_type]["name"]
+
+    return load_mesh(mesh_dir, name)
+
+
+def list_meshes() -> dict:
+    """List all available meshes and their status."""
+    status = {}
+    for mesh_type, config in MESH_CONFIGS.items():
+        mesh_dir = get_mesh_dir(mesh_type)
+        json_files = list(mesh_dir.glob("*.json")) if mesh_dir.exists() else []
+        mesh_files = [f for f in json_files if not f.name.startswith("ww3_")]
+
+        status[mesh_type] = {
+            "config": config,
+            "exists": len(mesh_files) > 0,
+            "path": mesh_dir,
+            "files": [f.name for f in mesh_dir.iterdir()] if mesh_dir.exists() else [],
+        }
+    return status
 
 
 def main():
@@ -154,15 +199,31 @@ def main():
         help="Load existing mesh instead of generating"
     )
     parser.add_argument(
-        "--name", "-n",
-        help="Mesh name for loading (optional)"
+        "--list",
+        action="store_true",
+        help="List available mesh configurations"
     )
 
     args = parser.parse_args()
 
+    if args.list:
+        print("SoCal Mesh Configurations:")
+        print("=" * 60)
+        for mesh_type, info in list_meshes().items():
+            status = "EXISTS" if info["exists"] else "not generated"
+            print(f"\n{mesh_type}:")
+            print(f"  Name: {info['config']['name']}")
+            print(f"  Resolution: {info['config']['resolution_km']} km")
+            print(f"  Description: {info['config']['description']}")
+            print(f"  Status: {status}")
+            print(f"  Path: {info['path']}")
+            if info['files']:
+                print(f"  Files: {', '.join(info['files'])}")
+        return
+
     if args.load:
         # Load existing mesh
-        mesh = load_socal_mesh(args.name)
+        mesh = load_socal_mesh(args.type)
         print(f"\n{mesh.summary()}")
         if args.plot:
             mesh.plot(show=True)

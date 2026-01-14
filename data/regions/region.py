@@ -208,6 +208,21 @@ SOCAL = Region(
     },
     parent=CALIFORNIA,
     color="#E9C46A",  # Gold
+    ww3_boundary_points=[
+        # Western boundary WW3 grid points (0.25° resolution)
+        # Extracted from: data/swan/ww3_endpoints/socal/ww3_boundary_west.json
+        (-121.0, 32.0),
+        (-121.0, 32.25),
+        (-121.0, 32.5),
+        (-121.0, 32.75),
+        (-121.0, 33.0),
+        (-121.0, 33.25),
+        (-121.0, 33.5),
+        (-121.0, 33.75),
+        (-121.0, 34.0),
+        (-121.0, 34.25),
+        (-121.0, 34.5),
+    ],
 )
 
 # Registry of all California subregions
