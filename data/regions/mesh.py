@@ -48,6 +48,13 @@ class Mesh:
         dx: Grid spacing in x direction (degrees)
         dy: Grid spacing in y direction (degrees)
 
+        # Spectral discretization (for CGRID command)
+        n_dir: Number of directional bins (default 36 = 10° resolution)
+        freq_min: Lowest frequency in Hz (default 0.04 = 25s period)
+        freq_max: Highest frequency in Hz (default 1.0 = 1s period)
+        n_freq: Number of frequency bins (default 31)
+        dir_type: "CIRCLE" for full circle or (dir1, dir2) tuple for SECTOR
+
         # Data
         depth_data: 2D array of depths (positive = ocean depth in meters)
         exception_value: Value marking land/invalid points (default -99)
@@ -68,6 +75,13 @@ class Mesh:
     ny: Optional[int] = None
     dx: Optional[float] = None  # degrees
     dy: Optional[float] = None  # degrees
+
+    # Spectral discretization (for CGRID)
+    n_dir: int = 36  # 36 bins = 10° directional resolution
+    freq_min: float = 0.04  # 0.04 Hz = 25s period (long swells)
+    freq_max: float = 1.0  # 1.0 Hz = 1s period (short wind waves)
+    n_freq: int = 31  # Number of frequency bins
+    dir_type: str = "CIRCLE"  # Full directional circle
 
     # Data
     depth_data: Optional[np.ndarray] = None
@@ -155,6 +169,7 @@ class Mesh:
         print(f"  Grid: {self.nx} x {self.ny} cells")
         print(f"  Resolution: {self.resolution_km} km ({self.dx:.4f}° x {self.dy:.4f}°)")
         print(f"  Origin: ({self.origin[0]:.2f}°, {self.origin[1]:.2f}°)")
+        print(f"  Spectral: {self.n_dir} dirs, {self.n_freq} freqs ({self.freq_min}-{self.freq_max} Hz)")
 
         return self
 
@@ -215,6 +230,13 @@ class Mesh:
             "ny": self.ny,
             "dx": self.dx,
             "dy": self.dy,
+            "spectral": {
+                "n_dir": self.n_dir,
+                "freq_min": self.freq_min,
+                "freq_max": self.freq_max,
+                "n_freq": self.n_freq,
+                "dir_type": self.dir_type,
+            },
             "exception_value": self.exception_value,
             "idla": idla,
             "depth_shape": list(self.depth_data.shape) if self.depth_data is not None else None,
@@ -225,6 +247,7 @@ class Mesh:
                 "n_land_cells": int(np.sum(self.depth_data == self.exception_value)),
             } if self.depth_data is not None else None,
             "swan_commands": {
+                "cgrid": self.generate_cgrid_command(),
                 "inpgrid": self.generate_inpgrid_command(),
                 "readinp": self.generate_readinp_command(f"{self.name}.bot", idla),
             }
@@ -279,6 +302,9 @@ class Mesh:
         if region_name and region_name in REGIONS:
             region = get_region(region_name)
 
+        # Get spectral parameters (with defaults for older meshes)
+        spectral = metadata.get("spectral", {})
+
         # Create mesh
         mesh = cls(
             name=metadata["name"],
@@ -289,6 +315,11 @@ class Mesh:
             ny=metadata["ny"],
             dx=metadata["dx"],
             dy=metadata["dy"],
+            n_dir=spectral.get("n_dir", 36),
+            freq_min=spectral.get("freq_min", 0.04),
+            freq_max=spectral.get("freq_max", 1.0),
+            n_freq=spectral.get("n_freq", 31),
+            dir_type=spectral.get("dir_type", "CIRCLE"),
             depth_data=depth_data,
             exception_value=metadata["exception_value"],
         )
@@ -419,6 +450,7 @@ class Mesh:
             f"  Grid: {self.nx} x {self.ny} cells",
             f"  Origin: ({self.origin[0]:.4f}°, {self.origin[1]:.4f}°)" if self.origin else "  Origin: None",
             f"  Spacing: dx={self.dx:.6f}°, dy={self.dy:.6f}°" if self.dx else "  Spacing: None",
+            f"  Spectral: {self.n_dir} dirs, {self.n_freq} freqs ({self.freq_min}-{self.freq_max} Hz)",
         ]
 
         if self.depth_data is not None:
@@ -458,6 +490,37 @@ class Mesh:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         self._write_bot_file(filepath, idla)
         return filepath
+
+    def generate_cgrid_command(self) -> str:
+        """
+        Generate the SWAN CGRID command string.
+
+        The CGRID defines the computational grid where SWAN calculates wave spectra.
+
+        Returns:
+            SWAN command string for computational grid
+        """
+        if self.origin is None or self.nx is None:
+            raise ValueError("Mesh not initialized. Call from_gebco() first.")
+
+        lon_origin, lat_origin = self.origin
+
+        # Calculate domain extents
+        xlenc = self.nx * self.dx  # Domain length in x (degrees)
+        ylenc = self.ny * self.dy  # Domain length in y (degrees)
+
+        # mxc, myc = number of meshes (cells), not grid points
+        mxc = self.nx
+        myc = self.ny
+
+        # CGRID REGular xpc ypc alpc xlenc ylenc mxc myc &
+        #       CIRCLE mdc flow fhigh [msc]
+        cmd = (
+            f"CGRID REG {lon_origin:.4f} {lat_origin:.4f} 0 "
+            f"{xlenc:.4f} {ylenc:.4f} {mxc} {myc} "
+            f"{self.dir_type} {self.n_dir} {self.freq_min} {self.freq_max} {self.n_freq}"
+        )
+        return cmd
 
     def generate_inpgrid_command(self) -> str:
         """

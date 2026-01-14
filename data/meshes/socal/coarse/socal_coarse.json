@@ -11,6 +11,13 @@
   "ny": 56,
   "dx": 0.05386319590497347,
   "dy": 0.04504504504504504,
+  "spectral": {
+    "n_dir": 36,
+    "freq_min": 0.04,
+    "freq_max": 1.0,
+    "n_freq": 31,
+    "dir_type": "CIRCLE"
+  },
   "exception_value": -99.0,
   "idla": 4,
   "depth_shape": [
@@ -24,6 +31,7 @@
     "n_land_cells": 1050
   },
   "swan_commands": {
+    "cgrid": "CGRID REG -121.0000 32.0000 0 4.0397 2.5225 75 56 CIRCLE 36 0.04 1.0 31",
     "inpgrid": "INPGRID BOTTOM REG -121.0000 32.0000 0 75 56 0.053863 0.045045 EXCEPTION -99.0",
     "readinp": "READINP BOTTOM 1 'socal_coarse.bot' 4 0 FREE"
   }
