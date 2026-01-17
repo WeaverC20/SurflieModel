@@ -570,7 +570,7 @@ class SpectralPlotter:
 
     def plot_partition_arrows(
         self,
-        arrow_scale: float = 0.12,
+        arrow_scale: float = 0.25,
         skip_grid: int = 4,
         hsig_vmax: float = 5.0,
         min_hs_threshold: float = 0.1,
@@ -713,8 +713,8 @@ class SpectralPlotter:
                     data['x'], data['y'], data['u'], data['v'],
                     color=period_colors[band],
                     scale=1, scale_units='xy',
-                    width=0.004,
-                    headwidth=4, headlength=5,
+                    width=0.003,
+                    headwidth=2.5, headlength=3,
                     alpha=0.85,
                     transform=ccrs.PlateCarree(),
                     zorder=5
