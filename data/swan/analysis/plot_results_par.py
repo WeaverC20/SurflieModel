@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-SWAN Results Plotter
+SWAN Results Plotter - PAR (Parametric) Boundary Conditions
 
-Creates visualizations of SWAN model outputs.
+Basic visualizations of SWAN integrated outputs (Hsig, Tps, Dir).
+For spectral visualization with swell component breakdown, use plot_results_spectral.py.
+
 Saves plots to data/swan/analysis/plots/{region}/{mesh}/
 """
 

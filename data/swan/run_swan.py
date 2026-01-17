@@ -36,6 +36,8 @@ from data.swan.runner import (
     SwanInputGenerator,
     PhysicsSettings,
     BoundaryWaveParams,
+    SpectrumReconstructor,
+    SpectralBoundaryWriter,
     WindProvider,
     WindData,
 )
@@ -85,6 +87,7 @@ class SwanRunner:
         boundary_side: str = "west",
         forecast_hours: Optional[List[int]] = None,
         physics: Optional[PhysicsSettings] = None,
+        use_spectral: bool = True,
     ):
         """
         Initialize SWAN runner.
@@ -95,12 +98,14 @@ class SwanRunner:
             boundary_side: Boundary side for WW3 data (default: "west")
             forecast_hours: Forecast hours to fetch (default: [0] for stationary)
             physics: Physics settings (uses defaults if None)
+            use_spectral: If True, use spectral (SPEC2D) boundaries; if False, use parametric (PAR)
         """
         self.region = region
         self.mesh = mesh
         self.boundary_side = boundary_side
         self.forecast_hours = forecast_hours or [0]  # Single hour for stationary
         self.physics = physics or PhysicsSettings()
+        self.use_spectral = use_spectral
 
         # Resolve paths
         self.mesh_dir = get_mesh_dir(region, mesh)
@@ -179,10 +184,51 @@ class SwanRunner:
 
         return wind_data
 
+    def generate_spectral_boundary(
+        self,
+        boundary_points: List[BoundaryPoint],
+        mesh_metadata: dict
+    ) -> Path:
+        """
+        Generate SPEC2D spectral boundary file from WW3 partition data.
+
+        Reconstructs 2D spectra from wind wave and swell partitions using
+        JONSWAP shapes and cos^2s directional spreading.
+
+        Args:
+            boundary_points: List of BoundaryPoint objects with partition data
+            mesh_metadata: Mesh metadata containing spectral configuration
+
+        Returns:
+            Path to generated .sp2 file
+        """
+        logger.info("Generating spectral boundary file from WW3 partitions")
+
+        # Create spectrum reconstructor with mesh spectral config
+        reconstructor = SpectrumReconstructor.from_mesh_metadata(mesh_metadata)
+
+        # Create spectral boundary writer
+        writer = SpectralBoundaryWriter(reconstructor)
+
+        # Get timestamp from first point
+        timestamp = boundary_points[0].times[0] if boundary_points[0].times else None
+
+        # Write SPEC2D file
+        spec_path = self.run_dir / "boundary.sp2"
+        writer.write_spec2d(
+            output_path=spec_path,
+            boundary_points=boundary_points,
+            time_index=0,  # First timestep for stationary mode
+            timestamp=timestamp
+        )
+
+        return spec_path
+
     def generate_input_file(
         self,
         boundary_points: List[BoundaryPoint],
-        wind_data: Optional[WindData] = None
+        wind_data: Optional[WindData] = None,
+        use_spectral: bool = True
     ) -> Path:
         """
         Generate SWAN INPUT file for stationary mode.
@@ -190,33 +236,24 @@ class SwanRunner:
         Args:
             boundary_points: List of BoundaryPoint objects with wave data
             wind_data: Optional WindData object for wind forcing
+            use_spectral: If True, use spectral (SPEC2D) boundaries; if False, use parametric (PAR)
 
         Returns:
             Path to generated INPUT file
         """
-        logger.info("Generating SWAN INPUT file")
+        logger.info(f"Generating SWAN INPUT file (spectral={use_spectral})")
+
+        # Load mesh metadata for spectral config
+        import json
+        mesh_json = self.mesh_dir / f"{self.mesh_name}.json"
+        with open(mesh_json) as f:
+            mesh_metadata = json.load(f)
 
         generator = SwanInputGenerator(
             mesh_dir=str(self.mesh_dir),
             boundary_file=str(self.boundary_file),
             physics=self.physics
         )
-
-        # Calculate distances along boundary
-        distances = generator._calculate_boundary_distances()
-
-        # Convert boundary points to BoundaryWaveParams
-        # Use first timestep (index 0) since we're in stationary mode
-        wave_params = []
-        for i, (point, distance) in enumerate(zip(boundary_points, distances)):
-            params = BoundaryWaveParams(
-                distance=distance,
-                hs=point.hs[0],      # First timestep
-                tp=point.tp[0],
-                dir=point.dir[0],
-                spread=point.spread[0]
-            )
-            wave_params.append(params)
 
         # Generate wind commands if wind data provided
         wind_commands = None
@@ -227,14 +264,42 @@ class SwanRunner:
                 wind_provider.generate_readinp_command()
             ]
 
-        # Generate INPUT file (PAR syntax for stationary mode)
-        input_path = generator.generate(
-            output_dir=self.run_dir,
-            wave_params=wave_params,
-            wind_commands=wind_commands,
-            project_name=f"{self.region}_{self.mesh}",
-            run_id="001"
-        )
+        if use_spectral:
+            # Generate spectral boundary file
+            spec_path = self.generate_spectral_boundary(boundary_points, mesh_metadata)
+
+            # Generate INPUT file with spectral boundary reference
+            input_path = generator.generate(
+                output_dir=self.run_dir,
+                spectral_file=spec_path.name,  # Just filename, not full path
+                wind_commands=wind_commands,
+                project_name=f"{self.region}_{self.mesh}",
+                run_id="001"
+            )
+        else:
+            # Calculate distances along boundary for PAR mode
+            distances = generator._calculate_boundary_distances()
+
+            # Convert boundary points to BoundaryWaveParams
+            wave_params = []
+            for point, distance in zip(boundary_points, distances):
+                params = BoundaryWaveParams(
+                    distance=distance,
+                    hs=point.hs[0],      # First timestep
+                    tp=point.tp[0],
+                    dir=point.dir[0],
+                    spread=point.spread[0]
+                )
+                wave_params.append(params)
+
+            # Generate INPUT file with PAR syntax
+            input_path = generator.generate(
+                output_dir=self.run_dir,
+                wave_params=wave_params,
+                wind_commands=wind_commands,
+                project_name=f"{self.region}_{self.mesh}",
+                run_id="001"
+            )
 
         return input_path
 
@@ -303,7 +368,9 @@ class SwanRunner:
             wind_data = self.prepare_wind_data()
 
             # Step 3: Generate INPUT file (with wind)
-            input_path = self.generate_input_file(boundary_points, wind_data)
+            input_path = self.generate_input_file(
+                boundary_points, wind_data, use_spectral=self.use_spectral
+            )
 
             # Step 4: Copy bathymetry
             self.copy_bathymetry()
@@ -341,7 +408,7 @@ class SwanRunner:
 
     def _print_output_files(self) -> None:
         """Print output files from SWAN run."""
-        output_files = ["hsig.mat", "tps.mat", "dir.mat", "u.wind", "v.wind", "PRINT", "Errfile"]
+        output_files = ["hsig.mat", "tps.mat", "dir.mat", "boundary.sp2", "wind.dat", "PRINT", "Errfile"]
         print("\nOutput files:")
         for name in output_files:
             path = self.run_dir / name
@@ -354,7 +421,8 @@ async def run_swan(
     region: str,
     mesh: str,
     forecast_hours: Optional[List[int]] = None,
-    dry_run: bool = False
+    dry_run: bool = False,
+    use_spectral: bool = True
 ) -> bool:
     """
     Convenience function to run SWAN.
@@ -364,6 +432,7 @@ async def run_swan(
         mesh: Mesh name
         forecast_hours: Forecast hours to fetch
         dry_run: If True, prepare but don't execute
+        use_spectral: If True, use spectral boundaries; if False, use parametric
 
     Returns:
         True if successful
@@ -371,7 +440,8 @@ async def run_swan(
     runner = SwanRunner(
         region=region,
         mesh=mesh,
-        forecast_hours=forecast_hours
+        forecast_hours=forecast_hours,
+        use_spectral=use_spectral
     )
     return await runner.run(dry_run=dry_run)
 
@@ -383,9 +453,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python data/swan/run_swan.py --region socal --mesh coarse
+  python data/swan/run_swan.py --region socal --mesh coarse                # Uses spectral (default)
   python data/swan/run_swan.py --region socal --mesh coarse --forecast-hour 24
   python data/swan/run_swan.py --region socal --mesh coarse --dry-run
+  python data/swan/run_swan.py --region socal --mesh coarse --parametric   # Use PAR instead of spectral
         """
     )
 
@@ -411,6 +482,11 @@ Examples:
         help="Prepare files but don't execute SWAN"
     )
     parser.add_argument(
+        "--parametric", "-p",
+        action="store_true",
+        help="Use parametric (PAR) boundary conditions instead of spectral (SPEC2D)"
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Verbose output"
@@ -432,7 +508,8 @@ Examples:
             region=args.region,
             mesh=args.mesh,
             forecast_hours=[args.forecast_hour],
-            dry_run=args.dry_run
+            dry_run=args.dry_run,
+            use_spectral=not args.parametric  # Spectral is default
         ))
 
         sys.exit(0 if success else 1)

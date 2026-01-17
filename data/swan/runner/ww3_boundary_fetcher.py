@@ -21,18 +21,32 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class WavePartition:
+    """A single wave partition (wind sea or swell component)."""
+    hs: float   # Significant wave height (m)
+    tp: float   # Peak period (s)
+    dir: float  # Direction (degrees, nautical convention - direction FROM)
+    spread: float = 25.0  # Directional spreading (degrees)
+
+
+@dataclass
 class BoundaryPoint:
-    """A single boundary point with its wave data."""
+    """A single boundary point with its wave data including spectral partitions."""
     lon: float
     lat: float
     index: int  # Index along the boundary (0 = first point)
 
-    # Wave data (populated after fetch)
+    # Combined wave data (populated after fetch)
     times: Optional[List[datetime]] = None
     hs: Optional[List[float]] = None  # Significant wave height (m)
     tp: Optional[List[float]] = None  # Peak period (s)
     dir: Optional[List[float]] = None  # Direction (degrees)
     spread: Optional[List[float]] = None  # Directional spread (degrees)
+
+    # Spectral partitions (for spectral boundary conditions)
+    wind_waves: Optional[List[WavePartition]] = None      # Wind sea component
+    primary_swell: Optional[List[WavePartition]] = None   # Primary swell
+    secondary_swell: Optional[List[WavePartition]] = None # Secondary swell (may be None)
 
 
 class WW3BoundaryFetcher:
@@ -177,6 +191,10 @@ class WW3BoundaryFetcher:
             point.tp = []
             point.dir = []
             point.spread = []
+            # Partition data for spectral reconstruction
+            point.wind_waves = []
+            point.primary_swell = []
+            point.secondary_swell = []
 
         # Fetch data for each forecast hour
         for hour in forecast_hours:
@@ -194,20 +212,35 @@ class WW3BoundaryFetcher:
                 # Parse the forecast time
                 forecast_time = datetime.fromisoformat(grid_data["forecast_time"])
 
-                # Extract grid arrays
+                # Extract grid arrays - combined sea state
                 grid_lats = np.array(grid_data["lat"])
                 grid_lons = np.array(grid_data["lon"])
                 hs_grid = np.array(grid_data["significant_wave_height"])
                 tp_grid = np.array(grid_data["peak_wave_period"])
                 dir_grid = np.array(grid_data["mean_wave_direction"])
 
+                # Extract partition grids
+                wind_hs_grid = np.array(grid_data.get("wind_wave_height", hs_grid * 0.3))
+                wind_tp_grid = np.array(grid_data.get("wind_wave_period", np.full_like(hs_grid, 5.0)))
+                wind_dir_grid = np.array(grid_data.get("wind_wave_direction", dir_grid))
+
+                swell1_hs_grid = np.array(grid_data.get("primary_swell_height", hs_grid * 0.7))
+                swell1_tp_grid = np.array(grid_data.get("primary_swell_period", tp_grid))
+                swell1_dir_grid = np.array(grid_data.get("primary_swell_direction", dir_grid))
+
+                # Secondary swell may not be available
+                has_secondary = "secondary_swell_height" in grid_data
+                if has_secondary:
+                    swell2_hs_grid = np.array(grid_data["secondary_swell_height"])
+                    swell2_tp_grid = np.array(grid_data["secondary_swell_period"])
+                    swell2_dir_grid = np.array(grid_data["secondary_swell_direction"])
+
                 # Extract values at each boundary point
                 for point in points:
+                    # Combined sea state
                     hs = self._extract_point_value(grid_lats, grid_lons, hs_grid, point.lat, point.lon)
                     tp = self._extract_point_value(grid_lats, grid_lons, tp_grid, point.lat, point.lon)
                     wave_dir = self._extract_point_value(grid_lats, grid_lons, dir_grid, point.lat, point.lon)
-
-                    # Use default spread (WW3 bulk params don't include spreading)
                     spread = self.DEFAULT_SPREAD
 
                     point.times.append(forecast_time)
@@ -215,6 +248,33 @@ class WW3BoundaryFetcher:
                     point.tp.append(tp)
                     point.dir.append(wave_dir)
                     point.spread.append(spread)
+
+                    # Wind wave partition
+                    wind_hs = self._extract_point_value(grid_lats, grid_lons, wind_hs_grid, point.lat, point.lon)
+                    wind_tp = self._extract_point_value(grid_lats, grid_lons, wind_tp_grid, point.lat, point.lon)
+                    wind_dir = self._extract_point_value(grid_lats, grid_lons, wind_dir_grid, point.lat, point.lon)
+                    point.wind_waves.append(WavePartition(
+                        hs=wind_hs, tp=wind_tp, dir=wind_dir, spread=30.0  # Wind seas have wider spreading
+                    ))
+
+                    # Primary swell partition
+                    swell1_hs = self._extract_point_value(grid_lats, grid_lons, swell1_hs_grid, point.lat, point.lon)
+                    swell1_tp = self._extract_point_value(grid_lats, grid_lons, swell1_tp_grid, point.lat, point.lon)
+                    swell1_dir = self._extract_point_value(grid_lats, grid_lons, swell1_dir_grid, point.lat, point.lon)
+                    point.primary_swell.append(WavePartition(
+                        hs=swell1_hs, tp=swell1_tp, dir=swell1_dir, spread=20.0  # Swell has narrower spreading
+                    ))
+
+                    # Secondary swell partition (if available)
+                    if has_secondary:
+                        swell2_hs = self._extract_point_value(grid_lats, grid_lons, swell2_hs_grid, point.lat, point.lon)
+                        swell2_tp = self._extract_point_value(grid_lats, grid_lons, swell2_tp_grid, point.lat, point.lon)
+                        swell2_dir = self._extract_point_value(grid_lats, grid_lons, swell2_dir_grid, point.lat, point.lon)
+                        point.secondary_swell.append(WavePartition(
+                            hs=swell2_hs, tp=swell2_tp, dir=swell2_dir, spread=20.0
+                        ))
+                    else:
+                        point.secondary_swell.append(None)
 
                 logger.info(f"  Hour {hour}: Hs={point.hs[-1]:.2f}m, Tp={point.tp[-1]:.1f}s, Dir={point.dir[-1]:.0f}°")
 
@@ -227,5 +287,8 @@ class WW3BoundaryFetcher:
                     point.tp.append(np.nan)
                     point.dir.append(np.nan)
                     point.spread.append(np.nan)
+                    point.wind_waves.append(None)
+                    point.primary_swell.append(None)
+                    point.secondary_swell.append(None)
 
         return metadata, points

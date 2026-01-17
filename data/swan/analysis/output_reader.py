@@ -3,18 +3,69 @@ SWAN Output Reader
 
 Loads and processes SWAN model output files.
 SWAN outputs MATLAB v4 format files which require scipy.io.loadmat().
+
+Supports:
+- Integrated outputs (Hsig, Tps, Dir)
+- Partition outputs (wind sea + up to 3 swells with Hs, Tp, Dir each)
 """
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.io import loadmat
 
 logger = logging.getLogger(__name__)
+
+
+# Maximum number of partitions SWAN can output (0=wind sea, 1-9=swells)
+MAX_PARTITIONS = 4  # We use wind sea + 3 swells
+
+# Human-readable labels for partitions
+PARTITION_LABELS = {
+    0: "Wind Sea",
+    1: "Primary Swell",
+    2: "Secondary Swell",
+    3: "Tertiary Swell",
+}
+
+
+@dataclass
+class WavePartitionGrid:
+    """
+    A single wave partition (wind sea or swell) across the entire grid.
+
+    Attributes:
+        hs: Significant wave height (m), 2D array
+        tp: Peak period (s), 2D array
+        dir: Wave direction (degrees, nautical - FROM), 2D array
+        partition_id: Partition index (0=wind sea, 1+=swells)
+        label: Human-readable label
+    """
+    hs: np.ndarray
+    tp: np.ndarray
+    dir: np.ndarray
+    partition_id: int
+    label: str
+
+    def mask_invalid(self, exception_value: float = -99.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return masked arrays with invalid points as NaN."""
+        hs_masked = np.where(
+            (self.hs == exception_value) | (self.hs <= 0),
+            np.nan, self.hs
+        )
+        tp_masked = np.where(
+            (self.tp == exception_value) | (self.tp <= 0),
+            np.nan, self.tp
+        )
+        dir_masked = np.where(
+            (self.dir == exception_value) | (self.hs <= 0),  # Use hs to mask dir too
+            np.nan, self.dir
+        )
+        return hs_masked, tp_masked, dir_masked
 
 
 @dataclass
@@ -31,6 +82,7 @@ class SwanOutput:
         mesh_name: Name of the mesh used
         region_name: Name of the region
         exception_value: Value used for land/invalid points
+        partitions: List of WavePartitionGrid objects (if partition outputs available)
     """
     hsig: np.ndarray
     tps: np.ndarray
@@ -40,6 +92,7 @@ class SwanOutput:
     mesh_name: str
     region_name: str
     exception_value: float = -99.0
+    partitions: List[WavePartitionGrid] = field(default_factory=list)
 
     def mask_land(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -58,6 +111,28 @@ class SwanOutput:
         """Get map extent as (lon_min, lon_max, lat_min, lat_max)."""
         return (self.lons[0], self.lons[-1], self.lats[0], self.lats[-1])
 
+    @property
+    def has_partitions(self) -> bool:
+        """Check if partition data is available."""
+        return len(self.partitions) > 0
+
+    def get_partition(self, partition_id: int) -> Optional[WavePartitionGrid]:
+        """Get a specific partition by ID."""
+        for p in self.partitions:
+            if p.partition_id == partition_id:
+                return p
+        return None
+
+    @property
+    def wind_sea(self) -> Optional[WavePartitionGrid]:
+        """Get wind sea partition (id=0) if available."""
+        return self.get_partition(0)
+
+    @property
+    def swells(self) -> List[WavePartitionGrid]:
+        """Get all swell partitions (id>0)."""
+        return [p for p in self.partitions if p.partition_id > 0]
+
     def summary(self) -> str:
         """Return summary of output data."""
         hsig_masked, tps_masked, dir_masked = self.mask_land()
@@ -69,6 +144,17 @@ class SwanOutput:
             f"  Tps: {np.nanmin(tps_masked):.1f} - {np.nanmax(tps_masked):.1f} s",
             f"  Dir: {np.nanmin(dir_masked):.0f} - {np.nanmax(dir_masked):.0f} deg",
         ]
+
+        if self.has_partitions:
+            lines.append(f"  Partitions: {len(self.partitions)}")
+            for p in self.partitions:
+                hs_m, tp_m, _ = p.mask_invalid(self.exception_value)
+                if np.any(~np.isnan(hs_m)):
+                    lines.append(
+                        f"    {p.label}: Hs={np.nanmax(hs_m):.2f}m, "
+                        f"Tp={np.nanmean(tp_m[~np.isnan(tp_m)]):.1f}s"
+                    )
+
         return '\n'.join(lines)
 
 
@@ -172,6 +258,77 @@ class SwanOutputReader:
             raise ValueError(f"No data found in {path}")
         return mat_data[data_keys[0]]
 
+    def _read_partitions(self) -> List[WavePartitionGrid]:
+        """
+        Read wave partition output files if available.
+
+        SWAN outputs partition data with variables named HsPT01-HsPT06 (up to 6 peaks),
+        TpPT01-TpPT06, and DirPT01-DirPT06 within each .mat file. Each peak represents
+        a different spectral partition (wind sea, primary swell, secondary swell, etc.).
+
+        We read from phs0.mat, ptp0.mat, pdir0.mat and extract HsPT01-04, etc. for
+        the first 4 partitions (wind sea + 3 swells).
+
+        Returns:
+            List of WavePartitionGrid objects for available partitions
+        """
+        partitions = []
+
+        # SWAN stores all partitions in a single file with variables HsPT01-HsPT06
+        hs_path = self.run_dir / "phs0.mat"
+        tp_path = self.run_dir / "ptp0.mat"
+        dir_path = self.run_dir / "pdir0.mat"
+
+        if not all(p.exists() for p in [hs_path, tp_path, dir_path]):
+            return partitions
+
+        try:
+            hs_data = loadmat(str(hs_path))
+            tp_data = loadmat(str(tp_path))
+            dir_data = loadmat(str(dir_path))
+
+            # SWAN uses HsPT01, HsPT02, ... TpPT01, TpPT02, ... DrPT01, ...
+            for part_id in range(MAX_PARTITIONS):
+                # Variable names use 1-based indexing with 2-digit padding
+                var_idx = f"{part_id + 1:02d}"
+                hs_var = f"HsPT{var_idx}"
+                tp_var = f"TpPT{var_idx}"
+                dir_var = f"DrPT{var_idx}"  # Note: "Dr" not "Dir"
+
+                # Check if this partition exists
+                if hs_var not in hs_data or tp_var not in tp_data or dir_var not in dir_data:
+                    continue
+
+                hs = hs_data[hs_var]
+                tp = tp_data[tp_var]
+                wave_dir = dir_data[dir_var]
+
+                # Check if partition has any valid data
+                valid_hs = hs[(~np.isnan(hs)) & (hs > 0)]
+                if len(valid_hs) == 0:
+                    logger.debug(f"Partition {part_id} has no valid data, skipping")
+                    continue
+
+                label = PARTITION_LABELS.get(part_id, f"Partition {part_id}")
+
+                partition = WavePartitionGrid(
+                    hs=hs,
+                    tp=tp,
+                    dir=wave_dir,
+                    partition_id=part_id,
+                    label=label
+                )
+                partitions.append(partition)
+                logger.debug(f"Loaded partition {part_id}: {label} (max Hs={np.nanmax(valid_hs):.2f}m)")
+
+        except Exception as e:
+            logger.warning(f"Failed to load partition data: {e}")
+
+        if partitions:
+            logger.info(f"Loaded {len(partitions)} wave partitions")
+
+        return partitions
+
     def read(self) -> SwanOutput:
         """
         Read all SWAN output files.
@@ -196,6 +353,9 @@ class SwanOutputReader:
         # Build coordinates
         lons, lats = self._build_coordinates()
 
+        # Read partition data if available
+        partitions = self._read_partitions()
+
         logger.info(f"Loaded SWAN output: {hsig.shape}")
 
         return SwanOutput(
@@ -206,7 +366,8 @@ class SwanOutputReader:
             lats=lats,
             mesh_name=self.mesh_metadata.get("name", "unknown"),
             region_name=self.mesh_metadata.get("region_name", "unknown"),
-            exception_value=self.mesh_metadata.get("exception_value", -99.0)
+            exception_value=self.mesh_metadata.get("exception_value", -99.0),
+            partitions=partitions
         )
 
     def read_single(self, variable: str) -> np.ndarray:
