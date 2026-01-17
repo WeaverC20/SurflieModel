@@ -203,7 +203,9 @@ class SwanOutputReader:
             # Try to find mesh JSON in meshes directory
             if mesh_name and region_name:
                 # Construct path to mesh directory
-                project_root = self.run_dir.parent.parent.parent.parent.parent
+                # run_dir is: .../data/swan/runs/{region}/{mesh}/latest/
+                # We need to go up 6 levels to get to project root
+                project_root = self.run_dir.parent.parent.parent.parent.parent.parent
                 mesh_parts = mesh_name.split('_')
                 if len(mesh_parts) >= 2:
                     mesh_type = mesh_parts[-1]  # e.g., "coarse"

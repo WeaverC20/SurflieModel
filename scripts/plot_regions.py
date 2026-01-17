@@ -123,7 +123,7 @@ def plot_regions(
                   edgecolor=region.color, linewidth=2,
                   label=region.display_name)
         )
-    ax.legend(handles=legend_elements, loc='lower right', fontsize=10)
+    ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
 
     plt.tight_layout()
 

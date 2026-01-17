@@ -3,6 +3,9 @@ WW3 Boundary Fetcher for SWAN
 
 Fetches WaveWatch III data at specific boundary points for SWAN
 boundary conditions in stationary mode.
+
+Uses unified boundary config format (ww3_boundaries.json) with
+multiple active boundaries.
 """
 
 import asyncio
@@ -54,15 +57,16 @@ class WW3BoundaryFetcher:
     Fetches WW3 data at boundary points for SWAN stationary runs.
 
     Uses the existing WaveWatchFetcher to get grid data, then extracts
-    values at the specific boundary points defined in the boundary JSON files.
+    values at the specific boundary points defined in the unified
+    boundary config file (ww3_boundaries.json).
 
     Example usage:
         fetcher = WW3BoundaryFetcher()
-        metadata, points = await fetcher.fetch_boundary(
-            boundary_file="data/swan/ww3_endpoints/socal/ww3_boundary_west.json",
+        config, boundary_points = await fetcher.fetch_boundary(
+            boundary_file="data/swan/ww3_endpoints/socal/ww3_boundaries.json",
             forecast_hours=[0]  # Single hour for stationary mode
         )
-        # Use points[i].hs[0], points[i].tp[0], etc. for wave parameters
+        # boundary_points["west"][i].hs[0], etc. for wave parameters
     """
 
     # Default directional spreading when not available from WW3
@@ -71,27 +75,37 @@ class WW3BoundaryFetcher:
     def __init__(self):
         self.ww3_fetcher = WaveWatchFetcher()
 
-    def load_boundary_points(self, boundary_file: str | Path) -> Tuple[Dict, List[BoundaryPoint]]:
+    def load_boundary_config(self, boundary_file: str | Path) -> Dict:
         """
-        Load boundary point definitions from JSON file.
+        Load unified boundary configuration from JSON file.
 
         Args:
-            boundary_file: Path to boundary JSON file
+            boundary_file: Path to unified boundary JSON file (ww3_boundaries.json)
 
         Returns:
-            Tuple of (metadata dict, list of BoundaryPoint objects)
+            Dict with config data including 'boundaries' and 'active_boundaries'
         """
         boundary_file = Path(boundary_file)
 
         with open(boundary_file) as f:
             data = json.load(f)
 
-        points = []
-        for i, (lon, lat) in enumerate(data["points"]):
-            points.append(BoundaryPoint(lon=lon, lat=lat, index=i))
+        # Validate unified format
+        if "boundaries" not in data:
+            raise ValueError(
+                f"File {boundary_file.name} is not in unified format. "
+                f"Expected 'boundaries' key with boundary definitions."
+            )
 
-        logger.info(f"Loaded {len(points)} boundary points from {boundary_file.name}")
-        return data, points
+        if "active_boundaries" not in data:
+            raise ValueError(
+                f"File {boundary_file.name} missing 'active_boundaries' key."
+            )
+
+        logger.info(f"Loaded boundary config from {boundary_file.name}")
+        logger.info(f"  Active boundaries: {data['active_boundaries']}")
+
+        return data
 
     def _get_bounding_box(self, points: List[BoundaryPoint], padding: float = 0.5) -> Tuple[float, float, float, float]:
         """
@@ -160,43 +174,75 @@ class WW3BoundaryFetcher:
     async def fetch_boundary(
         self,
         boundary_file: str | Path,
-        forecast_hours: Optional[List[int]] = None
-    ) -> Tuple[Dict, List[BoundaryPoint]]:
+        forecast_hours: Optional[List[int]] = None,
+        boundaries_to_fetch: Optional[List[str]] = None,
+    ) -> Tuple[Dict, Dict[str, List[BoundaryPoint]]]:
         """
-        Fetch WW3 data at all boundary points for specified forecast hours.
+        Fetch WW3 data for all active boundaries from unified config file.
+
+        Fetches WW3 data once for a bounding box that covers all active
+        boundaries, then extracts values for each boundary's points.
 
         Args:
-            boundary_file: Path to boundary JSON file
+            boundary_file: Path to unified boundary JSON file (ww3_boundaries.json)
             forecast_hours: List of forecast hours to fetch (default: [0] for stationary)
+            boundaries_to_fetch: Which boundaries to fetch (default: all active)
 
         Returns:
-            Tuple of (metadata dict, list of BoundaryPoint objects with data)
+            Tuple of:
+                - config dict (from the unified config)
+                - dict mapping boundary side to list of BoundaryPoint objects
         """
         if forecast_hours is None:
-            forecast_hours = [0]  # Default to current hour for stationary mode
+            forecast_hours = [0]
 
-        # Load boundary definition
-        metadata, points = self.load_boundary_points(boundary_file)
+        # Load unified config
+        config = self.load_boundary_config(boundary_file)
 
-        # Get bounding box for WW3 fetch
-        min_lat, max_lat, min_lon, max_lon = self._get_bounding_box(points)
+        # Determine which boundaries to fetch
+        if boundaries_to_fetch is None:
+            boundaries_to_fetch = config["active_boundaries"]
 
-        logger.info(f"Fetching WW3 data for bounding box: "
+        # Validate requested boundaries exist
+        for side in boundaries_to_fetch:
+            if side not in config["boundaries"]:
+                raise ValueError(f"Boundary '{side}' not found in config")
+
+        logger.info(f"Fetching WW3 data for boundaries: {boundaries_to_fetch}")
+
+        # Collect all points from all boundaries to determine overall bounding box
+        all_points = []
+        for side in boundaries_to_fetch:
+            boundary_data = config["boundaries"][side]
+            for lon, lat in boundary_data["points"]:
+                all_points.append(BoundaryPoint(lon=lon, lat=lat, index=0))
+
+        # Get combined bounding box
+        min_lat, max_lat, min_lon, max_lon = self._get_bounding_box(all_points)
+
+        logger.info(f"Combined bounding box: "
                    f"lat [{min_lat:.2f}, {max_lat:.2f}], lon [{min_lon:.2f}, {max_lon:.2f}]")
 
-        # Initialize time series storage for each point
-        for point in points:
-            point.times = []
-            point.hs = []
-            point.tp = []
-            point.dir = []
-            point.spread = []
-            # Partition data for spectral reconstruction
-            point.wind_waves = []
-            point.primary_swell = []
-            point.secondary_swell = []
+        # Create BoundaryPoint objects for each boundary
+        boundary_points: Dict[str, List[BoundaryPoint]] = {}
+        for side in boundaries_to_fetch:
+            boundary_data = config["boundaries"][side]
+            points = []
+            for i, (lon, lat) in enumerate(boundary_data["points"]):
+                point = BoundaryPoint(lon=lon, lat=lat, index=i)
+                # Initialize time series storage
+                point.times = []
+                point.hs = []
+                point.tp = []
+                point.dir = []
+                point.spread = []
+                point.wind_waves = []
+                point.primary_swell = []
+                point.secondary_swell = []
+                points.append(point)
+            boundary_points[side] = points
 
-        # Fetch data for each forecast hour
+        # Fetch data for each forecast hour (single fetch covers all boundaries)
         for hour in forecast_hours:
             logger.info(f"Fetching forecast hour {hour}...")
 
@@ -212,7 +258,7 @@ class WW3BoundaryFetcher:
                 # Parse the forecast time
                 forecast_time = datetime.fromisoformat(grid_data["forecast_time"])
 
-                # Extract grid arrays - combined sea state
+                # Extract grid arrays
                 grid_lats = np.array(grid_data["lat"])
                 grid_lons = np.array(grid_data["lon"])
                 hs_grid = np.array(grid_data["significant_wave_height"])
@@ -228,67 +274,70 @@ class WW3BoundaryFetcher:
                 swell1_tp_grid = np.array(grid_data.get("primary_swell_period", tp_grid))
                 swell1_dir_grid = np.array(grid_data.get("primary_swell_direction", dir_grid))
 
-                # Secondary swell may not be available
                 has_secondary = "secondary_swell_height" in grid_data
                 if has_secondary:
                     swell2_hs_grid = np.array(grid_data["secondary_swell_height"])
                     swell2_tp_grid = np.array(grid_data["secondary_swell_period"])
                     swell2_dir_grid = np.array(grid_data["secondary_swell_direction"])
 
-                # Extract values at each boundary point
-                for point in points:
-                    # Combined sea state
-                    hs = self._extract_point_value(grid_lats, grid_lons, hs_grid, point.lat, point.lon)
-                    tp = self._extract_point_value(grid_lats, grid_lons, tp_grid, point.lat, point.lon)
-                    wave_dir = self._extract_point_value(grid_lats, grid_lons, dir_grid, point.lat, point.lon)
-                    spread = self.DEFAULT_SPREAD
+                # Extract values for each boundary's points
+                for side, points in boundary_points.items():
+                    for point in points:
+                        # Combined sea state
+                        hs = self._extract_point_value(grid_lats, grid_lons, hs_grid, point.lat, point.lon)
+                        tp = self._extract_point_value(grid_lats, grid_lons, tp_grid, point.lat, point.lon)
+                        wave_dir = self._extract_point_value(grid_lats, grid_lons, dir_grid, point.lat, point.lon)
+                        spread = self.DEFAULT_SPREAD
 
-                    point.times.append(forecast_time)
-                    point.hs.append(hs)
-                    point.tp.append(tp)
-                    point.dir.append(wave_dir)
-                    point.spread.append(spread)
+                        point.times.append(forecast_time)
+                        point.hs.append(hs)
+                        point.tp.append(tp)
+                        point.dir.append(wave_dir)
+                        point.spread.append(spread)
 
-                    # Wind wave partition
-                    wind_hs = self._extract_point_value(grid_lats, grid_lons, wind_hs_grid, point.lat, point.lon)
-                    wind_tp = self._extract_point_value(grid_lats, grid_lons, wind_tp_grid, point.lat, point.lon)
-                    wind_dir = self._extract_point_value(grid_lats, grid_lons, wind_dir_grid, point.lat, point.lon)
-                    point.wind_waves.append(WavePartition(
-                        hs=wind_hs, tp=wind_tp, dir=wind_dir, spread=30.0  # Wind seas have wider spreading
-                    ))
-
-                    # Primary swell partition
-                    swell1_hs = self._extract_point_value(grid_lats, grid_lons, swell1_hs_grid, point.lat, point.lon)
-                    swell1_tp = self._extract_point_value(grid_lats, grid_lons, swell1_tp_grid, point.lat, point.lon)
-                    swell1_dir = self._extract_point_value(grid_lats, grid_lons, swell1_dir_grid, point.lat, point.lon)
-                    point.primary_swell.append(WavePartition(
-                        hs=swell1_hs, tp=swell1_tp, dir=swell1_dir, spread=20.0  # Swell has narrower spreading
-                    ))
-
-                    # Secondary swell partition (if available)
-                    if has_secondary:
-                        swell2_hs = self._extract_point_value(grid_lats, grid_lons, swell2_hs_grid, point.lat, point.lon)
-                        swell2_tp = self._extract_point_value(grid_lats, grid_lons, swell2_tp_grid, point.lat, point.lon)
-                        swell2_dir = self._extract_point_value(grid_lats, grid_lons, swell2_dir_grid, point.lat, point.lon)
-                        point.secondary_swell.append(WavePartition(
-                            hs=swell2_hs, tp=swell2_tp, dir=swell2_dir, spread=20.0
+                        # Wind wave partition
+                        wind_hs = self._extract_point_value(grid_lats, grid_lons, wind_hs_grid, point.lat, point.lon)
+                        wind_tp = self._extract_point_value(grid_lats, grid_lons, wind_tp_grid, point.lat, point.lon)
+                        wind_dir = self._extract_point_value(grid_lats, grid_lons, wind_dir_grid, point.lat, point.lon)
+                        point.wind_waves.append(WavePartition(
+                            hs=wind_hs, tp=wind_tp, dir=wind_dir, spread=30.0
                         ))
-                    else:
-                        point.secondary_swell.append(None)
 
-                logger.info(f"  Hour {hour}: Hs={point.hs[-1]:.2f}m, Tp={point.tp[-1]:.1f}s, Dir={point.dir[-1]:.0f}°")
+                        # Primary swell partition
+                        swell1_hs = self._extract_point_value(grid_lats, grid_lons, swell1_hs_grid, point.lat, point.lon)
+                        swell1_tp = self._extract_point_value(grid_lats, grid_lons, swell1_tp_grid, point.lat, point.lon)
+                        swell1_dir = self._extract_point_value(grid_lats, grid_lons, swell1_dir_grid, point.lat, point.lon)
+                        point.primary_swell.append(WavePartition(
+                            hs=swell1_hs, tp=swell1_tp, dir=swell1_dir, spread=20.0
+                        ))
+
+                        # Secondary swell partition
+                        if has_secondary:
+                            swell2_hs = self._extract_point_value(grid_lats, grid_lons, swell2_hs_grid, point.lat, point.lon)
+                            swell2_tp = self._extract_point_value(grid_lats, grid_lons, swell2_tp_grid, point.lat, point.lon)
+                            swell2_dir = self._extract_point_value(grid_lats, grid_lons, swell2_dir_grid, point.lat, point.lon)
+                            point.secondary_swell.append(WavePartition(
+                                hs=swell2_hs, tp=swell2_tp, dir=swell2_dir, spread=20.0
+                            ))
+                        else:
+                            point.secondary_swell.append(None)
+
+                    # Log summary for this boundary
+                    avg_hs = sum(p.hs[-1] for p in points) / len(points)
+                    logger.info(f"  {side} boundary: avg Hs={avg_hs:.2f}m ({len(points)} points)")
 
             except Exception as e:
                 logger.error(f"Failed to fetch hour {hour}: {e}")
                 # Fill with NaN for this timestep
-                for point in points:
-                    point.times.append(None)
-                    point.hs.append(np.nan)
-                    point.tp.append(np.nan)
-                    point.dir.append(np.nan)
-                    point.spread.append(np.nan)
-                    point.wind_waves.append(None)
-                    point.primary_swell.append(None)
-                    point.secondary_swell.append(None)
+                for points in boundary_points.values():
+                    for point in points:
+                        point.times.append(None)
+                        point.hs.append(np.nan)
+                        point.tp.append(np.nan)
+                        point.dir.append(np.nan)
+                        point.spread.append(np.nan)
+                        point.wind_waves.append(None)
+                        point.primary_swell.append(None)
+                        point.secondary_swell.append(None)
 
-        return metadata, points
+        return config, boundary_points

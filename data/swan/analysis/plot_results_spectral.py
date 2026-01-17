@@ -376,6 +376,7 @@ class SpectralPlotter:
     output: Optional[SwanOutput] = None
     plots_dir: Optional[Path] = None
     max_swells: int = MAX_SWELLS_TO_DISPLAY
+    extent_padding: float = 0.15  # Degrees to pad extent for arrow visibility
 
     def __post_init__(self):
         self.run_dir = Path(self.run_dir)
@@ -401,12 +402,44 @@ class SpectralPlotter:
         # Load spectral boundary data
         self.boundary_reader = SpectralBoundaryReader(self.run_dir)
 
+    def _get_padded_extent(self) -> Tuple[float, float, float, float]:
+        """
+        Get map extent with padding for arrow visibility at boundaries.
+
+        Returns:
+            (lon_min, lon_max, lat_min, lat_max) with padding applied
+        """
+        lon_min, lon_max, lat_min, lat_max = self.output.extent
+        pad = self.extent_padding
+        return (lon_min - pad, lon_max + pad, lat_min - pad, lat_max + pad)
+
+    def _get_hsig_vmax(self, data: Optional[np.ndarray] = None) -> float:
+        """
+        Get a rounded-up max value for Hsig colorbar.
+
+        Uses the actual maximum in the data, rounded up to the nearest integer.
+
+        Args:
+            data: Optional array to compute max from. If None, uses self.output.hsig.
+
+        Returns:
+            Rounded up max Hsig value (minimum 1.0)
+        """
+        if data is None:
+            hsig_masked, _, _ = self.output.mask_land()
+            max_val = np.nanmax(hsig_masked)
+        else:
+            max_val = np.nanmax(data[~np.isnan(data)]) if np.any(~np.isnan(data)) else 1.0
+
+        # Round up to nearest integer, minimum of 1
+        return max(1.0, float(np.ceil(max_val)))
+
     def plot_swell_components(
         self,
         arrow_scale: float = 0.15,
         arrow_width: float = 0.003,
         skip_grid: int = 4,
-        hsig_vmax: float = 5.0,
+        hsig_vmax: Optional[float] = None,
         title: Optional[str] = None,
         save: bool = True,
         show: bool = False,
@@ -424,7 +457,7 @@ class SpectralPlotter:
             arrow_scale: Scale factor for arrow length
             arrow_width: Arrow width
             skip_grid: Skip every N grid points for clarity
-            hsig_vmax: Max value for Hsig colorbar
+            hsig_vmax: Max value for Hsig colorbar (None = auto-scale to data)
             title: Plot title (auto-generated if None)
             save: Save plot to file
             show: Display plot
@@ -439,6 +472,10 @@ class SpectralPlotter:
         from matplotlib.lines import Line2D
 
         hsig_masked, tps_masked, dir_masked = self.output.mask_land()
+
+        # Auto-scale colorbar if not specified
+        if hsig_vmax is None:
+            hsig_vmax = self._get_hsig_vmax(hsig_masked)
 
         fig, ax = plt.subplots(
             figsize=(14, 12),
@@ -462,7 +499,7 @@ class SpectralPlotter:
         ax.add_feature(cfeature.COASTLINE, linewidth=1.5, edgecolor='black')
         ax.add_feature(cfeature.LAND, facecolor='lightgray')
         ax.add_feature(cfeature.STATES, linewidth=0.5, edgecolor='gray')
-        ax.set_extent(self.output.extent, crs=ccrs.PlateCarree())
+        ax.set_extent(self._get_padded_extent(), crs=ccrs.PlateCarree())
 
         # Gridlines
         gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5)
@@ -570,10 +607,10 @@ class SpectralPlotter:
 
     def plot_partition_arrows(
         self,
-        arrow_scale: float = 0.25,
-        skip_grid: int = 4,
-        hsig_vmax: float = 5.0,
-        min_hs_threshold: float = 0.1,
+        arrow_scale: float = 0.20,
+        skip_grid: int = 3,
+        hsig_vmax: Optional[float] = None,
+        min_hs_threshold: float = 0.05,
         title: Optional[str] = None,
         save: bool = True,
         show: bool = False,
@@ -591,10 +628,10 @@ class SpectralPlotter:
         - Direction: Wave propagation direction (TO, not FROM)
 
         Args:
-            arrow_scale: Scale factor for arrow length
-            skip_grid: Skip every N grid points for clarity
-            hsig_vmax: Max value for Hsig colorbar
-            min_hs_threshold: Minimum Hs (m) to draw an arrow
+            arrow_scale: Scale factor for arrow length (default 0.20)
+            skip_grid: Skip every N grid points for clarity (default 3)
+            hsig_vmax: Max value for Hsig colorbar (None = auto-scale to data)
+            min_hs_threshold: Minimum Hs (m) to draw an arrow (default 0.05)
             title: Plot title (auto-generated if None)
             save: Save plot to file
             show: Display plot
@@ -613,6 +650,10 @@ class SpectralPlotter:
         from matplotlib.lines import Line2D
 
         hsig_masked, _, _ = self.output.mask_land()
+
+        # Auto-scale colorbar if not specified
+        if hsig_vmax is None:
+            hsig_vmax = self._get_hsig_vmax(hsig_masked)
 
         fig, ax = plt.subplots(
             figsize=(14, 12),
@@ -636,7 +677,7 @@ class SpectralPlotter:
         ax.add_feature(cfeature.COASTLINE, linewidth=1.5, edgecolor='black')
         ax.add_feature(cfeature.LAND, facecolor='lightgray')
         ax.add_feature(cfeature.STATES, linewidth=0.5, edgecolor='gray')
-        ax.set_extent(self.output.extent, crs=ccrs.PlateCarree())
+        ax.set_extent(self._get_padded_extent(), crs=ccrs.PlateCarree())
 
         # Gridlines
         gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5)
@@ -644,22 +685,24 @@ class SpectralPlotter:
         gl.right_labels = False
 
         # Collect arrow data grouped by period band for each partition
+        # Colors chosen to contrast with YlOrRd heatmap (avoiding red/orange/yellow)
         period_colors = {
-            'wind_chop': '#3498db',    # Blue - short period
-            'short_swell': '#27ae60',  # Green - medium period
-            'long_swell': '#e74c3c',   # Red - long period groundswell
+            'wind_chop': '#17a2b8',    # Cyan - short period wind waves
+            'short_swell': '#8e44ad',  # Purple - medium period swell
+            'long_swell': '#1a252f',   # Dark navy - long period groundswell
         }
 
         arrows_by_period = {band: {'x': [], 'y': [], 'u': [], 'v': [], 'labels': []}
                            for band in period_colors}
 
-        # Small offset per partition to prevent overlap at same point
-        offset_scale = 0.015
+        # Offset per partition to visually separate arrows at same grid point
+        # Offsets are applied perpendicular to create a fan-like arrangement
+        offset_scale = 0.035  # ~3.5km offset between partition arrows
         partition_offsets = {
-            0: (0, 0),          # Wind sea - center
-            1: (-1, 0),         # Primary swell - left
-            2: (1, 0),          # Secondary swell - right
-            3: (0, 1),          # Tertiary swell - up
+            0: (0, 0),           # Primary partition - center
+            1: (-0.8, -0.6),     # Secondary - SW offset
+            2: (0.8, -0.6),      # Tertiary - SE offset
+            3: (0, 0.8),         # Quaternary - N offset
         }
 
         for partition in self.output.partitions:
@@ -724,13 +767,13 @@ class SpectralPlotter:
         cbar = plt.colorbar(im, ax=ax, shrink=0.6, pad=0.02)
         cbar.set_label('Total Significant Wave Height (m)')
 
-        # Legend for period colors
+        # Legend for period colors (matching arrow colors that contrast with heatmap)
         legend_elements = [
-            Line2D([0], [0], marker='>', color='w', markerfacecolor='#3498db',
+            Line2D([0], [0], marker='>', color='w', markerfacecolor='#17a2b8',
                    markersize=12, label='Wind Chop (<8s)'),
-            Line2D([0], [0], marker='>', color='w', markerfacecolor='#27ae60',
+            Line2D([0], [0], marker='>', color='w', markerfacecolor='#8e44ad',
                    markersize=12, label='Short Swell (8-12s)'),
-            Line2D([0], [0], marker='>', color='w', markerfacecolor='#e74c3c',
+            Line2D([0], [0], marker='>', color='w', markerfacecolor='#1a252f',
                    markersize=12, label='Groundswell (>12s)'),
         ]
         ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
@@ -746,6 +789,186 @@ class SpectralPlotter:
 
         # Save
         filepath = self.plots_dir / "partition_arrows.png"
+        if save:
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            logger.info(f"Saved: {filepath}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+        return filepath
+
+    def plot_wind_sea(
+        self,
+        arrow_scale: float = 0.20,
+        skip_grid: int = 3,
+        hsig_vmax: Optional[float] = None,
+        min_hs_threshold: float = 0.05,
+        period_threshold: float = 8.0,
+        title: Optional[str] = None,
+        save: bool = True,
+        show: bool = False,
+    ) -> Optional[Path]:
+        """
+        Plot short-period waves (wind sea) from ALL partitions.
+
+        Aggregates ALL waves with Tp < period_threshold from any partition,
+        not just partition 0. At each grid point, shows the dominant short-period
+        wave (highest Hs among all partitions with Tp < threshold).
+
+        Arrow properties:
+        - Color: Blue (wind sea color)
+        - Length: Proportional to wave height (Hs)
+        - Direction: Wave propagation direction (TO, not FROM)
+
+        Args:
+            arrow_scale: Scale factor for arrow length
+            skip_grid: Skip every N grid points for clarity
+            hsig_vmax: Max value for Hsig colorbar (None = auto-scale to data)
+            min_hs_threshold: Minimum Hs (m) to draw an arrow
+            period_threshold: Maximum period (s) to consider as wind sea (default 8.0)
+            title: Plot title (auto-generated if None)
+            save: Save plot to file
+            show: Display plot
+
+        Returns:
+            Path to saved plot, or None if no short-period wave data
+        """
+        if not self.output.has_partitions:
+            logger.info("No partition data available - skipping wind sea plot")
+            return None
+
+        import matplotlib.pyplot as plt
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+
+        # Build aggregated short-period wave data from ALL partitions
+        # For each grid cell, find the max Hs among all partitions with Tp < threshold
+        grid_shape = self.output.hsig.shape
+        agg_hs = np.full(grid_shape, np.nan)
+        agg_tp = np.full(grid_shape, np.nan)
+        agg_dir = np.full(grid_shape, np.nan)
+
+        for partition in self.output.partitions:
+            hs_masked, tp_masked, dir_masked = partition.mask_invalid(self.output.exception_value)
+
+            for i in range(grid_shape[0]):
+                for j in range(grid_shape[1]):
+                    hs = hs_masked[i, j]
+                    tp = tp_masked[i, j]
+                    wave_dir = dir_masked[i, j]
+
+                    # Skip invalid points or periods >= threshold
+                    if np.isnan(hs) or np.isnan(tp) or tp >= period_threshold:
+                        continue
+
+                    # Keep the highest Hs short-period wave at this point
+                    if np.isnan(agg_hs[i, j]) or hs > agg_hs[i, j]:
+                        agg_hs[i, j] = hs
+                        agg_tp[i, j] = tp
+                        agg_dir[i, j] = wave_dir
+
+        # Check if there's any valid short-period data
+        valid_count = np.sum(~np.isnan(agg_hs) & (agg_hs > min_hs_threshold))
+        if valid_count == 0:
+            logger.info("No significant short-period wave data - skipping wind sea plot")
+            return None
+
+        logger.info(f"Found {valid_count} grid points with Tp < {period_threshold}s waves")
+
+        # Auto-scale colorbar if not specified
+        if hsig_vmax is None:
+            hsig_vmax = self._get_hsig_vmax(agg_hs)
+
+        fig, ax = plt.subplots(
+            figsize=(14, 12),
+            subplot_kw={'projection': ccrs.PlateCarree()}
+        )
+
+        # Create meshgrid for plotting
+        LON, LAT = np.meshgrid(self.output.lons, self.output.lats)
+
+        # Plot aggregated short-period Hs as background heatmap
+        im = ax.pcolormesh(
+            LON, LAT, agg_hs,
+            cmap='Blues',
+            vmin=0, vmax=hsig_vmax,
+            shading='auto',
+            alpha=0.7,
+            transform=ccrs.PlateCarree()
+        )
+
+        # Add map features
+        ax.add_feature(cfeature.COASTLINE, linewidth=1.5, edgecolor='black')
+        ax.add_feature(cfeature.LAND, facecolor='lightgray')
+        ax.add_feature(cfeature.STATES, linewidth=0.5, edgecolor='gray')
+        ax.set_extent(self._get_padded_extent(), crs=ccrs.PlateCarree())
+
+        # Gridlines
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5)
+        gl.top_labels = False
+        gl.right_labels = False
+
+        # Collect arrow data
+        arrow_x, arrow_y, arrow_u, arrow_v = [], [], [], []
+
+        for i in range(0, len(self.output.lats), skip_grid):
+            for j in range(0, len(self.output.lons), skip_grid):
+                hs = agg_hs[i, j]
+                tp = agg_tp[i, j]
+                wave_dir = agg_dir[i, j]
+
+                # Skip invalid/small points
+                if np.isnan(hs) or hs < min_hs_threshold:
+                    continue
+                if np.isnan(tp) or np.isnan(wave_dir):
+                    continue
+
+                # Convert nautical direction (FROM) to arrow direction (TO)
+                arrow_dir = (wave_dir + 180) % 360
+
+                # Convert to radians (math convention: 0=E, CCW positive)
+                theta = np.radians(90 - arrow_dir)
+
+                # Arrow components proportional to Hs
+                u = hs * arrow_scale * np.cos(theta)
+                v = hs * arrow_scale * np.sin(theta)
+
+                arrow_x.append(self.output.lons[j])
+                arrow_y.append(self.output.lats[i])
+                arrow_u.append(u)
+                arrow_v.append(v)
+
+        # Plot arrows
+        if arrow_x:
+            ax.quiver(
+                arrow_x, arrow_y, arrow_u, arrow_v,
+                color='#2980b9',  # Darker blue for arrows
+                scale=1, scale_units='xy',
+                width=0.004,
+                headwidth=4, headlength=5,
+                alpha=0.85,
+                transform=ccrs.PlateCarree(),
+                zorder=5
+            )
+
+        # Colorbar
+        cbar = plt.colorbar(im, ax=ax, shrink=0.6, pad=0.02)
+        cbar.set_label('Short-Period Wave Height (m)')
+
+        # Title
+        if title is None:
+            valid_tp = agg_tp[~np.isnan(agg_tp)]
+            avg_tp = np.mean(valid_tp) if len(valid_tp) > 0 else 0
+            title = f"Short-Period Waves (Tp < {period_threshold:.0f}s, avg {avg_tp:.1f}s) - {self.output.region_name}"
+        ax.set_title(title, fontsize=14)
+
+        plt.tight_layout()
+
+        # Save
+        filepath = self.plots_dir / "wind_sea.png"
         if save:
             plt.savefig(filepath, dpi=150, bbox_inches='tight')
             logger.info(f"Saved: {filepath}")
@@ -817,7 +1040,7 @@ class SpectralPlotter:
         ax.add_feature(cfeature.COASTLINE, linewidth=1.5, edgecolor='black')
         ax.add_feature(cfeature.LAND, facecolor='lightgray')
         ax.add_feature(cfeature.STATES, linewidth=0.5, edgecolor='gray')
-        ax.set_extent(self.output.extent, crs=ccrs.PlateCarree())
+        ax.set_extent(self._get_padded_extent(), crs=ccrs.PlateCarree())
 
         # Gridlines
         gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5)
@@ -941,7 +1164,8 @@ class SpectralPlotter:
 
         paths = [
             self.plot_swell_components(show=show),
-            self.plot_partition_arrows(show=show),  # Uses partition outputs if available
+            self.plot_partition_arrows(show=show),  # Multiple arrows per point from partitions
+            self.plot_wind_sea(show=show),          # Wind sea only (Tp < 8s)
             self.plot_boundary_components(show=show),
         ]
 

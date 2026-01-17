@@ -2,21 +2,20 @@
 """
 Southern California WW3 Boundary Point Extraction
 
-Extracts WaveWatch III grid points along the western boundary of the
-SoCal SWAN domain for use as spectral boundary conditions.
+Extracts WaveWatch III grid points along boundaries of the SoCal SWAN domain
+for use as spectral boundary conditions.
 
 SoCal Region Bounds:
     Latitude:  32.0°N to 34.5°N
     Longitude: 121.0°W to 117.0°W
 
-Western Boundary (for wave input):
-    Longitude: -121.0°
-    Latitude:  32.0° to 34.5°
+Active Boundaries:
+    - West: -121.0° longitude (Pacific swell from W/NW)
+    - South: 32.0° latitude (Southern hemisphere swell)
 
 Usage:
     python data/swan/ww3_endpoints/socal/extract.py
     python data/swan/ww3_endpoints/socal/extract.py --plot
-    python data/swan/ww3_endpoints/socal/extract.py --update-region
 """
 
 import sys
@@ -35,6 +34,8 @@ from data.swan.ww3_endpoints.extract_ww3_endpoints import (
     BoundaryPointSet,
     find_boundary_points,
     extract_region_boundaries,
+    create_unified_boundary_config,
+    UnifiedBoundaryConfig,
 )
 from data.regions import SOCAL, get_region
 
@@ -55,29 +56,33 @@ SOCAL_BOUNDS = {
     "lon_max": SOCAL.lon_range[1],  # -117.0
 }
 
-# Which boundaries to extract WW3 points from
-# For California, waves primarily come from the west and northwest
-BOUNDARY_SIDES = ['west']  # Can add 'south', 'north' if needed
+# Which boundaries to use for wave forcing
+# - West: Primary Pacific swell from W/NW directions
+# - South: Southern hemisphere swell (S/SW swells, especially in summer)
+ACTIVE_BOUNDARIES = ['west', 'south']
 
 
-def extract_socal_ww3_points(
-    sides: List[str] = None,
+def extract_boundary_config(
+    active_sides: List[str] = None,
     save: bool = True,
     plot: bool = False,
-) -> dict:
+) -> UnifiedBoundaryConfig:
     """
-    Extract WW3 boundary points for SoCal region.
+    Extract WW3 boundary points in unified multi-boundary format.
+
+    Creates a single JSON file (ww3_boundaries.json) containing all
+    boundary definitions with active boundaries marked.
 
     Args:
-        sides: Which boundary sides to extract (default: ['west'])
+        active_sides: Which boundaries to use for forcing (default: ACTIVE_BOUNDARIES)
         save: Whether to save to JSON file
-        plot: Whether to display plots
+        plot: Whether to display plots of boundary points
 
     Returns:
-        Dict mapping side name to BoundaryPointSet
+        UnifiedBoundaryConfig object
     """
-    if sides is None:
-        sides = BOUNDARY_SIDES
+    if active_sides is None:
+        active_sides = ACTIVE_BOUNDARIES
 
     print(f"=" * 60)
     print(f"Extracting WW3 Boundary Points for SoCal")
@@ -85,31 +90,32 @@ def extract_socal_ww3_points(
     print(f"Region: {SOCAL.display_name}")
     print(f"Bounds: lat {SOCAL_BOUNDS['lat_min']}° to {SOCAL_BOUNDS['lat_max']}°")
     print(f"        lon {SOCAL_BOUNDS['lon_min']}° to {SOCAL_BOUNDS['lon_max']}°")
-    print(f"Extracting sides: {sides}")
+    print(f"Active boundaries: {active_sides}")
     print()
 
-    boundaries = extract_region_boundaries(
+    config = create_unified_boundary_config(
         lon_min=SOCAL_BOUNDS['lon_min'],
         lon_max=SOCAL_BOUNDS['lon_max'],
         lat_min=SOCAL_BOUNDS['lat_min'],
         lat_max=SOCAL_BOUNDS['lat_max'],
-        sides=sides,
+        active_sides=active_sides,
         region_name=REGION_NAME,
         mesh_name=MESH_NAME,
     )
 
-    for side, point_set in boundaries.items():
-        print(f"\n{point_set.summary()}")
+    print(f"\n{config.summary()}")
 
-        if save:
-            filepath = OUTPUT_DIR / f"ww3_boundary_{side}.json"
-            point_set.save(filepath)
+    if save:
+        filepath = OUTPUT_DIR / "ww3_boundaries.json"
+        config.save(filepath)
 
-        if plot:
+    if plot:
+        # Plot each boundary
+        for side, point_set in config.boundaries.items():
             plot_path = OUTPUT_DIR / f"ww3_boundary_{side}.png" if save else None
             point_set.plot(save_path=plot_path, show=True)
 
-    return boundaries
+    return config
 
 
 def get_ww3_boundary_points() -> List[Tuple[float, float]]:
@@ -122,20 +128,34 @@ def get_ww3_boundary_points() -> List[Tuple[float, float]]:
     Returns:
         List of (lon, lat) tuples for WW3 boundary points
     """
-    # Check if points are already saved
-    filepath = OUTPUT_DIR / "ww3_boundary_west.json"
-    if filepath.exists():
-        point_set = BoundaryPointSet.load(filepath)
-        return point_set.points
+    config = load_boundary_config()
+    if 'west' in config.boundaries:
+        return config.boundaries['west'].points
+    return []
 
-    # Otherwise extract them
-    boundaries = extract_socal_ww3_points(sides=['west'], save=True, plot=False)
-    return boundaries['west'].points
+
+def load_boundary_config() -> UnifiedBoundaryConfig:
+    """
+    Load the unified boundary configuration for SoCal.
+
+    Returns:
+        UnifiedBoundaryConfig object
+
+    Raises:
+        FileNotFoundError: If config not found
+    """
+    filepath = OUTPUT_DIR / "ww3_boundaries.json"
+    if not filepath.exists():
+        raise FileNotFoundError(
+            f"Boundary config not found: {filepath}\n"
+            f"Run: python data/swan/ww3_endpoints/socal/extract.py"
+        )
+    return UnifiedBoundaryConfig.load(filepath)
 
 
 def load_boundary_points(side: str = 'west') -> BoundaryPointSet:
     """
-    Load previously saved boundary points.
+    Load boundary points for a specific side.
 
     Args:
         side: Which boundary side ('west', 'east', 'north', 'south')
@@ -143,13 +163,13 @@ def load_boundary_points(side: str = 'west') -> BoundaryPointSet:
     Returns:
         BoundaryPointSet object
     """
-    filepath = OUTPUT_DIR / f"ww3_boundary_{side}.json"
-    if not filepath.exists():
-        raise FileNotFoundError(
-            f"Boundary points not found: {filepath}\n"
-            f"Run: python data/swan/ww3_endpoints/socal/extract.py"
+    config = load_boundary_config()
+    if side not in config.boundaries:
+        raise ValueError(
+            f"Boundary '{side}' not found in config. "
+            f"Available: {list(config.boundaries.keys())}"
         )
-    return BoundaryPointSet.load(filepath)
+    return config.boundaries[side]
 
 
 def main():
@@ -160,8 +180,8 @@ def main():
         "--sides", "-s",
         nargs="+",
         choices=['west', 'east', 'north', 'south'],
-        default=['west'],
-        help="Which boundary sides to extract (default: west)"
+        default=None,
+        help="Which boundary sides to extract (default: west, south)"
     )
     parser.add_argument(
         "--plot", "-p",
@@ -171,44 +191,23 @@ def main():
     parser.add_argument(
         "--no-save",
         action="store_true",
-        help="Don't save to JSON files"
-    )
-    parser.add_argument(
-        "--update-region",
-        action="store_true",
-        help="Print code to update Region class with these points"
+        help="Don't save to JSON file"
     )
 
     args = parser.parse_args()
 
-    boundaries = extract_socal_ww3_points(
-        sides=args.sides,
+    # Default sides
+    sides = args.sides if args.sides else ACTIVE_BOUNDARIES
+
+    # Extract and save boundary config
+    config = extract_boundary_config(
+        active_sides=sides,
         save=not args.no_save,
         plot=args.plot,
     )
 
-    if args.update_region:
-        print("\n" + "=" * 60)
-        print("Code to update SOCAL region ww3_boundary_points:")
-        print("=" * 60)
-
-        if 'west' in boundaries:
-            points = boundaries['west'].points
-            print(f"\n# In data/regions/region.py, update SOCAL definition:")
-            print(f"SOCAL = Region(")
-            print(f"    name=\"socal\",")
-            print(f"    display_name=\"Southern California\",")
-            print(f"    bounds={{")
-            print(f"        \"lat\": (32.0, 34.5),")
-            print(f"        \"lon\": (-121.0, -117.0),")
-            print(f"    }},")
-            print(f"    parent=CALIFORNIA,")
-            print(f"    color=\"#E9C46A\",")
-            print(f"    ww3_boundary_points={points},")
-            print(f")")
-
     print("\nDone!")
-    return boundaries
+    return config
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ Usage:
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union
 from enum import Enum
 import json
 import numpy as np
@@ -572,3 +572,208 @@ def extract_region_boundaries(
         )
 
     return boundaries
+
+
+# =============================================================================
+# Unified Multi-Boundary Format
+# =============================================================================
+
+@dataclass
+class UnifiedBoundaryConfig:
+    """
+    Unified configuration for multiple WW3 boundaries in a single file.
+
+    This format consolidates all boundary definitions for a region into one JSON,
+    making it easier to manage and extend for future regions.
+
+    Attributes:
+        region_name: Name of the region (e.g., "socal")
+        mesh_name: Name of the associated mesh (e.g., "socal_coarse")
+        boundaries: Dict mapping side names to BoundaryPointSet objects
+        active_boundaries: List of which boundaries to use for forcing
+        grid: WW3 grid specification
+    """
+
+    region_name: str
+    mesh_name: str
+    boundaries: Dict[str, BoundaryPointSet]
+    active_boundaries: List[str]
+    grid: WW3Grid = None
+
+    def __post_init__(self):
+        if self.grid is None:
+            self.grid = WW3_GRID
+
+    @property
+    def n_boundaries(self) -> int:
+        """Number of defined boundaries."""
+        return len(self.boundaries)
+
+    @property
+    def n_active(self) -> int:
+        """Number of active boundaries."""
+        return len(self.active_boundaries)
+
+    def get_active_boundaries(self) -> Dict[str, BoundaryPointSet]:
+        """Get only the active boundary point sets."""
+        return {side: self.boundaries[side] for side in self.active_boundaries}
+
+    def save(self, filepath: Union[str, Path]) -> Path:
+        """
+        Save unified boundary configuration to JSON file.
+
+        Args:
+            filepath: Path to save to
+
+        Returns:
+            Path to saved file
+        """
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        # Build unified JSON structure
+        data = {
+            "region_name": self.region_name,
+            "mesh_name": self.mesh_name,
+            "ww3_grid": {
+                "resolution_deg": self.grid.resolution_deg,
+            },
+            "active_boundaries": self.active_boundaries,
+            "boundaries": {}
+        }
+
+        # Add each boundary
+        for side, point_set in self.boundaries.items():
+            data["boundaries"][side] = {
+                "type": point_set.boundary_line.boundary_type.value,
+                "side": point_set.boundary_line.side,
+                "name": point_set.boundary_line.name,
+                "definition": point_set.boundary_line.points,
+                "points": point_set.points,
+                "n_points": point_set.n_points,
+            }
+
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+
+        print(f"Saved unified boundary config ({self.n_boundaries} boundaries, "
+              f"{self.n_active} active) to: {filepath}")
+        return filepath
+
+    @classmethod
+    def load(cls, filepath: Union[str, Path]) -> "UnifiedBoundaryConfig":
+        """
+        Load unified boundary configuration from JSON file.
+
+        Args:
+            filepath: Path to load from
+
+        Returns:
+            UnifiedBoundaryConfig object
+        """
+        filepath = Path(filepath)
+
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+        grid = WW3Grid(resolution_deg=data["ww3_grid"]["resolution_deg"])
+
+        # Reconstruct boundary point sets
+        boundaries = {}
+        for side, boundary_data in data["boundaries"].items():
+            boundary_line = BoundaryLine(
+                boundary_type=BoundaryType(boundary_data["type"]),
+                points=[tuple(p) for p in boundary_data["definition"]],
+                name=boundary_data["name"],
+                side=boundary_data["side"],
+            )
+
+            boundaries[side] = BoundaryPointSet(
+                points=[tuple(p) for p in boundary_data["points"]],
+                boundary_line=boundary_line,
+                grid=grid,
+                region_name=data.get("region_name"),
+                mesh_name=data.get("mesh_name"),
+            )
+
+        return cls(
+            region_name=data["region_name"],
+            mesh_name=data["mesh_name"],
+            boundaries=boundaries,
+            active_boundaries=data["active_boundaries"],
+            grid=grid,
+        )
+
+    def summary(self) -> str:
+        """Return a summary string."""
+        lines = [
+            f"Unified WW3 Boundary Configuration",
+            f"  Region: {self.region_name}",
+            f"  Mesh: {self.mesh_name}",
+            f"  WW3 resolution: {self.grid.resolution_deg}°",
+            f"  Active boundaries: {self.active_boundaries}",
+            f"",
+            f"Boundaries:",
+        ]
+
+        for side, point_set in self.boundaries.items():
+            active_marker = " [ACTIVE]" if side in self.active_boundaries else ""
+            lines.append(f"  {side}{active_marker}: {point_set.n_points} points")
+
+            # Show first and last points
+            if point_set.points:
+                first = point_set.points[0]
+                last = point_set.points[-1]
+                lines.append(f"    from ({first[0]:.2f}°, {first[1]:.2f}°) "
+                           f"to ({last[0]:.2f}°, {last[1]:.2f}°)")
+
+        return '\n'.join(lines)
+
+
+def create_unified_boundary_config(
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    active_sides: List[str],
+    region_name: str,
+    mesh_name: str,
+    include_all_sides: bool = False,
+) -> UnifiedBoundaryConfig:
+    """
+    Create a unified boundary configuration for a region.
+
+    Args:
+        lon_min, lon_max: Longitude bounds
+        lat_min, lat_max: Latitude bounds
+        active_sides: Which sides to use for boundary forcing
+        region_name: Name of the region
+        mesh_name: Name of the mesh
+        include_all_sides: If True, extract all 4 sides (only active ones used for forcing)
+
+    Returns:
+        UnifiedBoundaryConfig object
+    """
+    # Determine which sides to extract
+    if include_all_sides:
+        sides_to_extract = ['west', 'east', 'north', 'south']
+    else:
+        sides_to_extract = active_sides
+
+    # Extract boundary points
+    boundaries = extract_region_boundaries(
+        lon_min=lon_min,
+        lon_max=lon_max,
+        lat_min=lat_min,
+        lat_max=lat_max,
+        sides=sides_to_extract,
+        region_name=region_name,
+        mesh_name=mesh_name,
+    )
+
+    return UnifiedBoundaryConfig(
+        region_name=region_name,
+        mesh_name=mesh_name,
+        boundaries=boundaries,
+        active_boundaries=active_sides,
+    )

@@ -2,9 +2,9 @@
 SWAN Runner Module
 
 Orchestrates SWAN simulations including:
-- WW3 boundary condition fetching
+- WW3 boundary condition fetching (from unified config)
 - Wind data preparation
-- SWAN input file generation
+- SWAN input file generation (spectral boundaries)
 - Model execution
 """
 
@@ -12,7 +12,6 @@ from .ww3_boundary_fetcher import WW3BoundaryFetcher, BoundaryPoint, WavePartiti
 from .input_generator import (
     SwanInputGenerator,
     PhysicsSettings,
-    BoundaryWaveParams,
     SpectralConfig,
     SpectrumReconstructor,
     SpectralBoundaryWriter,
@@ -25,7 +24,6 @@ __all__ = [
     "WavePartition",
     "SwanInputGenerator",
     "PhysicsSettings",
-    "BoundaryWaveParams",
     "SpectralConfig",
     "SpectrumReconstructor",
     "SpectralBoundaryWriter",

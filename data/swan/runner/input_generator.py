@@ -3,7 +3,7 @@ SWAN Input File Generator
 
 Generates SWAN INPUT files for stationary wave model runs.
 Combines mesh bathymetry, WW3 boundary conditions, and physics settings.
-Supports both parametric (PAR) and spectral (SPEC2D) boundary conditions.
+Uses spectral (SPEC2D) boundary conditions with unified multi-boundary config.
 """
 
 import json
@@ -18,16 +18,6 @@ if TYPE_CHECKING:
     from .ww3_boundary_fetcher import WavePartition, BoundaryPoint
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class BoundaryWaveParams:
-    """Wave parameters at a single boundary point."""
-    distance: float  # Distance along boundary (degrees for spherical coords)
-    hs: float        # Significant wave height (m)
-    tp: float        # Peak period (s)
-    dir: float       # Wave direction (degrees, nautical convention)
-    spread: float    # Directional spreading (degrees)
 
 
 @dataclass
@@ -441,26 +431,65 @@ class SpectralBoundaryWriter:
 
         return output_path
 
+    def write_multi_boundary_spec2d(
+        self,
+        output_dir: Path,
+        boundary_points: Dict[str, List["BoundaryPoint"]],
+        time_index: int = 0,
+        timestamp: Optional[datetime] = None,
+    ) -> Dict[str, Path]:
+        """
+        Write SPEC2D files for multiple boundaries.
+
+        Creates one spectral file per boundary side, named boundary_{side}.sp2
+
+        Args:
+            output_dir: Directory to write files to
+            boundary_points: Dict mapping side name to list of BoundaryPoint objects
+            time_index: Index into time series (for stationary, use 0)
+            timestamp: Optional timestamp for the spectra
+
+        Returns:
+            Dict mapping side name to Path of written file
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        spectral_files = {}
+
+        for side, points in boundary_points.items():
+            spec_path = output_dir / f"boundary_{side}.sp2"
+            self.write_spec2d(
+                output_path=spec_path,
+                boundary_points=points,
+                time_index=time_index,
+                timestamp=timestamp,
+            )
+            spectral_files[side] = spec_path
+
+        logger.info(f"Wrote {len(spectral_files)} spectral boundary files")
+        return spectral_files
+
 
 @dataclass
 class SwanInputGenerator:
     """
-    Generates SWAN INPUT files for stationary runs.
+    Generates SWAN INPUT files for stationary runs with spectral boundaries.
 
     Combines:
     - Mesh (CGRID, INPGRID, READINP for bathymetry)
-    - Boundary conditions (BOUNDSPEC with PAR parametric values)
+    - Boundary conditions (BOUNDSPEC SEGMENT with SPEC2D files)
     - Physics settings
 
     Example usage:
         generator = SwanInputGenerator(
             mesh_dir="data/meshes/socal/coarse",
-            boundary_file="data/swan/ww3_endpoints/socal/ww3_boundary_west.json"
+            boundary_file="data/swan/ww3_endpoints/socal/ww3_boundaries.json"
         )
-        wave_params = [BoundaryWaveParams(...), ...]
-        generator.generate(
+        input_path = generator.generate(
             output_dir="data/swan/runs/socal/latest",
-            wave_params=wave_params
+            boundary_config=config,
+            spectral_files={"west": "boundary_west.sp2", "south": "boundary_south.sp2"}
         )
     """
 
@@ -470,7 +499,7 @@ class SwanInputGenerator:
 
     # Loaded data (populated by load())
     mesh_metadata: Optional[Dict] = None
-    boundary_metadata: Optional[Dict] = None
+    boundary_config: Optional[Dict] = None
 
     def __post_init__(self):
         self.mesh_dir = Path(self.mesh_dir)
@@ -491,120 +520,35 @@ class SwanInputGenerator:
 
         logger.info(f"Loaded mesh: {self.mesh_metadata['name']}")
 
-        # Load boundary metadata
+        # Load boundary config
         with open(self.boundary_file) as f:
-            self.boundary_metadata = json.load(f)
+            self.boundary_config = json.load(f)
 
-        logger.info(f"Loaded boundary: {self.boundary_metadata['boundary']['side']} side, "
-                   f"{self.boundary_metadata['n_points']} points")
+        active = self.boundary_config.get("active_boundaries", [])
+        logger.info(f"Loaded boundary config: {len(active)} active boundaries ({', '.join(active)})")
 
-    def _get_boundary_side_code(self) -> str:
-        """Get SWAN boundary side code (N/S/E/W)."""
-        side = self.boundary_metadata["boundary"]["side"].upper()
-        if side in ["NORTH", "N"]:
-            return "N"
-        elif side in ["SOUTH", "S"]:
-            return "S"
-        elif side in ["EAST", "E"]:
-            return "E"
-        elif side in ["WEST", "W"]:
-            return "W"
-        else:
-            raise ValueError(f"Unknown boundary side: {side}")
-
-    def _calculate_boundary_distances(self) -> List[float]:
+    def _generate_boundspec_for_boundary(
+        self,
+        boundary_data: Dict,
+        spec_file: str
+    ) -> List[str]:
         """
-        Calculate cumulative distances along boundary for each point.
-
-        For spherical coordinates (COORD SPHE), SWAN expects distances
-        in degrees along the boundary side.
-
-        Returns:
-            List of distances in degrees
-        """
-        points = self.boundary_metadata["points"]
-        side = self._get_boundary_side_code()
-
-        distances = []
-        first_point = points[0]
-
-        for point in points:
-            if side in ["W", "E"]:
-                # Vertical boundary - distance is latitude difference in degrees
-                delta_lat = point[1] - first_point[1]
-                distance = abs(delta_lat)
-            else:
-                # Horizontal boundary - distance is longitude difference in degrees
-                delta_lon = point[0] - first_point[0]
-                distance = abs(delta_lon)
-
-            distances.append(distance)
-
-        return distances
-
-    def _generate_boundspec_par_command(self, wave_params: List[BoundaryWaveParams]) -> List[str]:
-        """
-        Generate BOUNDSPEC command with PAR (parametric values) for stationary mode.
-
-        This embeds wave parameters directly in the INPUT file.
+        Generate BOUNDSPEC SEGMENT command for a single boundary.
 
         Args:
-            wave_params: List of BoundaryWaveParams (one per boundary point)
+            boundary_data: Dict with boundary definition (from unified config)
+            spec_file: Filename of the SPEC2D file for this boundary
 
         Returns:
-            List of SWAN command lines for boundary specification
+            List of SWAN command lines for this boundary's spectral specification
         """
-        if len(wave_params) != self.boundary_metadata["n_points"]:
-            raise ValueError(
-                f"Number of wave params ({len(wave_params)}) doesn't match "
-                f"boundary points ({self.boundary_metadata['n_points']})"
-            )
-
-        side = self._get_boundary_side_code()
-
-        # Build BOUNDSPEC command with PAR
-        # BOUNDSPEC SIDE <side> CCW VARIABLE PAR &
-        #     <dist1> <hs1> <per1> <dir1> <dd1> &
-        #     <dist2> <hs2> <per2> <dir2> <dd2> ...
-        lines = [f"BOUNDSPEC SIDE {side} CCW VARIABLE PAR &"]
-
-        for i, params in enumerate(wave_params):
-            # Distance in degrees needs more precision than meters
-            param_str = f"    {params.distance:.4f} {params.hs:.2f} {params.tp:.1f} {params.dir:.1f} {params.spread:.1f}"
-            # Last line doesn't need continuation
-            if i == len(wave_params) - 1:
-                lines.append(param_str)
-            else:
-                lines.append(f"{param_str} &")
-
-        return lines
-
-    def _generate_boundspec_segment_command(self, spec_file: str) -> List[str]:
-        """
-        Generate BOUNDSPEC SEGMENT command for spectral boundary conditions.
-
-        Uses XY coordinates to define the boundary segment endpoints,
-        then references the spectral file.
-
-        SWAN syntax:
-            BOUNDSPEC SEGMENT XY x1 y1 x2 y2 VARIABLE FILE LEN npoints 'fname' seq
-
-        Args:
-            spec_file: Filename of the SPEC2D file (relative to run directory)
-
-        Returns:
-            List of SWAN command lines for spectral boundary specification
-        """
-        points = self.boundary_metadata["points"]
-        n_points = self.boundary_metadata["n_points"]
+        points = boundary_data["points"]
+        n_points = boundary_data["n_points"]
 
         # Get first and last points of boundary segment
         start_lon, start_lat = points[0]
         end_lon, end_lat = points[-1]
 
-        # BOUNDSPEC SEGMENT XY <x1> <y1> <x2> <y2> VARIABLE FILE LEN <npoints> 'filename' <seq>
-        # LEN = number of locations in the spectral file
-        # seq = 1 for stationary (single time step)
         lines = [
             f"BOUNDSPEC SEGMENT XY {start_lon:.6f} {start_lat:.6f} {end_lon:.6f} {end_lat:.6f} &",
             f"    VARIABLE FILE LEN {n_points} '{spec_file}' 1"
@@ -612,26 +556,55 @@ class SwanInputGenerator:
 
         return lines
 
+    def _generate_boundspec_commands(
+        self,
+        boundary_config: Dict,
+        spectral_files: Dict[str, str]
+    ) -> List[str]:
+        """
+        Generate BOUNDSPEC SEGMENT commands for all active boundaries.
+
+        Args:
+            boundary_config: Unified boundary config dict with 'boundaries' and 'active_boundaries'
+            spectral_files: Dict mapping boundary side to spectral filename
+                           e.g., {"west": "boundary_west.sp2", "south": "boundary_south.sp2"}
+
+        Returns:
+            List of SWAN command lines for all boundary specifications
+        """
+        lines = []
+
+        for side in boundary_config["active_boundaries"]:
+            if side not in spectral_files:
+                raise ValueError(f"No spectral file provided for boundary '{side}'")
+
+            boundary_data = boundary_config["boundaries"][side]
+            spec_file = spectral_files[side]
+
+            # Add comment for this boundary
+            lines.append(f"$ {side.capitalize()} boundary ({boundary_data['n_points']} points)")
+            lines.extend(self._generate_boundspec_for_boundary(boundary_data, spec_file))
+            lines.append("")
+
+        return lines
+
     def generate(
         self,
         output_dir: str | Path,
-        wave_params: Optional[List[BoundaryWaveParams]] = None,
-        spectral_file: Optional[str] = None,
+        boundary_config: Dict,
+        spectral_files: Dict[str, str],
         wind_commands: Optional[List[str]] = None,
         project_name: Optional[str] = None,
         run_id: str = "001"
     ) -> Path:
         """
-        Generate SWAN INPUT file for stationary mode.
-
-        Supports two boundary condition modes:
-        - Parametric (PAR): Pass wave_params with Hs, Tp, Dir, Spread per point
-        - Spectral (SPEC2D): Pass spectral_file with path to .sp2 file
+        Generate SWAN INPUT file for stationary mode with spectral boundaries.
 
         Args:
             output_dir: Directory to write INPUT file
-            wave_params: List of BoundaryWaveParams for PAR mode (mutually exclusive with spectral_file)
-            spectral_file: Filename of SPEC2D file for spectral mode (mutually exclusive with wave_params)
+            boundary_config: Unified boundary config dict with 'boundaries' and 'active_boundaries'
+            spectral_files: Dict mapping boundary side to spectral filename
+                           e.g., {"west": "boundary_west.sp2", "south": "boundary_south.sp2"}
             wind_commands: List of SWAN wind commands (INPGRID WIND, READINP WIND)
             project_name: Project name (default: mesh name)
             run_id: Run identifier (default: "001")
@@ -639,14 +612,6 @@ class SwanInputGenerator:
         Returns:
             Path to generated INPUT file
         """
-        # Validate inputs
-        if wave_params is None and spectral_file is None:
-            raise ValueError("Must provide either wave_params (PAR) or spectral_file (SPEC2D)")
-        if wave_params is not None and spectral_file is not None:
-            raise ValueError("Cannot provide both wave_params and spectral_file - choose one mode")
-
-        use_spectral = spectral_file is not None
-
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -655,14 +620,18 @@ class SwanInputGenerator:
 
         input_path = output_dir / "INPUT"
 
+        # Get boundary info for header
+        active_boundaries = boundary_config["active_boundaries"]
+        n_boundaries = len(active_boundaries)
+
         lines = []
 
         # Header
         lines.append(f"$ SWAN INPUT file generated {datetime.now().isoformat()}")
         lines.append(f"$ Mesh: {self.mesh_metadata['name']}")
         lines.append(f"$ Region: {self.mesh_metadata['region_name']}")
-        boundary_mode = "spectral (SPEC2D)" if use_spectral else "parametric (PAR)"
-        lines.append(f"$ Boundary conditions: {boundary_mode}")
+        lines.append(f"$ Boundary conditions: spectral (SPEC2D) - {n_boundaries} boundaries")
+        lines.append(f"$ Active boundaries: {', '.join(active_boundaries)}")
         lines.append("$")
         lines.append("")
 
@@ -698,14 +667,9 @@ class SwanInputGenerator:
             lines.append("")
 
         # Boundary conditions
-        if use_spectral:
-            lines.append("$ Boundary conditions (WW3 spectral)")
-            boundspec_lines = self._generate_boundspec_segment_command(spectral_file)
-        else:
-            lines.append("$ Boundary conditions (WW3 parametric)")
-            boundspec_lines = self._generate_boundspec_par_command(wave_params)
+        lines.append("$ Boundary conditions (WW3 spectral)")
+        boundspec_lines = self._generate_boundspec_commands(boundary_config, spectral_files)
         lines.extend(boundspec_lines)
-        lines.append("")
 
         # Physics
         lines.append("$ Physics")
@@ -725,10 +689,7 @@ class SwanInputGenerator:
         lines.append("BLOCK 'COMPGRID' NOHEAD 'dir.mat' LAY 3 DIR 1.")
         lines.append("")
 
-        # Partition outputs - allows tracking individual swell components
-        # SWAN outputs up to 6 spectral peaks (HsPT01-06, TpPT01-06, DrPT01-06)
-        # in each file regardless of partition number specified.
-        # We use peaks 01-04 as: wind sea, primary/secondary/tertiary swell
+        # Partition outputs
         lines.append("$ Output - Wave partitions (up to 6 spectral peaks)")
         lines.append("BLOCK 'COMPGRID' NOHEAD 'phs0.mat' LAY 3 PTHSIG 0")
         lines.append("BLOCK 'COMPGRID' NOHEAD 'ptp0.mat' LAY 3 PTRTP 0")
@@ -748,19 +709,20 @@ class SwanInputGenerator:
         with open(input_path, 'w') as f:
             f.write('\n'.join(lines))
 
-        logger.info(f"Generated SWAN INPUT file: {input_path} (mode: {boundary_mode})")
+        logger.info(f"Generated SWAN INPUT file: {input_path} "
+                   f"(boundaries: {', '.join(active_boundaries)})")
         return input_path
 
     def summary(self) -> str:
         """Return summary of input configuration."""
+        active = self.boundary_config.get("active_boundaries", [])
         lines = [
             "SWAN Input Generator",
             f"  Mesh: {self.mesh_metadata['name']}",
             f"  Region: {self.mesh_metadata['region_name']}",
             f"  Grid: {self.mesh_metadata['nx']} x {self.mesh_metadata['ny']}",
             f"  Resolution: {self.mesh_metadata['resolution_km']} km",
-            f"  Boundary: {self.boundary_metadata['boundary']['side']} side",
-            f"  Boundary points: {self.boundary_metadata['n_points']}",
+            f"  Active boundaries: {', '.join(active)}",
             "",
             "Physics:",
             f"  GEN3: {self.physics.gen3_formulation}",
