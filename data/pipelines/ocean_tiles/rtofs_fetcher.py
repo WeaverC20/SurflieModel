@@ -123,6 +123,73 @@ class RTOFSFetcher:
         logger.error(f"Failed to fetch RTOFS data after trying 3 days")
         return None
 
+    async def fetch_for_bounds(
+        self,
+        bounds: Dict[str, float],
+        forecast_hour: int = 0,
+        model_date: Optional[datetime] = None
+    ) -> Optional[Dict]:
+        """
+        Fetch RTOFS current data for a geographic bounding box.
+
+        This method accepts bounds directly without requiring a region name,
+        making it suitable for use with mesh-based workflows (like SWAN).
+
+        Args:
+            bounds: Geographic bounds dict with keys:
+                    min_lat, max_lat, min_lon, max_lon
+            forecast_hour: Forecast hour (0-192)
+            model_date: Model run date (defaults to today at 00Z)
+
+        Returns:
+            Dictionary containing:
+            - u_velocity: 2D array of eastward velocity (m/s)
+            - v_velocity: 2D array of northward velocity (m/s)
+            - lons: 2D array of longitudes (curvilinear grid)
+            - lats: 2D array of latitudes (curvilinear grid)
+            - current_speed: 2D array of current speed (m/s)
+            - current_direction: 2D array of current direction (degrees)
+            - metadata: Model run info
+        """
+        if not GRIB_PARSING_AVAILABLE:
+            logger.error("GRIB parsing libraries not available")
+            return None
+
+        # Default to today's 00Z run
+        if model_date is None:
+            model_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        logger.info(f"Fetching RTOFS data for bounds at forecast hour {forecast_hour}")
+        logger.info(f"Model date: {model_date.strftime('%Y-%m-%d %HZ')}")
+        logger.info(f"Bounds: lat=[{bounds['min_lat']:.2f}, {bounds['max_lat']:.2f}], "
+                   f"lon=[{bounds['min_lon']:.2f}, {bounds['max_lon']:.2f}]")
+
+        # Try current model run, then fallback to previous days
+        for day_offset in [0, 1, 2]:
+            try_date = model_date - timedelta(days=day_offset)
+
+            if day_offset > 0:
+                logger.info(f"Trying fallback to {try_date.strftime('%Y-%m-%d')}")
+
+            try:
+                data = await self._fetch_rtofs_grib(
+                    model_date=try_date,
+                    forecast_hour=forecast_hour,
+                    bounds=bounds
+                )
+
+                if data is not None:
+                    if day_offset > 0:
+                        data['metadata']['fallback_days'] = day_offset
+                    return data
+
+            except Exception as e:
+                logger.warning(f"Failed to fetch RTOFS for {try_date.strftime('%Y-%m-%d')}: {e}")
+                continue
+
+        logger.error(f"Failed to fetch RTOFS data after trying 3 days")
+        return None
+
     async def _fetch_rtofs_grib(
         self,
         model_date: datetime,

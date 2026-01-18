@@ -40,6 +40,8 @@ from data.swan.runner import (
     SpectralBoundaryWriter,
     WindProvider,
     WindData,
+    CurrentProvider,
+    CurrentData,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,7 @@ class SwanRunner:
         mesh: str,
         forecast_hours: Optional[List[int]] = None,
         physics: Optional[PhysicsSettings] = None,
+        use_currents: bool = True,
     ):
         """
         Initialize SWAN runner.
@@ -100,11 +103,13 @@ class SwanRunner:
             mesh: Mesh name (e.g., "coarse")
             forecast_hours: Forecast hours to fetch (default: [0] for stationary)
             physics: Physics settings (uses defaults if None)
+            use_currents: If True, include RTOFS ocean currents (default: True)
         """
         self.region = region
         self.mesh = mesh
         self.forecast_hours = forecast_hours or [0]  # Single hour for stationary
         self.physics = physics or PhysicsSettings()
+        self.use_currents = use_currents
 
         # Resolve paths
         self.mesh_dir = get_mesh_dir(region, mesh)
@@ -185,6 +190,34 @@ class SwanRunner:
 
         return wind_data
 
+    async def prepare_current_data(self) -> CurrentData:
+        """
+        Prepare current data from RTOFS.
+
+        Fetches RTOFS ocean currents and interpolates to mesh resolution.
+
+        Returns:
+            CurrentData object with interpolated currents
+        """
+        logger.info("Preparing current data from RTOFS")
+
+        mesh_metadata = self._load_mesh_metadata()
+
+        # Extract and interpolate currents (uses mesh bounds directly, no region needed)
+        current_provider = CurrentProvider()
+        current_data = await current_provider.extract_for_mesh(
+            mesh_metadata,
+            forecast_hour=self.forecast_hours[0]
+        )
+
+        # Write current files to run directory
+        current_provider.write_swan_files(current_data, self.run_dir)
+
+        # Log summary
+        logger.info(current_provider.summary(current_data))
+
+        return current_data
+
     def generate_spectral_boundaries(
         self,
         boundary_points: Dict[str, List[BoundaryPoint]],
@@ -229,6 +262,7 @@ class SwanRunner:
         boundary_config: dict,
         boundary_points: Dict[str, List[BoundaryPoint]],
         wind_data: Optional[WindData] = None,
+        current_data: Optional[CurrentData] = None,
     ) -> Path:
         """
         Generate SWAN INPUT file with spectral boundary conditions.
@@ -237,12 +271,13 @@ class SwanRunner:
             boundary_config: Unified boundary config dict
             boundary_points: Dict mapping side name to List[BoundaryPoint]
             wind_data: Optional WindData object for wind forcing
+            current_data: Optional CurrentData object for ocean currents
 
         Returns:
             Path to generated INPUT file
         """
         active_boundaries = boundary_config["active_boundaries"]
-        logger.info(f"Generating SWAN INPUT file (boundaries: {active_boundaries})")
+        logger.info(f"Generating SWAN INPUT file (boundaries: {active_boundaries}, currents={current_data is not None})")
 
         mesh_metadata = self._load_mesh_metadata()
 
@@ -267,12 +302,22 @@ class SwanRunner:
                 wind_provider.generate_readinp_command()
             ]
 
+        # Generate current commands if current data provided
+        current_commands = None
+        if current_data is not None:
+            current_provider = CurrentProvider()
+            current_commands = [
+                current_provider.generate_inpgrid_command(current_data),
+                current_provider.generate_readinp_command()
+            ]
+
         # Generate INPUT file
         input_path = generator.generate(
             output_dir=self.run_dir,
             boundary_config=boundary_config,
             spectral_files=spectral_files,
             wind_commands=wind_commands,
+            current_commands=current_commands,
             project_name=f"{self.region}_{self.mesh}",
             run_id="001"
         )
@@ -342,15 +387,20 @@ class SwanRunner:
             # Step 2: Prepare wind data
             wind_data = self.prepare_wind_data()
 
-            # Step 3: Generate INPUT file (with wind and spectral boundaries)
+            # Step 3: Prepare current data (if enabled)
+            current_data = None
+            if self.use_currents:
+                current_data = await self.prepare_current_data()
+
+            # Step 4: Generate INPUT file (with wind, currents, and spectral boundaries)
             input_path = self.generate_input_file(
-                boundary_config, boundary_points, wind_data
+                boundary_config, boundary_points, wind_data, current_data
             )
 
-            # Step 4: Copy bathymetry
+            # Step 5: Copy bathymetry
             self.copy_bathymetry()
 
-            # Step 5: Execute SWAN (unless dry run)
+            # Step 6: Execute SWAN (unless dry run)
             if dry_run:
                 logger.info("Dry run - skipping SWAN execution")
                 logger.info(f"Run directory ready: {self.run_dir}")
@@ -359,7 +409,7 @@ class SwanRunner:
 
             result = self.execute_swan()
 
-            # Step 6: Check results
+            # Step 7: Check results
             elapsed = (datetime.now() - start_time).total_seconds()
 
             if result.returncode == 0:
@@ -383,7 +433,7 @@ class SwanRunner:
 
     def _print_output_files(self) -> None:
         """Print output files from SWAN run."""
-        output_files = ["hsig.mat", "tps.mat", "dir.mat", "PRINT", "Errfile"]
+        output_files = ["hsig.mat", "tps.mat", "dir.mat", "wind.dat", "current.dat", "PRINT", "Errfile"]
         # Also check for boundary spectral files
         for f in self.run_dir.glob("boundary_*.sp2"):
             output_files.append(f.name)
@@ -400,6 +450,7 @@ async def run_swan(
     mesh: str,
     forecast_hours: Optional[List[int]] = None,
     dry_run: bool = False,
+    use_currents: bool = True,
 ) -> bool:
     """
     Convenience function to run SWAN.
@@ -409,6 +460,7 @@ async def run_swan(
         mesh: Mesh name
         forecast_hours: Forecast hours to fetch
         dry_run: If True, prepare but don't execute
+        use_currents: If True, include RTOFS ocean currents (default: True)
 
     Returns:
         True if successful
@@ -417,6 +469,7 @@ async def run_swan(
         region=region,
         mesh=mesh,
         forecast_hours=forecast_hours,
+        use_currents=use_currents,
     )
     return await runner.run(dry_run=dry_run)
 
@@ -428,9 +481,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python data/swan/run_swan.py --region socal --mesh coarse
+  python data/swan/run_swan.py --region socal --mesh coarse                    # Uses currents (default)
   python data/swan/run_swan.py --region socal --mesh coarse --forecast-hour 24
   python data/swan/run_swan.py --region socal --mesh coarse --dry-run
+  python data/swan/run_swan.py --region socal --mesh coarse --no-currents      # Disable RTOFS currents
         """
     )
 
@@ -456,6 +510,11 @@ Examples:
         help="Prepare files but don't execute SWAN"
     )
     parser.add_argument(
+        "--no-currents",
+        action="store_true",
+        help="Disable RTOFS ocean currents (currents are included by default)"
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Verbose output"
@@ -478,6 +537,7 @@ Examples:
             mesh=args.mesh,
             forecast_hours=[args.forecast_hour],
             dry_run=args.dry_run,
+            use_currents=not args.no_currents,  # Currents enabled by default
         ))
 
         sys.exit(0 if success else 1)

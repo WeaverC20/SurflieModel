@@ -594,6 +594,7 @@ class SwanInputGenerator:
         boundary_config: Dict,
         spectral_files: Dict[str, str],
         wind_commands: Optional[List[str]] = None,
+        current_commands: Optional[List[str]] = None,
         project_name: Optional[str] = None,
         run_id: str = "001"
     ) -> Path:
@@ -606,6 +607,7 @@ class SwanInputGenerator:
             spectral_files: Dict mapping boundary side to spectral filename
                            e.g., {"west": "boundary_west.sp2", "south": "boundary_south.sp2"}
             wind_commands: List of SWAN wind commands (INPGRID WIND, READINP WIND)
+            current_commands: List of SWAN current commands (INPGRID CURRENT, READINP CURRENT)
             project_name: Project name (default: mesh name)
             run_id: Run identifier (default: "001")
 
@@ -664,6 +666,12 @@ class SwanInputGenerator:
         if wind_commands:
             lines.append("$ Wind forcing (GFS)")
             lines.extend(wind_commands)
+            lines.append("")
+
+        # Current input (if provided)
+        if current_commands:
+            lines.append("$ Ocean currents (RTOFS)")
+            lines.extend(current_commands)
             lines.append("")
 
         # Boundary conditions

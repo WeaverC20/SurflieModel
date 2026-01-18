@@ -4,6 +4,7 @@ SWAN Runner Module
 Orchestrates SWAN simulations including:
 - WW3 boundary condition fetching (from unified config)
 - Wind data preparation
+- Ocean current data preparation
 - SWAN input file generation (spectral boundaries)
 - Model execution
 """
@@ -17,6 +18,7 @@ from .input_generator import (
     SpectralBoundaryWriter,
 )
 from .wind_provider import WindProvider, WindData
+from .current_provider import CurrentProvider, CurrentData
 
 __all__ = [
     "WW3BoundaryFetcher",
@@ -29,4 +31,6 @@ __all__ = [
     "SpectralBoundaryWriter",
     "WindProvider",
     "WindData",
+    "CurrentProvider",
+    "CurrentData",
 ]
