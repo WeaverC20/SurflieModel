@@ -54,19 +54,18 @@ MESH_CONFIGS = {
         "description": "Coarse mesh for initial testing and rapid iteration",
         "folder": "coarse",
     },
-    # Future mesh configurations can be added here:
-    # "medium": {
-    #     "name": "socal_medium",
-    #     "resolution_km": 2.5,
-    #     "description": "Medium resolution for production runs",
-    #     "folder": "medium",
-    # },
-    # "fine": {
-    #     "name": "socal_fine",
-    #     "resolution_km": 1.0,
-    #     "description": "Fine resolution for detailed nearshore modeling",
-    #     "folder": "fine",
-    # },
+    "medium": {
+        "name": "socal_medium",
+        "resolution_km": 2.5,
+        "description": "Medium resolution for production runs",
+        "folder": "medium",
+    },
+    "fine": {
+        "name": "socal_fine",
+        "resolution_km": 1.0,
+        "description": "Fine resolution for detailed nearshore modeling",
+        "folder": "fine",
+    },
 }
 
 def get_mesh_dir(mesh_type: str) -> Path:

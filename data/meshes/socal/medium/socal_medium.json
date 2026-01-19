@@ -1,0 +1,38 @@
+{
+  "name": "socal_medium",
+  "region_name": "socal",
+  "resolution_km": 2.5,
+  "grid_type": "regular",
+  "origin": [
+    -121.0,
+    32.0
+  ],
+  "nx": 149,
+  "ny": 111,
+  "dx": 0.026931597952486733,
+  "dy": 0.02252252252252252,
+  "spectral": {
+    "n_dir": 36,
+    "freq_min": 0.04,
+    "freq_max": 1.0,
+    "n_freq": 31,
+    "dir_type": "CIRCLE"
+  },
+  "exception_value": -99.0,
+  "idla": 4,
+  "depth_shape": [
+    112,
+    150
+  ],
+  "depth_stats": {
+    "min": 1.0,
+    "max": 3965.0,
+    "n_ocean_cells": 12960,
+    "n_land_cells": 3840
+  },
+  "swan_commands": {
+    "cgrid": "CGRID REG -121.0000 32.0000 0 4.0128 2.5000 149 111 CIRCLE 36 0.04 1.0 31",
+    "inpgrid": "INPGRID BOTTOM REG -121.0000 32.0000 0 149 111 0.026932 0.022523 EXCEPTION -99.0",
+    "readinp": "READINP BOTTOM 1 'socal_medium.bot' 4 0 FREE"
+  }
+}

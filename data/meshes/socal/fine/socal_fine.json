@@ -1,0 +1,38 @@
+{
+  "name": "socal_fine",
+  "region_name": "socal",
+  "resolution_km": 1.0,
+  "grid_type": "regular",
+  "origin": [
+    -121.0,
+    32.0
+  ],
+  "nx": 372,
+  "ny": 278,
+  "dx": 0.010772639180994694,
+  "dy": 0.009009009009009009,
+  "spectral": {
+    "n_dir": 36,
+    "freq_min": 0.04,
+    "freq_max": 1.0,
+    "n_freq": 31,
+    "dir_type": "CIRCLE"
+  },
+  "exception_value": -99.0,
+  "idla": 4,
+  "depth_shape": [
+    279,
+    373
+  ],
+  "depth_stats": {
+    "min": 1.0,
+    "max": 3977.0,
+    "n_ocean_cells": 80437,
+    "n_land_cells": 23630
+  },
+  "swan_commands": {
+    "cgrid": "CGRID REG -121.0000 32.0000 0 4.0074 2.5045 372 278 CIRCLE 36 0.04 1.0 31",
+    "inpgrid": "INPGRID BOTTOM REG -121.0000 32.0000 0 372 278 0.010773 0.009009 EXCEPTION -99.0",
+    "readinp": "READINP BOTTOM 1 'socal_fine.bot' 4 0 FREE"
+  }
+}
