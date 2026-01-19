@@ -27,8 +27,10 @@ class PhysicsSettings:
 
     Defaults are for wind-driven nearshore wave modeling:
     - GEN3 WESTH for wind-wave generation (van der Westhuysen formulation)
+    - HWANG wind drag (better than default WU for coastal applications)
     - Bottom friction enabled (JONSWAP)
-    - Depth-limited breaking enabled
+    - Depth-limited breaking with slope-dependent gamma (BKD)
+    - Swell dissipation enabled (ARDHUIN)
     - Triads disabled (for swell propagation)
 
     The WESTH formulation is preferred over KOMEN for nearshore applications
@@ -38,13 +40,27 @@ class PhysicsSettings:
     friction: str = "JONSWAP"
     friction_coefficient: float = 0.067
 
-    # Wave breaking
+    # Wave breaking - BKD uses slope-dependent breaker index
     breaking: bool = True
+    breaking_bkd: bool = True  # Use variable breaker index (slope-dependent)
     breaking_alpha: float = 1.0
-    breaking_gamma: float = 0.73
+    breaking_gamma: float = 0.73  # Used for CONSTANT mode only
+    # BKD parameters (gamma = gamma0 + a1*slope + a2*kd + a3*slope*kd)
+    breaking_gamma0: float = 0.54  # Base gamma for BKD
+    breaking_a1: float = 0.5       # Slope coefficient
+    breaking_a2: float = 0.0       # Dimensionless depth coefficient
+    breaking_a3: float = 0.5       # Combined coefficient
 
     # GEN3 formulation: "WESTH" (recommended) or "KOMEN" (classic)
     gen3_formulation: str = "WESTH"
+
+    # Wind drag formulation: "WU" (default), "HWANG", "FIT", "FAN", "ECMWF"
+    wind_drag: str = "HWANG"
+
+    # Swell dissipation (non-breaking attenuation over distance)
+    sswell: bool = True
+    sswell_method: str = "ARDHUIN"  # "ARDHUIN" or "ZIEGER"
+    sswell_cdsv: float = 1.2e-5     # Coefficient for ARDHUIN method
 
     # Triads (shallow water nonlinear interactions)
     triads: bool = False
@@ -58,6 +74,17 @@ class PhysicsSettings:
         # KOMEN = classic Komen formulation
         commands.append(f"GEN3 {self.gen3_formulation.upper()}")
 
+        # Wind drag formulation (affects wind-wave generation accuracy)
+        if self.wind_drag.upper() != "WU":  # WU is default, no need to specify
+            commands.append(f"DRAG {self.wind_drag.upper()}")
+
+        # Swell dissipation (non-breaking energy loss for swell propagation)
+        if self.sswell:
+            if self.sswell_method.upper() == "ARDHUIN":
+                commands.append(f"SSWELL ARDHUIN cdsv={self.sswell_cdsv}")
+            elif self.sswell_method.upper() == "ZIEGER":
+                commands.append("SSWELL ZIEGER")
+
         # Friction
         if self.friction.upper() == "JONSWAP":
             commands.append(f"FRICTION JONSWAP {self.friction_coefficient}")
@@ -68,7 +95,15 @@ class PhysicsSettings:
 
         # Breaking
         if self.breaking:
-            commands.append(f"BREAKING CONSTANT {self.breaking_alpha} {self.breaking_gamma}")
+            if self.breaking_bkd:
+                # BKD: slope-dependent breaker index for variable bathymetry
+                commands.append(
+                    f"BREAKING BKD {self.breaking_alpha} {self.breaking_gamma0} "
+                    f"{self.breaking_a1} {self.breaking_a2} {self.breaking_a3}"
+                )
+            else:
+                # CONSTANT: fixed breaker index
+                commands.append(f"BREAKING CONSTANT {self.breaking_alpha} {self.breaking_gamma}")
 
         # Triads
         if self.triads:
@@ -724,6 +759,7 @@ class SwanInputGenerator:
     def summary(self) -> str:
         """Return summary of input configuration."""
         active = self.boundary_config.get("active_boundaries", [])
+        breaking_mode = "BKD (slope-dependent)" if self.physics.breaking_bkd else "CONSTANT"
         lines = [
             "SWAN Input Generator",
             f"  Mesh: {self.mesh_metadata['name']}",
@@ -734,8 +770,10 @@ class SwanInputGenerator:
             "",
             "Physics:",
             f"  GEN3: {self.physics.gen3_formulation}",
+            f"  Wind drag: {self.physics.wind_drag}",
+            f"  Swell dissipation: {self.physics.sswell_method if self.physics.sswell else 'OFF'}",
             f"  Friction: {self.physics.friction} ({self.physics.friction_coefficient})",
-            f"  Breaking: {self.physics.breaking}",
+            f"  Breaking: {breaking_mode}",
             f"  Triads: {self.physics.triads}",
         ]
         return '\n'.join(lines)
