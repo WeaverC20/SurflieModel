@@ -1,0 +1,38 @@
+{
+  "name": "norcal_fine",
+  "region_name": "norcal",
+  "resolution_km": 1.0,
+  "grid_type": "regular",
+  "origin": [
+    -126.0,
+    38.5
+  ],
+  "nx": 339,
+  "ny": 389,
+  "dx": 0.011803754905207303,
+  "dy": 0.009009009009009009,
+  "spectral": {
+    "n_dir": 36,
+    "freq_min": 0.04,
+    "freq_max": 1.0,
+    "n_freq": 31,
+    "dir_type": "CIRCLE"
+  },
+  "exception_value": -99.0,
+  "idla": 4,
+  "depth_shape": [
+    390,
+    340
+  ],
+  "depth_stats": {
+    "min": 1.0,
+    "max": 4263.0,
+    "n_ocean_cells": 66601,
+    "n_land_cells": 65999
+  },
+  "swan_commands": {
+    "cgrid": "CGRID REG -126.0000 38.5000 0 4.0015 3.5045 339 389 CIRCLE 36 0.04 1.0 31",
+    "inpgrid": "INPGRID BOTTOM REG -126.0000 38.5000 0 339 389 0.011804 0.009009 EXCEPTION -99.0",
+    "readinp": "READINP BOTTOM 1 'norcal_fine.bot' 4 0 FREE"
+  }
+}

@@ -192,7 +192,7 @@ CENTRAL_CAL = Region(
     name="central",
     display_name="Central California",
     bounds={
-        "lat": (34.5, 38.5),      # Point Conception to ~Point Reyes
+        "lat": (34.5, 39.0),      # Point Conception to ~Point Reyes (+0.5° overlap with norcal)
         "lon": (-124.0, -120.0),
     },
     parent=CALIFORNIA,
@@ -203,7 +203,7 @@ SOCAL = Region(
     name="socal",
     display_name="Southern California",
     bounds={
-        "lat": (32.0, 34.5),      # Mexico border to Point Conception
+        "lat": (32.0, 35.0),      # Mexico border to Point Conception (+0.5° overlap with central)
         "lon": (-121.0, -117.0),
     },
     parent=CALIFORNIA,
@@ -222,6 +222,8 @@ SOCAL = Region(
         (-121.0, 34.0),
         (-121.0, 34.25),
         (-121.0, 34.5),
+        (-121.0, 34.75),
+        (-121.0, 35.0),
     ],
 )
 

@@ -8,8 +8,8 @@
     32.0
   ],
   "nx": 75,
-  "ny": 56,
-  "dx": 0.05386319590497347,
+  "ny": 67,
+  "dx": 0.05401824069077017,
   "dy": 0.04504504504504504,
   "spectral": {
     "n_dir": 36,
@@ -21,18 +21,18 @@
   "exception_value": -99.0,
   "idla": 4,
   "depth_shape": [
-    57,
+    68,
     76
   ],
   "depth_stats": {
     "min": 1.0,
     "max": 3964.0,
-    "n_ocean_cells": 3282,
-    "n_land_cells": 1050
+    "n_ocean_cells": 3359,
+    "n_land_cells": 1809
   },
   "swan_commands": {
-    "cgrid": "CGRID REG -121.0000 32.0000 0 4.0397 2.5225 75 56 CIRCLE 36 0.04 1.0 31",
-    "inpgrid": "INPGRID BOTTOM REG -121.0000 32.0000 0 75 56 0.053863 0.045045 EXCEPTION -99.0",
+    "cgrid": "CGRID REG -121.0000 32.0000 0 4.0514 3.0180 75 67 CIRCLE 36 0.04 1.0 31",
+    "inpgrid": "INPGRID BOTTOM REG -121.0000 32.0000 0 75 67 0.054018 0.045045 EXCEPTION -99.0",
     "readinp": "READINP BOTTOM 1 'socal_coarse.bot' 4 0 FREE"
   }
 }
