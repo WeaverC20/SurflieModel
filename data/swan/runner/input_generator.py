@@ -27,7 +27,7 @@ class PhysicsSettings:
 
     Defaults are for wind-driven nearshore wave modeling:
     - GEN3 WESTH for wind-wave generation (van der Westhuysen formulation)
-    - HWANG wind drag (better than default WU for coastal applications)
+    - WU wind drag (default, widely compatible)
     - Bottom friction enabled (JONSWAP)
     - Depth-limited breaking with slope-dependent gamma (BKD)
     - Swell dissipation enabled (ARDHUIN)
@@ -54,8 +54,8 @@ class PhysicsSettings:
     # GEN3 formulation: "WESTH" (recommended) or "KOMEN" (classic)
     gen3_formulation: str = "WESTH"
 
-    # Wind drag formulation: "WU" (default), "HWANG", "FIT", "FAN", "ECMWF"
-    wind_drag: str = "HWANG"
+    # Wind drag formulation: "WU" (default). Other options depend on SWAN version.
+    wind_drag: str = "WU"
 
     # Swell dissipation (non-breaking attenuation over distance)
     sswell: bool = True

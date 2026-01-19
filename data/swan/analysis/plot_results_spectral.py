@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SWAN Results Plotter - Spectral Boundary Conditions
+SWAN Spectral Results Plotter
 
 Visualizations of SWAN outputs with spectral/swell component breakdown.
 Shows period-colored arrows indicating wave height and direction for multiple
@@ -9,6 +9,18 @@ swell components.
 For basic integrated plots (Hsig, Tps, Dir), use plot_results_par.py.
 
 Saves plots to data/swan/analysis/plots/{region}/{mesh}/
+
+Usage:
+    # Plot results for a region/mesh (reads from data/swan/runs/{region}/{mesh}/latest)
+    python data/swan/analysis/plot_results_spectral.py --region socal --mesh coarse
+    python data/swan/analysis/plot_results_spectral.py --region norcal --mesh coarse
+    python data/swan/analysis/plot_results_spectral.py --region central --mesh coarse
+
+    # Show plots interactively (default is save only)
+    python data/swan/analysis/plot_results_spectral.py --region socal --mesh coarse --show
+
+    # Limit number of swell components shown
+    python data/swan/analysis/plot_results_spectral.py --region socal --mesh coarse --max-swells 2
 """
 
 import json
@@ -1200,25 +1212,56 @@ def plot_spectral_results(
 if __name__ == "__main__":
     import argparse
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
     # Default run directory
-    DEFAULT_REGION = "socal"
-    DEFAULT_MESH = "coarse"
     RUNS_DIR = PROJECT_ROOT / "data" / "swan" / "runs"
 
     parser = argparse.ArgumentParser(
-        description="Plot SWAN spectral results with period-colored swell arrows"
+        description="Plot SWAN spectral results with period-colored swell arrows",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python data/swan/analysis/plot_results_spectral.py --region socal --mesh coarse
+  python data/swan/analysis/plot_results_spectral.py --region norcal --mesh coarse --show
+  python data/swan/analysis/plot_results_spectral.py --region central --mesh coarse --max-swells 2
+        """
     )
-    parser.add_argument("--region", "-r", default=DEFAULT_REGION,
-                       help=f"Region name (default: {DEFAULT_REGION})")
-    parser.add_argument("--mesh", "-m", default=DEFAULT_MESH,
-                       help=f"Mesh name (default: {DEFAULT_MESH})")
-    parser.add_argument("--max-swells", "-n", type=int, default=MAX_SWELLS_TO_DISPLAY,
-                       help=f"Max swell components to display (default: {MAX_SWELLS_TO_DISPLAY})")
-    parser.add_argument("--show", action="store_true", help="Display plots")
+
+    parser.add_argument(
+        "--region", "-r",
+        required=True,
+        help="Region name (e.g., socal, norcal, central)"
+    )
+    parser.add_argument(
+        "--mesh", "-m",
+        required=True,
+        help="Mesh name (e.g., coarse, fine)"
+    )
+    parser.add_argument(
+        "--max-swells", "-n",
+        type=int,
+        default=MAX_SWELLS_TO_DISPLAY,
+        help=f"Max swell components to display (default: {MAX_SWELLS_TO_DISPLAY})"
+    )
+    parser.add_argument(
+        "--show", "-s",
+        action="store_true",
+        help="Display plots interactively (default: save only)"
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Verbose output"
+    )
 
     args = parser.parse_args()
+
+    # Setup logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S"
+    )
 
     # Build run directory path
     run_dir = RUNS_DIR / args.region / args.mesh / "latest"
@@ -1229,5 +1272,8 @@ if __name__ == "__main__":
         for p in paths:
             print(f"  {p}")
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(str(e))
         sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Interrupted")
+        sys.exit(130)

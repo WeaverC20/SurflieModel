@@ -777,3 +777,104 @@ def create_unified_boundary_config(
         boundaries=boundaries,
         active_boundaries=active_sides,
     )
+
+
+# =============================================================================
+# Command Line Interface
+# =============================================================================
+
+def main():
+    """
+    Command-line interface for extracting WW3 boundary points for any region.
+
+    Usage:
+        python extract_ww3_endpoints.py --region socal --mesh socal_coarse --sides west south
+        python extract_ww3_endpoints.py --region central --mesh central_coarse --sides west
+        python extract_ww3_endpoints.py --region norcal --mesh norcal_coarse --sides west north
+    """
+    import argparse
+    from data.regions import get_region
+
+    parser = argparse.ArgumentParser(
+        description="Extract WW3 boundary points for a SWAN domain"
+    )
+    parser.add_argument(
+        "--region", "-r",
+        required=True,
+        help="Region name (socal, central, norcal)"
+    )
+    parser.add_argument(
+        "--mesh", "-m",
+        help="Mesh name (default: {region}_coarse)"
+    )
+    parser.add_argument(
+        "--sides", "-s",
+        nargs="+",
+        choices=['west', 'east', 'north', 'south'],
+        default=['west'],
+        help="Which boundary sides to use for forcing (default: west)"
+    )
+    parser.add_argument(
+        "--output", "-o",
+        help="Output directory (default: data/swan/ww3_endpoints/{region}/)"
+    )
+    parser.add_argument(
+        "--plot", "-p",
+        action="store_true",
+        help="Display plots of boundary points"
+    )
+
+    args = parser.parse_args()
+
+    # Get region bounds
+    region = get_region(args.region)
+    lon_min, lon_max = region.lon_range
+    lat_min, lat_max = region.lat_range
+
+    # Default mesh name
+    mesh_name = args.mesh or f"{args.region}_coarse"
+
+    # Default output directory
+    output_dir = Path(args.output) if args.output else (
+        project_root / "data" / "swan" / "ww3_endpoints" / args.region
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"=" * 60)
+    print(f"Extracting WW3 Boundary Points for {region.display_name}")
+    print(f"=" * 60)
+    print(f"Region: {region.display_name}")
+    print(f"Bounds: lat {lat_min}° to {lat_max}°")
+    print(f"        lon {lon_min}° to {lon_max}°")
+    print(f"Active boundaries: {args.sides}")
+    print()
+
+    # Create unified boundary config
+    config = create_unified_boundary_config(
+        lon_min=lon_min,
+        lon_max=lon_max,
+        lat_min=lat_min,
+        lat_max=lat_max,
+        active_sides=args.sides,
+        region_name=args.region,
+        mesh_name=mesh_name,
+    )
+
+    print(f"\n{config.summary()}")
+
+    # Save
+    filepath = output_dir / "ww3_boundaries.json"
+    config.save(filepath)
+
+    # Plot if requested
+    if args.plot:
+        for side, point_set in config.boundaries.items():
+            plot_path = output_dir / f"ww3_boundary_{side}.png"
+            point_set.plot(save_path=plot_path, show=True)
+
+    print("\nDone!")
+    return config
+
+
+if __name__ == "__main__":
+    main()

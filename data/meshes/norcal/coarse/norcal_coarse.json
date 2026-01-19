@@ -1,0 +1,38 @@
+{
+  "name": "norcal_coarse",
+  "region_name": "norcal",
+  "resolution_km": 5.0,
+  "grid_type": "regular",
+  "origin": [
+    -126.0,
+    38.5
+  ],
+  "nx": 68,
+  "ny": 78,
+  "dx": 0.05901877452603651,
+  "dy": 0.04504504504504504,
+  "spectral": {
+    "n_dir": 36,
+    "freq_min": 0.04,
+    "freq_max": 1.0,
+    "n_freq": 31,
+    "dir_type": "CIRCLE"
+  },
+  "exception_value": -99.0,
+  "idla": 4,
+  "depth_shape": [
+    79,
+    69
+  ],
+  "depth_stats": {
+    "min": 4.0,
+    "max": 4263.0,
+    "n_ocean_cells": 2730,
+    "n_land_cells": 2721
+  },
+  "swan_commands": {
+    "cgrid": "CGRID REG -126.0000 38.5000 0 4.0133 3.5135 68 78 CIRCLE 36 0.04 1.0 31",
+    "inpgrid": "INPGRID BOTTOM REG -126.0000 38.5000 0 68 78 0.059019 0.045045 EXCEPTION -99.0",
+    "readinp": "READINP BOTTOM 1 'norcal_coarse.bot' 4 0 FREE"
+  }
+}
