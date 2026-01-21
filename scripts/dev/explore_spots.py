@@ -11,6 +11,7 @@ Run from project root:
 Opens an HTML file in your browser with interactive visualization.
 """
 
+import asyncio
 import sys
 import webbrowser
 from dataclasses import dataclass, field
@@ -25,8 +26,157 @@ from plotly.subplots import make_subplots
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+from data.pipelines.buoy.fetcher import NDBCBuoyFetcher
 from data.spots import SOCAL_SPOTS, SurfSpot
 from data.swan.analysis.output_reader import SwanOutput, SwanOutputReader
+
+
+# =============================================================================
+# Buoy Configuration
+# =============================================================================
+
+# NDBC buoys relevant for Southern California with locations
+# Note: NDBC .spec file provides 2-partition data (swell + wind waves)
+SOCAL_BUOYS = {
+    "46237": {"name": "San Pedro", "lat": 33.218, "lon": -118.315},
+    "46221": {"name": "Santa Monica Basin", "lat": 33.855, "lon": -119.048},
+    "46025": {"name": "Santa Monica", "lat": 33.749, "lon": -119.053},
+    "46222": {"name": "San Pedro South", "lat": 33.618, "lon": -118.317},
+    "46253": {"name": "San Pedro Channel", "lat": 33.576, "lon": -118.181},
+    "46086": {"name": "San Clemente Basin", "lat": 32.491, "lon": -118.034},
+    "46047": {"name": "Tanner Bank", "lat": 32.433, "lon": -119.533},
+}
+
+
+@dataclass
+class BuoyData:
+    """Container for buoy observation data."""
+    station_id: str
+    name: str
+    lat: float
+    lon: float
+    timestamp: Optional[str] = None
+    # Swell component
+    swell_height_m: Optional[float] = None
+    swell_period_s: Optional[float] = None
+    swell_direction_deg: Optional[float] = None
+    # Wind wave component
+    wind_wave_height_m: Optional[float] = None
+    wind_wave_period_s: Optional[float] = None
+    wind_wave_direction_deg: Optional[float] = None
+    # Combined
+    combined_height_m: Optional[float] = None
+    error: Optional[str] = None
+
+    def format_hover_text(self) -> str:
+        """Generate HTML hover text for this buoy."""
+        lines = [
+            f"<b>NDBC Buoy {self.station_id}</b>",
+            f"<b>{self.name}</b>",
+            f"Location: ({self.lat:.3f}, {self.lon:.3f})",
+        ]
+
+        if self.error:
+            lines.append(f"<span style='color: #ff6666'>Error: {self.error}</span>")
+            return "<br>".join(lines)
+
+        if self.timestamp:
+            # Just show time portion
+            time_part = self.timestamp.split("T")[1][:5] if "T" in self.timestamp else self.timestamp
+            lines.append(f"Time: {time_part} UTC")
+
+        lines.append("")
+
+        # Combined
+        if self.combined_height_m is not None:
+            lines.append(f"<b>Combined Hsig:</b> {self.combined_height_m:.2f} m")
+
+        lines.append("")
+        lines.append("<b>Partitions:</b>")
+
+        # Swell
+        if self.swell_height_m is not None and self.swell_height_m > 0:
+            dir_str = f"{self.swell_direction_deg:.0f}°" if self.swell_direction_deg else "--"
+            period_str = f"{self.swell_period_s:.1f}s" if self.swell_period_s else "--"
+            lines.append(f"  Swell: {self.swell_height_m:.2f}m, {period_str}, {dir_str}")
+        else:
+            lines.append("  Swell: --")
+
+        # Wind waves
+        if self.wind_wave_height_m is not None and self.wind_wave_height_m > 0:
+            dir_str = f"{self.wind_wave_direction_deg:.0f}°" if self.wind_wave_direction_deg else "--"
+            period_str = f"{self.wind_wave_period_s:.1f}s" if self.wind_wave_period_s else "--"
+            lines.append(f"  Wind Waves: {self.wind_wave_height_m:.2f}m, {period_str}, {dir_str}")
+        else:
+            lines.append("  Wind Waves: --")
+
+        return "<br>".join(lines)
+
+
+async def fetch_single_buoy(fetcher: NDBCBuoyFetcher, station_id: str, info: dict) -> BuoyData:
+    """Fetch partitioned wave data for a single NDBC buoy."""
+    buoy_data = BuoyData(
+        station_id=station_id,
+        name=info["name"],
+        lat=info["lat"],
+        lon=info["lon"],
+    )
+
+    try:
+        spectral = await fetcher.fetch_spectral_wave_data(station_id)
+
+        buoy_data.timestamp = spectral.get("timestamp")
+
+        # Extract swell component
+        swell = spectral.get("swell", {})
+        if swell:
+            buoy_data.swell_height_m = swell.get("height_m")
+            buoy_data.swell_period_s = swell.get("period_s")
+            buoy_data.swell_direction_deg = swell.get("direction_deg")
+
+        # Extract wind wave component
+        wind_waves = spectral.get("wind_waves", {})
+        if wind_waves:
+            buoy_data.wind_wave_height_m = wind_waves.get("height_m")
+            buoy_data.wind_wave_period_s = wind_waves.get("period_s")
+            buoy_data.wind_wave_direction_deg = wind_waves.get("direction_deg")
+
+        # Extract combined
+        combined = spectral.get("combined", {})
+        if combined:
+            buoy_data.combined_height_m = combined.get("significant_height_m")
+
+    except Exception as e:
+        buoy_data.error = str(e)[:50]
+
+    return buoy_data
+
+
+async def fetch_buoy_data(buoys: Dict[str, dict]) -> List[BuoyData]:
+    """Fetch partitioned wave data for all NDBC buoys concurrently."""
+    fetcher = NDBCBuoyFetcher()
+
+    tasks = [
+        fetch_single_buoy(fetcher, station_id, info)
+        for station_id, info in buoys.items()
+    ]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Filter out exceptions and return valid BuoyData
+    buoy_list = []
+    for result in results:
+        if isinstance(result, BuoyData):
+            buoy_list.append(result)
+        elif isinstance(result, Exception):
+            print(f"  Warning: Buoy fetch failed: {result}")
+
+    return buoy_list
+
+
+def load_buoy_data(buoys: Dict[str, dict] = SOCAL_BUOYS) -> List[BuoyData]:
+    """Load buoy data synchronously (wrapper for async fetch)."""
+    return asyncio.run(fetch_buoy_data(buoys))
 
 
 # =============================================================================
@@ -228,6 +378,32 @@ def create_spot_markers(spots: List[SurfSpot], mesh_data: MeshData) -> go.Scatte
     )
 
 
+def create_buoy_markers(buoys: List[BuoyData]) -> go.Scatter:
+    """Create scatter markers for buoys with partitioned swell hover text."""
+    lons = [b.lon for b in buoys]
+    lats = [b.lat for b in buoys]
+    labels = [b.station_id for b in buoys]
+    hover_texts = [b.format_hover_text() for b in buoys]
+
+    return go.Scatter(
+        x=lons,
+        y=lats,
+        mode="markers+text",
+        marker=dict(
+            size=12,
+            color="cyan",
+            symbol="diamond",
+            line=dict(width=2, color="darkblue"),
+        ),
+        text=labels,
+        textposition="bottom center",
+        textfont=dict(size=9, color="cyan"),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=hover_texts,
+        name="NDBC Buoys",
+    )
+
+
 def create_heatmap(mesh_data: MeshData) -> go.Heatmap:
     """Create Hsig heatmap with hover text showing all partition details."""
     output = mesh_data.swan_output
@@ -248,7 +424,11 @@ def create_heatmap(mesh_data: MeshData) -> go.Heatmap:
     )
 
 
-def create_single_mesh_figure(mesh_data: MeshData, spots: List[SurfSpot]) -> go.Figure:
+def create_single_mesh_figure(
+    mesh_data: MeshData,
+    spots: List[SurfSpot],
+    buoys: Optional[List[BuoyData]] = None,
+) -> go.Figure:
     """Create figure for a single mesh."""
     fig = go.Figure()
 
@@ -257,6 +437,10 @@ def create_single_mesh_figure(mesh_data: MeshData, spots: List[SurfSpot]) -> go.
 
     # Add spot markers
     fig.add_trace(create_spot_markers(spots, mesh_data))
+
+    # Add buoy markers
+    if buoys:
+        fig.add_trace(create_buoy_markers(buoys))
 
     # Layout
     output = mesh_data.swan_output
@@ -286,13 +470,14 @@ def create_single_mesh_figure(mesh_data: MeshData, spots: List[SurfSpot]) -> go.
 
 def create_comparison_figure(
     meshes: Dict[str, MeshData],
-    spots: List[SurfSpot]
+    spots: List[SurfSpot],
+    buoys: Optional[List[BuoyData]] = None,
 ) -> go.Figure:
     """Create side-by-side comparison figure with dropdown to select meshes."""
     mesh_list = list(meshes.values())
 
     if len(mesh_list) == 1:
-        return create_single_mesh_figure(mesh_list[0], spots)
+        return create_single_mesh_figure(mesh_list[0], spots, buoys)
 
     # Create figure with dropdown for mesh selection
     fig = go.Figure()
@@ -311,13 +496,25 @@ def create_comparison_figure(
         markers.visible = visible
         fig.add_trace(markers)
 
+    # Add buoy markers (always visible, not tied to mesh selection)
+    has_buoys = buoys is not None and len(buoys) > 0
+    if has_buoys:
+        buoy_markers = create_buoy_markers(buoys)
+        buoy_markers.visible = True
+        fig.add_trace(buoy_markers)
+
     # Create dropdown buttons
     buttons = []
     for i, mesh_data in enumerate(mesh_list):
-        # Each mesh has 2 traces (heatmap + markers)
-        visibility = [False] * (len(mesh_list) * 2)
+        # Each mesh has 2 traces (heatmap + markers), plus 1 buoy trace at the end
+        num_mesh_traces = len(mesh_list) * 2
+        visibility = [False] * num_mesh_traces
         visibility[i * 2] = True      # heatmap
         visibility[i * 2 + 1] = True  # markers
+
+        # Add buoy visibility (always True)
+        if has_buoys:
+            visibility.append(True)
 
         buttons.append(dict(
             label=mesh_data.display_name,
@@ -450,11 +647,23 @@ def main():
 
     print(f"\nLoaded {len(meshes)} meshes: {list(meshes.keys())}")
 
+    # Load buoy data
+    print("\nFetching NDBC buoy data...")
+    buoys = load_buoy_data()
+    print(f"Loaded {len(buoys)} NDBC buoys with partitioned swell data")
+
+    for buoy in buoys:
+        if buoy.error:
+            print(f"  {buoy.station_id} ({buoy.name}): Error - {buoy.error}")
+        else:
+            swell_str = f"{buoy.swell_height_m:.2f}m" if buoy.swell_height_m else "--"
+            print(f"  {buoy.station_id} ({buoy.name}): Swell {swell_str}")
+
     # Create visualization
     print("\nGenerating interactive visualization...")
 
     # Single panel with dropdown to switch between meshes
-    fig = create_comparison_figure(meshes, SOCAL_SPOTS)
+    fig = create_comparison_figure(meshes, SOCAL_SPOTS, buoys)
 
     # Save and open - full page layout
     output_path = project_root / "scripts" / "dev" / "spot_explorer.html"
