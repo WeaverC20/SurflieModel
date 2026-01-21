@@ -50,6 +50,7 @@ class BoundaryPoint:
     wind_waves: Optional[List[WavePartition]] = None      # Wind sea component
     primary_swell: Optional[List[WavePartition]] = None   # Primary swell
     secondary_swell: Optional[List[WavePartition]] = None # Secondary swell (may be None)
+    tertiary_swell: Optional[List[WavePartition]] = None  # Tertiary swell (may be None)
 
 
 class WW3BoundaryFetcher:
@@ -239,6 +240,7 @@ class WW3BoundaryFetcher:
                 point.wind_waves = []
                 point.primary_swell = []
                 point.secondary_swell = []
+                point.tertiary_swell = []
                 points.append(point)
             boundary_points[side] = points
 
@@ -279,6 +281,12 @@ class WW3BoundaryFetcher:
                     swell2_hs_grid = np.array(grid_data["secondary_swell_height"])
                     swell2_tp_grid = np.array(grid_data["secondary_swell_period"])
                     swell2_dir_grid = np.array(grid_data["secondary_swell_direction"])
+
+                has_tertiary = "tertiary_swell_height" in grid_data
+                if has_tertiary:
+                    swell3_hs_grid = np.array(grid_data["tertiary_swell_height"])
+                    swell3_tp_grid = np.array(grid_data["tertiary_swell_period"])
+                    swell3_dir_grid = np.array(grid_data["tertiary_swell_direction"])
 
                 # Extract values for each boundary's points
                 for side, points in boundary_points.items():
@@ -322,6 +330,17 @@ class WW3BoundaryFetcher:
                         else:
                             point.secondary_swell.append(None)
 
+                        # Tertiary swell partition
+                        if has_tertiary:
+                            swell3_hs = self._extract_point_value(grid_lats, grid_lons, swell3_hs_grid, point.lat, point.lon)
+                            swell3_tp = self._extract_point_value(grid_lats, grid_lons, swell3_tp_grid, point.lat, point.lon)
+                            swell3_dir = self._extract_point_value(grid_lats, grid_lons, swell3_dir_grid, point.lat, point.lon)
+                            point.tertiary_swell.append(WavePartition(
+                                hs=swell3_hs, tp=swell3_tp, dir=swell3_dir, spread=20.0
+                            ))
+                        else:
+                            point.tertiary_swell.append(None)
+
                     # Log summary for this boundary
                     avg_hs = sum(p.hs[-1] for p in points) / len(points)
                     logger.info(f"  {side} boundary: avg Hs={avg_hs:.2f}m ({len(points)} points)")
@@ -339,5 +358,6 @@ class WW3BoundaryFetcher:
                         point.wind_waves.append(None)
                         point.primary_swell.append(None)
                         point.secondary_swell.append(None)
+                        point.tertiary_swell.append(None)
 
         return config, boundary_points

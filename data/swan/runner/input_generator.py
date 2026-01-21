@@ -303,17 +303,19 @@ class SpectrumReconstructor:
         self,
         wind_waves: Optional["WavePartition"],
         primary_swell: Optional["WavePartition"],
-        secondary_swell: Optional["WavePartition"] = None
+        secondary_swell: Optional["WavePartition"] = None,
+        tertiary_swell: Optional["WavePartition"] = None
     ) -> np.ndarray:
         """
         Reconstruct full 2D spectrum by superimposing partitions.
 
-        Energy is additive: E_total = E_wind + E_swell1 + E_swell2
+        Energy is additive: E_total = E_wind + E_swell1 + E_swell2 + E_swell3
 
         Args:
             wind_waves: Wind sea partition
             primary_swell: Primary swell partition
             secondary_swell: Optional secondary swell partition
+            tertiary_swell: Optional tertiary swell partition
 
         Returns:
             2D array E(f, θ) in m²/Hz/deg, shape (n_freq, n_dir)
@@ -328,6 +330,9 @@ class SpectrumReconstructor:
 
         if secondary_swell is not None:
             E_total += self.reconstruct_partition(secondary_swell, is_wind_sea=False)
+
+        if tertiary_swell is not None:
+            E_total += self.reconstruct_partition(tertiary_swell, is_wind_sea=False)
 
         return E_total
 
@@ -440,9 +445,10 @@ class SpectralBoundaryWriter:
             wind = point.wind_waves[time_index] if point.wind_waves else None
             swell1 = point.primary_swell[time_index] if point.primary_swell else None
             swell2 = point.secondary_swell[time_index] if point.secondary_swell else None
+            swell3 = point.tertiary_swell[time_index] if point.tertiary_swell else None
 
             # Reconstruct 2D spectrum
-            E = self.reconstructor.reconstruct_from_partitions(wind, swell1, swell2)
+            E = self.reconstructor.reconstruct_from_partitions(wind, swell1, swell2, swell3)
 
             # Replace very small values with zero (avoid extreme exponents)
             E = np.where(E < 1e-20, 0.0, E)

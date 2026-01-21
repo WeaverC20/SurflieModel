@@ -128,7 +128,14 @@ class WaveWatchFetcher:
                 "var_SWELL": "on",  # Primary swell height
                 "var_SWPER": "on",  # Primary swell period
                 "var_SWDIR": "on",  # Primary swell direction
-                # Note: Secondary swell (var_SWELL_2, etc.) not available in global 0.25deg product
+                # Secondary swell (partition 2)
+                "var_SWELL_2": "on",  # Secondary swell height
+                "var_SWPER_2": "on",  # Secondary swell period
+                "var_SWDIR_2": "on",  # Secondary swell direction
+                # Tertiary swell (partition 3)
+                "var_SWELL_3": "on",  # Tertiary swell height
+                "var_SWPER_3": "on",  # Tertiary swell period
+                "var_SWDIR_3": "on",  # Tertiary swell direction
                 "subregion": "",
                 "leftlon": left_lon,
                 "rightlon": right_lon,
@@ -293,12 +300,33 @@ class WaveWatchFetcher:
                         secondary_swell_direction = ds[dir_var].values
                         break
 
+                # Extract tertiary swell (partition 3) - may not always be present
+                tertiary_swell_height = None
+                tertiary_swell_period = None
+                tertiary_swell_direction = None
+
+                for height_var in ['swell_3', 'shts_3', 'swh3']:
+                    if height_var in ds:
+                        tertiary_swell_height = ds[height_var].values
+                        break
+
+                for period_var in ['swper_3', 'mpts_3', 'mwp3']:
+                    if period_var in ds:
+                        tertiary_swell_period = ds[period_var].values
+                        break
+
+                for dir_var in ['swdir_3', 'mdts_3', 'mwd3']:
+                    if dir_var in ds:
+                        tertiary_swell_direction = ds[dir_var].values
+                        break
+
                 forecast_time = cycle_time + timedelta(hours=forecast_hour)
 
                 ds.close()
 
                 logger.info(f"Successfully parsed WaveWatch III grid: {len(lats)} x {len(lons)} points")
                 logger.info(f"Secondary swell available: {secondary_swell_height is not None}")
+                logger.info(f"Tertiary swell available: {tertiary_swell_height is not None}")
 
                 result = {
                     "lat": lats.tolist(),
@@ -337,6 +365,14 @@ class WaveWatchFetcher:
                     result["secondary_swell_period"] = secondary_swell_period.tolist()
                 if secondary_swell_direction is not None:
                     result["secondary_swell_direction"] = secondary_swell_direction.tolist()
+
+                # Add tertiary swell if available
+                if tertiary_swell_height is not None:
+                    result["tertiary_swell_height"] = tertiary_swell_height.tolist()
+                if tertiary_swell_period is not None:
+                    result["tertiary_swell_period"] = tertiary_swell_period.tolist()
+                if tertiary_swell_direction is not None:
+                    result["tertiary_swell_direction"] = tertiary_swell_direction.tolist()
 
                 # Keep legacy fields for backwards compatibility
                 result["wind_sea_height"] = result["wind_wave_height"]
