@@ -36,36 +36,46 @@ from data.swan.analysis.output_reader import SwanOutput, SwanOutputReader
 # =============================================================================
 
 # NDBC buoys relevant for Southern California with locations
-# Note: NDBC .spec file provides 2-partition data (swell + wind waves)
+# Using spectral data with r1 confidence for direction reliability
 SOCAL_BUOYS = {
-    "46237": {"name": "San Pedro", "lat": 33.218, "lon": -118.315},
-    "46221": {"name": "Santa Monica Basin", "lat": 33.855, "lon": -119.048},
-    "46025": {"name": "Santa Monica", "lat": 33.749, "lon": -119.053},
-    "46222": {"name": "San Pedro South", "lat": 33.618, "lon": -118.317},
-    "46253": {"name": "San Pedro Channel", "lat": 33.576, "lon": -118.181},
-    "46086": {"name": "San Clemente Basin", "lat": 32.491, "lon": -118.034},
+    "46222": {"name": "San Pedro", "lat": 33.618, "lon": -118.317},
+    "46025": {"name": "Santa Monica Basin", "lat": 33.749, "lon": -119.053},
     "46047": {"name": "Tanner Bank", "lat": 32.433, "lon": -119.533},
+    "46086": {"name": "San Clemente Basin", "lat": 32.491, "lon": -118.034},
+    "46069": {"name": "South Santa Rosa Island", "lat": 33.674, "lon": -120.212},
+    "46053": {"name": "East Santa Barbara", "lat": 34.252, "lon": -119.841},
+    "46219": {"name": "San Nicolas Island", "lat": 33.221, "lon": -119.882},
+    "46011": {"name": "Santa Maria", "lat": 34.868, "lon": -120.857},
 }
 
 
 @dataclass
+class BuoyPartition:
+    """A single wave partition from NDBC buoy spectral data."""
+    partition_id: int
+    height_m: float
+    period_s: Optional[float] = None
+    direction_deg: Optional[float] = None
+    wave_type: Optional[str] = None  # e.g., "swell", "wind_waves", "long_period_swell"
+    energy_pct: Optional[float] = None  # Percentage of total wave energy
+    r1: Optional[float] = None  # Directional confidence (0-1)
+    confidence: Optional[str] = None  # HIGH/MED/LOW based on r1
+
+
+@dataclass
 class BuoyData:
-    """Container for buoy observation data."""
+    """Container for buoy observation data with multiple partitions."""
     station_id: str
     name: str
     lat: float
     lon: float
     timestamp: Optional[str] = None
-    # Swell component
-    swell_height_m: Optional[float] = None
-    swell_period_s: Optional[float] = None
-    swell_direction_deg: Optional[float] = None
-    # Wind wave component
-    wind_wave_height_m: Optional[float] = None
-    wind_wave_period_s: Optional[float] = None
-    wind_wave_direction_deg: Optional[float] = None
+    # Multiple partitions from spectral analysis
+    partitions: List[BuoyPartition] = field(default_factory=list)
     # Combined
     combined_height_m: Optional[float] = None
+    combined_period_s: Optional[float] = None
+    combined_direction_deg: Optional[float] = None
     error: Optional[str] = None
 
     def format_hover_text(self) -> str:
@@ -89,26 +99,31 @@ class BuoyData:
 
         # Combined
         if self.combined_height_m is not None:
-            lines.append(f"<b>Combined Hsig:</b> {self.combined_height_m:.2f} m")
+            dir_str = f"{self.combined_direction_deg:.0f}°" if self.combined_direction_deg else "--"
+            period_str = f"{self.combined_period_s:.1f}s" if self.combined_period_s else "--"
+            lines.append(f"<b>Combined:</b> {self.combined_height_m:.2f}m, {period_str}, {dir_str}")
 
         lines.append("")
         lines.append("<b>Partitions:</b>")
+        lines.append("<i>r1: directional confidence (HIGH=clean swell, LOW=mixed)</i>")
 
-        # Swell
-        if self.swell_height_m is not None and self.swell_height_m > 0:
-            dir_str = f"{self.swell_direction_deg:.0f}°" if self.swell_direction_deg else "--"
-            period_str = f"{self.swell_period_s:.1f}s" if self.swell_period_s else "--"
-            lines.append(f"  Swell: {self.swell_height_m:.2f}m, {period_str}, {dir_str}")
+        if not self.partitions:
+            lines.append("  No partition data available")
         else:
-            lines.append("  Swell: --")
-
-        # Wind waves
-        if self.wind_wave_height_m is not None and self.wind_wave_height_m > 0:
-            dir_str = f"{self.wind_wave_direction_deg:.0f}°" if self.wind_wave_direction_deg else "--"
-            period_str = f"{self.wind_wave_period_s:.1f}s" if self.wind_wave_period_s else "--"
-            lines.append(f"  Wind Waves: {self.wind_wave_height_m:.2f}m, {period_str}, {dir_str}")
-        else:
-            lines.append("  Wind Waves: --")
+            # Partitions already sorted by energy in fetcher
+            for p in self.partitions:
+                dir_str = f"{p.direction_deg:.0f}°" if p.direction_deg else "--"
+                period_str = f"{p.period_s:.1f}s" if p.period_s else "--"
+                type_str = f" ({p.wave_type})" if p.wave_type else ""
+                energy_str = f" [{p.energy_pct:.0f}%]" if p.energy_pct else ""
+                # Show confidence with color coding
+                if p.confidence == "HIGH":
+                    conf_str = f" <span style='color: #66ff66'>r1={p.r1:.2f} HIGH</span>"
+                elif p.confidence == "MED":
+                    conf_str = f" <span style='color: #ffff66'>r1={p.r1:.2f} MED</span>"
+                else:
+                    conf_str = f" <span style='color: #ff6666'>r1={p.r1:.2f} LOW</span>" if p.r1 else ""
+                lines.append(f"  #{p.partition_id}: {p.height_m:.2f}m, {period_str}, {dir_str}{type_str}{energy_str}{conf_str}")
 
         return "<br>".join(lines)
 
@@ -123,28 +138,35 @@ async def fetch_single_buoy(fetcher: NDBCBuoyFetcher, station_id: str, info: dic
     )
 
     try:
-        spectral = await fetcher.fetch_spectral_wave_data(station_id)
+        result = await fetcher.fetch_partitioned_spectral_data(station_id)
 
-        buoy_data.timestamp = spectral.get("timestamp")
+        if result.get("status") == "error" or result.get("error"):
+            buoy_data.error = result.get("error", "Unknown error")[:50]
+            return buoy_data
 
-        # Extract swell component
-        swell = spectral.get("swell", {})
-        if swell:
-            buoy_data.swell_height_m = swell.get("height_m")
-            buoy_data.swell_period_s = swell.get("period_s")
-            buoy_data.swell_direction_deg = swell.get("direction_deg")
+        buoy_data.timestamp = result.get("timestamp")
 
-        # Extract wind wave component
-        wind_waves = spectral.get("wind_waves", {})
-        if wind_waves:
-            buoy_data.wind_wave_height_m = wind_waves.get("height_m")
-            buoy_data.wind_wave_period_s = wind_waves.get("period_s")
-            buoy_data.wind_wave_direction_deg = wind_waves.get("direction_deg")
-
-        # Extract combined
-        combined = spectral.get("combined", {})
+        # Extract combined wave parameters
+        combined = result.get("combined", {})
         if combined:
             buoy_data.combined_height_m = combined.get("significant_height_m")
+            buoy_data.combined_period_s = combined.get("peak_period_s")
+            buoy_data.combined_direction_deg = combined.get("peak_direction_deg")
+
+        # Extract multiple partitions with r1 confidence
+        partitions = result.get("partitions", [])
+        for p in partitions:
+            partition = BuoyPartition(
+                partition_id=p.get("partition_id", 0),
+                height_m=p.get("height_m", 0),
+                period_s=p.get("period_s"),
+                direction_deg=p.get("direction_deg"),
+                wave_type=p.get("type"),
+                energy_pct=p.get("energy_pct"),
+                r1=p.get("r1"),
+                confidence=p.get("confidence"),
+            )
+            buoy_data.partitions.append(partition)
 
     except Exception as e:
         buoy_data.error = str(e)[:50]
@@ -648,16 +670,22 @@ def main():
     print(f"\nLoaded {len(meshes)} meshes: {list(meshes.keys())}")
 
     # Load buoy data
-    print("\nFetching NDBC buoy data...")
+    print("\nFetching NDBC buoy spectral data with r1 confidence...")
     buoys = load_buoy_data()
-    print(f"Loaded {len(buoys)} NDBC buoys with partitioned swell data")
+    print(f"Loaded {len(buoys)} NDBC buoys with spectral partitioning")
 
     for buoy in buoys:
         if buoy.error:
             print(f"  {buoy.station_id} ({buoy.name}): Error - {buoy.error}")
         else:
-            swell_str = f"{buoy.swell_height_m:.2f}m" if buoy.swell_height_m else "--"
-            print(f"  {buoy.station_id} ({buoy.name}): Swell {swell_str}")
+            n_partitions = len(buoy.partitions)
+            combined_str = f"{buoy.combined_height_m:.2f}m" if buoy.combined_height_m else "--"
+            # Show confidence of primary partition
+            conf_str = ""
+            if buoy.partitions:
+                p = buoy.partitions[0]
+                conf_str = f", r1={p.r1:.2f} ({p.confidence})" if p.r1 else ""
+            print(f"  {buoy.station_id} ({buoy.name}): {n_partitions} partitions, combined {combined_str}{conf_str}")
 
     # Create visualization
     print("\nGenerating interactive visualization...")

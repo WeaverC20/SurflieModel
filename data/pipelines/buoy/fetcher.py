@@ -25,6 +25,14 @@ except ImportError:
     NUMPY_AVAILABLE = False
     logger.warning("numpy not available - some calculations may be limited")
 
+# Try to import scipy for peak finding in spectral partitioning
+try:
+    from scipy.signal import find_peaks
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    logger.warning("scipy not available - spectral partitioning will be limited")
+
 
 class NDBCBuoyFetcher:
     """Fetches data from NDBC buoys (National Data Buoy Center)
@@ -491,6 +499,186 @@ class NDBCBuoyFetcher:
         nearby.sort(key=lambda x: x["distance_km"])
         return nearby
 
+    async def fetch_partitioned_spectral_data(self, station_id: str) -> Dict:
+        """Fetch spectral data and partition into swell components with r1 confidence.
+
+        This method fetches the full directional spectra and partitions it by
+        grouping frequency bands with similar directions. Each partition includes
+        an r1-based confidence indicator showing how reliable the direction estimate is.
+
+        r1 interpretation:
+        - r1 > 0.8: HIGH confidence - narrow, well-defined swell from single direction
+        - r1 0.5-0.8: MEDIUM confidence - moderate spread
+        - r1 < 0.5: LOW confidence - broad spread, possibly multiple overlapping swells
+
+        Args:
+            station_id: NDBC station ID
+
+        Returns:
+            Dict with partitioned wave data including r1 confidence
+        """
+        logger.info(f"Fetching partitioned spectral data for NDBC buoy {station_id}")
+
+        # Fetch raw spectral data
+        spectra = await self.fetch_directional_spectra(station_id)
+
+        if spectra.get("errors") or not spectra.get("frequencies"):
+            return {
+                "station_id": station_id,
+                "data_source": "NDBC Partitioned Spectral",
+                "error": spectra.get("errors", ["No spectral data"])[0] if spectra.get("errors") else "No frequency data",
+                "status": "error"
+            }
+
+        result = {
+            "station_id": station_id,
+            "data_source": "NDBC Partitioned Spectral",
+            "timestamp": spectra.get("timestamp"),
+            "status": "success",
+            "partitions": [],
+            "combined": None,
+        }
+
+        if not NUMPY_AVAILABLE:
+            result["error"] = "numpy not available for partitioning"
+            return result
+
+        freqs = np.array(spectra["frequencies"])
+        energy = np.array(spectra["energy_density"])
+        alpha1 = np.array(spectra.get("alpha1", []))
+        r1 = np.array(spectra.get("r1", []))
+
+        # Ensure all arrays have same length
+        min_len = min(len(freqs), len(energy), len(alpha1), len(r1)) if len(alpha1) > 0 and len(r1) > 0 else 0
+        if min_len == 0:
+            result["note"] = "Insufficient directional data for partitioning"
+            return result
+
+        freqs = freqs[:min_len]
+        energy = energy[:min_len]
+        alpha1 = alpha1[:min_len]
+        r1 = r1[:min_len]
+
+        # Calculate frequency bandwidth
+        df = np.gradient(freqs)
+
+        # Calculate total energy and combined parameters
+        m0_total = np.sum(energy * df)
+        if m0_total <= 0:
+            result["note"] = "No significant wave energy"
+            return result
+
+        hs_total = 4 * np.sqrt(m0_total)
+        peak_idx = np.argmax(energy)
+        tp_total = 1 / freqs[peak_idx]
+        dp_total = alpha1[peak_idx]
+
+        result["combined"] = {
+            "significant_height_m": round(float(hs_total), 2),
+            "significant_height_ft": round(float(hs_total) * 3.28084, 1),
+            "peak_period_s": round(float(tp_total), 1),
+            "peak_direction_deg": round(float(dp_total), 0),
+        }
+
+        # Direction-based partitioning
+        dir_threshold = 30  # degrees
+        min_energy_pct = 5  # minimum % of total energy
+
+        # Find significant frequency bands
+        peak_energy = np.max(energy)
+        significant = energy > 0.01 * peak_energy
+
+        # Group consecutive bands with similar directions
+        groups = []
+        current_group = []
+
+        def direction_distance(d1, d2):
+            diff = abs(d1 - d2)
+            return min(diff, 360 - diff)
+
+        for i in range(len(freqs)):
+            if not significant[i]:
+                if current_group:
+                    groups.append(current_group)
+                    current_group = []
+                continue
+
+            if not current_group:
+                current_group = [i]
+            else:
+                # Check if direction is similar to group average
+                group_dirs = [alpha1[j] for j in current_group]
+                group_energies = [energy[j] for j in current_group]
+                avg_dir = np.average(group_dirs, weights=group_energies)
+
+                if direction_distance(alpha1[i], avg_dir) < dir_threshold:
+                    current_group.append(i)
+                else:
+                    groups.append(current_group)
+                    current_group = [i]
+
+        if current_group:
+            groups.append(current_group)
+
+        # Calculate partition statistics
+        partitions = []
+        for indices in groups:
+            g_energy = energy[indices]
+            g_df = df[indices]
+            g_dir = alpha1[indices]
+            g_r1 = r1[indices]
+            g_freq = freqs[indices]
+
+            m0 = np.sum(g_energy * g_df)
+            energy_pct = 100 * m0 / m0_total
+
+            if energy_pct < min_energy_pct:
+                continue
+
+            hs = 4 * np.sqrt(m0)
+            peak_idx = np.argmax(g_energy)
+            tp = 1 / g_freq[peak_idx]
+            mean_dir = np.average(g_dir, weights=g_energy)
+            mean_r1 = np.average(g_r1, weights=g_energy)
+
+            # Classify confidence based on r1
+            if mean_r1 > 0.7:
+                confidence = "HIGH"
+            elif mean_r1 > 0.4:
+                confidence = "MED"
+            else:
+                confidence = "LOW"
+
+            # Classify wave type
+            if tp >= 16:
+                wave_type = "long_period_swell"
+            elif tp >= 12:
+                wave_type = "swell"
+            elif tp >= 8:
+                wave_type = "short_swell"
+            else:
+                wave_type = "wind_waves"
+
+            partitions.append({
+                "partition_id": len(partitions) + 1,
+                "height_m": round(float(hs), 2),
+                "height_ft": round(float(hs) * 3.28084, 1),
+                "period_s": round(float(tp), 1),
+                "direction_deg": round(float(mean_dir), 0),
+                "type": wave_type,
+                "energy_pct": round(float(energy_pct), 0),
+                "r1": round(float(mean_r1), 2),
+                "confidence": confidence,
+            })
+
+        # Sort by energy descending and renumber
+        partitions.sort(key=lambda p: p.get("energy_pct", 0), reverse=True)
+        for i, p in enumerate(partitions):
+            p["partition_id"] = i + 1
+
+        result["partitions"] = partitions
+        return result
+
 
 class CDIPBuoyFetcher:
     """Fetches data from CDIP buoys (Coastal Data Information Program)
@@ -555,6 +743,15 @@ class CDIPBuoyFetcher:
         """Initialize CDIP buoy fetcher"""
         self.thredds_url = "https://thredds.cdip.ucsd.edu/thredds"
         self.base_url = "https://cdip.ucsd.edu"
+
+        # Fix netCDF4 SSL certificate path bug (issue with paths containing spaces)
+        # The bundled libcurl corrupts paths with spaces, so use system CA bundle
+        if NETCDF4_AVAILABLE:
+            try:
+                from netCDF4 import rc_set
+                rc_set('HTTP.SSL.CAINFO', '/etc/ssl/cert.pem')
+            except Exception:
+                pass  # If rc_set fails, continue anyway
 
     async def fetch_latest_observation(self, station_id: str) -> Dict:
         """Fetch latest observation from CDIP buoy via THREDDS/OpenDAP
@@ -767,9 +964,14 @@ class CDIPBuoyFetcher:
                 except (KeyError, IndexError, TypeError) as e:
                     logger.warning(f"Could not parse partition data for {station_id}: {e}")
 
-            # If no partitions available, try to derive from spectral data
+            # If no partitions available, derive from spectral data
             if not result["partitions"]:
-                result["note"] = "Full partition data not available; consider using spectral decomposition"
+                spectral_partitions = self._partition_spectrum(ds)
+                if spectral_partitions:
+                    result["partitions"] = spectral_partitions
+                    result["note"] = "Partitions derived from spectral decomposition"
+                else:
+                    result["note"] = "No partition data available"
 
             ds.close()
             return result
@@ -800,6 +1002,123 @@ class CDIPBuoyFetcher:
             return "short_swell"  # Short period swell
         else:
             return "wind_waves"  # Locally generated
+
+    def _direction_distance(self, d1: float, d2: float) -> float:
+        """Calculate angular distance between two directions (0-360 degrees)."""
+        diff = abs(d1 - d2)
+        return min(diff, 360 - diff)
+
+    def _partition_spectrum(self, ds) -> List[Dict]:
+        """Partition wave spectrum by grouping frequency bands with similar directions.
+
+        This approach identifies distinct wave trains (swell, wind waves) by looking
+        for direction discontinuities in the spectrum. Frequency bands with similar
+        directions are grouped together, and Hs is calculated for each group.
+
+        Args:
+            ds: Open netCDF4 Dataset with CDIP spectral data
+
+        Returns:
+            List of partition dicts with height_m, period_s, direction_deg, type
+        """
+        if not NUMPY_AVAILABLE:
+            return []
+
+        try:
+            freq = ds.variables['waveFrequency'][:]
+            energy = ds.variables['waveEnergyDensity'][:][-1, :]  # Latest time
+            direction = ds.variables['waveMeanDirection'][:][-1, :]  # Latest time
+            bandwidth = ds.variables['waveBandwidth'][:]
+
+            # Total energy for reference
+            m0_total = np.sum(energy * bandwidth)
+            if m0_total <= 0:
+                return []
+
+            # Parameters for direction-based partitioning
+            dir_threshold = 30  # Max direction difference to group together (degrees)
+            min_energy_pct = 5  # Minimum % of total energy to be a partition
+
+            # Find significant frequency bands (> 1% of peak energy)
+            peak_energy = np.max(energy)
+            significant = energy > 0.01 * peak_energy
+
+            # Group consecutive bands with similar directions
+            groups = []
+            current_group = []
+
+            for i in range(len(freq)):
+                if not significant[i]:
+                    # Save current group if exists
+                    if current_group:
+                        groups.append(current_group)
+                        current_group = []
+                    continue
+
+                if not current_group:
+                    current_group = [i]
+                else:
+                    # Check if direction is similar to group average
+                    group_dirs = [direction[j] for j in current_group]
+                    group_energies = [energy[j] for j in current_group]
+                    avg_dir = np.average(group_dirs, weights=group_energies)
+
+                    if self._direction_distance(direction[i], avg_dir) < dir_threshold:
+                        current_group.append(i)
+                    else:
+                        # Direction changed significantly - start new group
+                        groups.append(current_group)
+                        current_group = [i]
+
+            if current_group:
+                groups.append(current_group)
+
+            # Calculate statistics for each partition
+            partitions = []
+            for group_indices in groups:
+                group_energy = energy[group_indices]
+                group_bandwidth = bandwidth[group_indices]
+                group_direction = direction[group_indices]
+                group_freq = freq[group_indices]
+
+                m0 = np.sum(group_energy * group_bandwidth)
+                energy_pct = 100 * m0 / m0_total
+
+                # Skip partitions with less than minimum energy
+                if energy_pct < min_energy_pct:
+                    continue
+
+                hs = 4 * np.sqrt(m0)
+
+                # Peak frequency in this group
+                peak_idx = np.argmax(group_energy)
+                tp = 1 / group_freq[peak_idx]
+
+                # Energy-weighted mean direction
+                mean_dir = np.average(group_direction, weights=group_energy)
+
+                partitions.append({
+                    "partition_id": len(partitions) + 1,
+                    "height_m": round(float(hs), 2),
+                    "height_ft": round(float(hs) * 3.28084, 1),
+                    "period_s": round(float(tp), 1),
+                    "direction_deg": round(float(mean_dir), 0),
+                    "type": self._classify_wave_type(tp),
+                    "energy_pct": round(float(energy_pct), 0),
+                })
+
+            # Sort by energy contribution descending
+            partitions.sort(key=lambda p: p.get("energy_pct", 0), reverse=True)
+
+            # Renumber partition IDs after sorting
+            for i, p in enumerate(partitions):
+                p["partition_id"] = i + 1
+
+            return partitions
+
+        except (KeyError, IndexError, TypeError) as e:
+            logger.warning(f"Spectral partitioning failed: {e}")
+            return []
 
     async def fetch_spectral_data(self, station_id: str) -> Dict:
         """Fetch full spectral data from CDIP
