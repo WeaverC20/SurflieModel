@@ -14,6 +14,10 @@ Usage:
     python data/swan/run_swan.py --region socal --mesh coarse
     python data/swan/run_swan.py --region socal --mesh coarse --forecast-hour 24
     python data/swan/run_swan.py --region socal --mesh coarse --dry-run
+
+    python data/swan/run_swan.py --region socal --mesh coarse
+    python data/swan/run_swan.py --region central --mesh coarse
+    python data/swan/run_swan.py --region norcal --mesh coarse
 """
 
 import argparse
