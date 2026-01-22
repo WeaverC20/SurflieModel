@@ -55,6 +55,7 @@ sys.path.insert(0, str(project_root))
 from data.pipelines.buoy.fetcher import NDBCBuoyFetcher, CDIPBuoyFetcher
 from data.spots import SOCAL_SPOTS, SurfSpot
 from data.swan.analysis.output_reader import SwanOutput, SwanOutputReader
+from data.swan.runner.ww3_boundary_fetcher import WW3BoundaryFetcher, BoundaryPoint, WavePartition
 
 
 # =============================================================================
@@ -403,6 +404,174 @@ def load_cdip_buoy_data(buoys: Dict[str, dict] = SOCAL_CDIP_BUOYS) -> List[CDIPB
 
 
 # =============================================================================
+# WW3 Boundary Data
+# =============================================================================
+
+# Path to SoCal WW3 boundary config
+SOCAL_WW3_BOUNDARY_FILE = project_root / "data" / "swan" / "ww3_endpoints" / "socal" / "ww3_boundaries.json"
+
+
+@dataclass
+class WW3BoundaryPartition:
+    """A single wave partition from WW3 boundary data."""
+    partition_id: int
+    name: str  # e.g., "wind_waves", "primary_swell"
+    height_m: float
+    period_s: Optional[float] = None
+    direction_deg: Optional[float] = None
+    energy_pct: Optional[float] = None
+
+
+@dataclass
+class WW3BoundaryPointData:
+    """Container for a single WW3 boundary point with partitioned swell data."""
+    lon: float
+    lat: float
+    boundary_side: str  # "west" or "south"
+    index: int  # Index along boundary
+    timestamp: Optional[str] = None
+    partitions: List[WW3BoundaryPartition] = field(default_factory=list)
+    combined_height_m: Optional[float] = None
+    combined_period_s: Optional[float] = None
+    combined_direction_deg: Optional[float] = None
+    error: Optional[str] = None
+
+    def format_hover_text(self) -> str:
+        """Generate HTML hover text for this WW3 boundary point."""
+        lines = [
+            f"<b>WW3 Boundary Point</b>",
+            f"<b>{self.boundary_side.upper()} #{self.index}</b>",
+            f"Location: ({self.lat:.3f}, {self.lon:.3f})",
+        ]
+
+        if self.error:
+            lines.append(f"<span style='color: #ff6666'>Error: {self.error}</span>")
+            return "<br>".join(lines)
+
+        if self.timestamp:
+            time_part = self.timestamp.split("T")[1][:5] if "T" in self.timestamp else self.timestamp
+            lines.append(f"Time: {time_part} UTC")
+
+        lines.append("")
+
+        # Combined
+        if self.combined_height_m is not None:
+            dir_str = f"{self.combined_direction_deg:.0f}°" if self.combined_direction_deg else "--"
+            period_str = f"{self.combined_period_s:.1f}s" if self.combined_period_s else "--"
+            lines.append(f"<b>Combined:</b> {self.combined_height_m:.2f}m, {period_str}, {dir_str}")
+
+        lines.append("")
+        lines.append("<b>Partitions:</b>")
+        lines.append("<i>(WW3 spectral partitions)</i>")
+
+        if not self.partitions:
+            lines.append("  No partition data available")
+        else:
+            for p in self.partitions:
+                dir_str = f"{p.direction_deg:.0f}°" if p.direction_deg else "--"
+                period_str = f"{p.period_s:.1f}s" if p.period_s else "--"
+
+                # Wave type classification from period
+                wave_type = classify_wave_type(p.period_s) if p.period_s else "unknown"
+                type_color = wave_type_color(wave_type)
+                type_str = f"<span style='color: {type_color}'>{wave_type}</span>"
+
+                energy_str = f" [{p.energy_pct:.0f}%]" if p.energy_pct else ""
+                lines.append(f"  {p.name}: {p.height_m:.2f}m, {period_str}, {dir_str} ({type_str}){energy_str}")
+
+        return "<br>".join(lines)
+
+
+async def fetch_ww3_boundary_data(boundary_file: Path = SOCAL_WW3_BOUNDARY_FILE) -> List[WW3BoundaryPointData]:
+    """Fetch WW3 partitioned data for all boundary points."""
+    fetcher = WW3BoundaryFetcher()
+
+    try:
+        config, boundary_points = await fetcher.fetch_boundary(
+            boundary_file=boundary_file,
+            forecast_hours=[0]  # Just the current/first forecast hour
+        )
+    except Exception as e:
+        print(f"  Error fetching WW3 boundary data: {e}")
+        return []
+
+    # Convert to WW3BoundaryPointData objects
+    result = []
+    for side, points in boundary_points.items():
+        for point in points:
+            data = WW3BoundaryPointData(
+                lon=point.lon,
+                lat=point.lat,
+                boundary_side=side,
+                index=point.index,
+            )
+
+            # Get timestamp
+            if point.times and point.times[0]:
+                data.timestamp = point.times[0].isoformat()
+
+            # Combined parameters (first time index)
+            if point.hs and len(point.hs) > 0:
+                data.combined_height_m = point.hs[0] if not np.isnan(point.hs[0]) else None
+            if point.tp and len(point.tp) > 0:
+                data.combined_period_s = point.tp[0] if not np.isnan(point.tp[0]) else None
+            if point.dir and len(point.dir) > 0:
+                data.combined_direction_deg = point.dir[0] if not np.isnan(point.dir[0]) else None
+
+            # Collect partitions and calculate energy percentages
+            partitions_raw = []
+
+            # Wind waves
+            if point.wind_waves and point.wind_waves[0]:
+                ww = point.wind_waves[0]
+                if not np.isnan(ww.hs) and ww.hs > 0:
+                    partitions_raw.append(("wind_waves", ww.hs, ww.tp, ww.dir))
+
+            # Primary swell
+            if point.primary_swell and point.primary_swell[0]:
+                sw1 = point.primary_swell[0]
+                if not np.isnan(sw1.hs) and sw1.hs > 0:
+                    partitions_raw.append(("primary_swell", sw1.hs, sw1.tp, sw1.dir))
+
+            # Secondary swell
+            if point.secondary_swell and point.secondary_swell[0]:
+                sw2 = point.secondary_swell[0]
+                if not np.isnan(sw2.hs) and sw2.hs > 0:
+                    partitions_raw.append(("secondary_swell", sw2.hs, sw2.tp, sw2.dir))
+
+            # Tertiary swell
+            if point.tertiary_swell and point.tertiary_swell[0]:
+                sw3 = point.tertiary_swell[0]
+                if not np.isnan(sw3.hs) and sw3.hs > 0:
+                    partitions_raw.append(("tertiary_swell", sw3.hs, sw3.tp, sw3.dir))
+
+            # Calculate energy percentages and create partition objects
+            total_energy = sum(hs**2 for _, hs, _, _ in partitions_raw)
+            for i, (name, hs, tp, direction) in enumerate(partitions_raw):
+                energy_pct = 100 * (hs**2) / total_energy if total_energy > 0 else 0
+                data.partitions.append(WW3BoundaryPartition(
+                    partition_id=i + 1,
+                    name=name,
+                    height_m=hs,
+                    period_s=tp if not np.isnan(tp) else None,
+                    direction_deg=direction if not np.isnan(direction) else None,
+                    energy_pct=energy_pct,
+                ))
+
+            # Sort partitions by energy descending
+            data.partitions.sort(key=lambda p: p.energy_pct or 0, reverse=True)
+
+            result.append(data)
+
+    return result
+
+
+def load_ww3_boundary_data(boundary_file: Path = SOCAL_WW3_BOUNDARY_FILE) -> List[WW3BoundaryPointData]:
+    """Load WW3 boundary data synchronously (wrapper for async fetch)."""
+    return asyncio.run(fetch_ww3_boundary_data(boundary_file))
+
+
+# =============================================================================
 # Data Structures (extensible for future stats)
 # =============================================================================
 
@@ -729,6 +898,29 @@ def create_cdip_buoy_markers(buoys: List[CDIPBuoyData]) -> go.Scatter:
     )
 
 
+def create_ww3_boundary_markers(boundary_points: List[WW3BoundaryPointData]) -> go.Scatter:
+    """Create scatter markers for WW3 boundary points with partitioned swell hover text."""
+    lons = [p.lon for p in boundary_points]
+    lats = [p.lat for p in boundary_points]
+    # No text labels - too many points, just show on hover
+    hover_texts = [p.format_hover_text() for p in boundary_points]
+
+    return go.Scatter(
+        x=lons,
+        y=lats,
+        mode="markers",
+        marker=dict(
+            size=8,
+            color="#66ff99",  # Light green for WW3 boundary points
+            symbol="circle",
+            line=dict(width=1, color="darkgreen"),
+        ),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=hover_texts,
+        name="WW3 Boundary",
+    )
+
+
 def create_heatmap(mesh_data: MeshData) -> go.Heatmap:
     """Create Hsig heatmap with hover text showing all partition details."""
     output = mesh_data.swan_output
@@ -754,6 +946,7 @@ def create_single_mesh_figure(
     spots: List[SurfSpot],
     ndbc_buoys: Optional[List[BuoyData]] = None,
     cdip_buoys: Optional[List[CDIPBuoyData]] = None,
+    ww3_boundary: Optional[List[WW3BoundaryPointData]] = None,
 ) -> go.Figure:
     """Create figure for a single mesh."""
     fig = go.Figure()
@@ -771,6 +964,10 @@ def create_single_mesh_figure(
     # Add CDIP buoy markers
     if cdip_buoys:
         fig.add_trace(create_cdip_buoy_markers(cdip_buoys))
+
+    # Add WW3 boundary markers
+    if ww3_boundary:
+        fig.add_trace(create_ww3_boundary_markers(ww3_boundary))
 
     # Layout
     output = mesh_data.swan_output
@@ -803,12 +1000,13 @@ def create_comparison_figure(
     spots: List[SurfSpot],
     ndbc_buoys: Optional[List[BuoyData]] = None,
     cdip_buoys: Optional[List[CDIPBuoyData]] = None,
+    ww3_boundary: Optional[List[WW3BoundaryPointData]] = None,
 ) -> go.Figure:
     """Create side-by-side comparison figure with dropdown to select meshes."""
     mesh_list = list(meshes.values())
 
     if len(mesh_list) == 1:
-        return create_single_mesh_figure(mesh_list[0], spots, ndbc_buoys, cdip_buoys)
+        return create_single_mesh_figure(mesh_list[0], spots, ndbc_buoys, cdip_buoys, ww3_boundary)
 
     # Create figure with dropdown for mesh selection
     fig = go.Figure()
@@ -841,8 +1039,15 @@ def create_comparison_figure(
         cdip_markers.visible = True
         fig.add_trace(cdip_markers)
 
+    # Add WW3 boundary markers (always visible, not tied to mesh selection)
+    has_ww3 = ww3_boundary is not None and len(ww3_boundary) > 0
+    if has_ww3:
+        ww3_markers = create_ww3_boundary_markers(ww3_boundary)
+        ww3_markers.visible = True
+        fig.add_trace(ww3_markers)
+
     # Create dropdown buttons
-    num_buoy_traces = (1 if has_ndbc else 0) + (1 if has_cdip else 0)
+    num_extra_traces = (1 if has_ndbc else 0) + (1 if has_cdip else 0) + (1 if has_ww3 else 0)
     buttons = []
     for i, mesh_data in enumerate(mesh_list):
         # Each mesh has 2 traces (heatmap + markers), plus buoy traces at the end
@@ -851,8 +1056,8 @@ def create_comparison_figure(
         visibility[i * 2] = True      # heatmap
         visibility[i * 2 + 1] = True  # markers
 
-        # Add buoy visibility (always True)
-        for _ in range(num_buoy_traces):
+        # Add extra traces visibility (buoys + WW3 boundary, always True)
+        for _ in range(num_extra_traces):
             visibility.append(True)
 
         buttons.append(dict(
@@ -1018,11 +1223,30 @@ def main():
             depth_str = f", depth={buoy.depth_m}m" if buoy.depth_m else ""
             print(f"  CDIP {buoy.station_id} ({buoy.name}): {n_partitions} partitions, combined {combined_str}{depth_str}")
 
+    # Load WW3 boundary data
+    print("\nFetching WW3 boundary data (partitioned swells)...")
+    ww3_boundary = load_ww3_boundary_data()
+    print(f"Loaded {len(ww3_boundary)} WW3 boundary points")
+
+    # Count by side
+    west_points = [p for p in ww3_boundary if p.boundary_side == "west"]
+    south_points = [p for p in ww3_boundary if p.boundary_side == "south"]
+    print(f"  West boundary: {len(west_points)} points")
+    print(f"  South boundary: {len(south_points)} points")
+
+    # Show sample data from first point of each boundary
+    for side, points in [("West", west_points), ("South", south_points)]:
+        if points:
+            p = points[0]
+            combined_str = f"{p.combined_height_m:.2f}m" if p.combined_height_m else "--"
+            n_partitions = len(p.partitions)
+            print(f"  {side}[0]: {n_partitions} partitions, combined {combined_str}")
+
     # Create visualization
     print("\nGenerating interactive visualization...")
 
     # Single panel with dropdown to switch between meshes
-    fig = create_comparison_figure(meshes, SOCAL_SPOTS, ndbc_buoys, cdip_buoys)
+    fig = create_comparison_figure(meshes, SOCAL_SPOTS, ndbc_buoys, cdip_buoys, ww3_boundary)
 
     # Save and open - full page layout
     output_path = project_root / "scripts" / "dev" / "spot_explorer.html"
