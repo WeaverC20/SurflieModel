@@ -684,18 +684,39 @@ class CDIPBuoyFetcher:
     """Fetches data from CDIP buoys (Coastal Data Information Program)
 
     CDIP provides high-quality wave data from buoys primarily along US West Coast.
-    Data is available via THREDDS server in NetCDF format with OpenDAP access.
+
+    Data access methods (in order of reliability):
+    1. ERDDAP - REST API returning CSV with QC'd bulk parameters (Hs, Tp, Dp)
+    2. ndar.cdip CGI - 9-band energy/direction breakdown by period
+    3. THREDDS/OpenDAP - Full NetCDF access (fallback only)
 
     Key features:
     - Real-time and historical wave data
-    - Partitioned wave spectra (multiple swell trains identified)
-    - 2D directional spectra using Maximum Entropy Method
+    - 9-band spectral breakdown (energy by period band with direction)
     - Higher quality directional measurements than NDBC
 
     Documentation: https://cdip.ucsd.edu/
     Data Access: https://cdip.ucsd.edu/m/documents/data_access.html
-    THREDDS: https://thredds.cdip.ucsd.edu/thredds/catalog.html
+    ERDDAP: https://erddap.cdip.ucsd.edu/erddap/
     """
+
+    # API endpoints
+    ERDDAP_BASE = "https://erddap.cdip.ucsd.edu/erddap/tabledap"
+    NDAR_BASE = "https://cdip.ucsd.edu/data_access/ndar.cdip"
+
+    # 9-band period ranges (approximate center periods in seconds)
+    # Based on CDIP frequency bands: 0.025-0.58 Hz divided into 9 bands
+    BAND_PERIODS = {
+        1: {"center": 22.0, "type": "long_period_swell"},  # ~22+ sec
+        2: {"center": 20.0, "type": "long_period_swell"},  # ~20-22 sec
+        3: {"center": 18.0, "type": "long_period_swell"},  # ~18-20 sec
+        4: {"center": 16.0, "type": "swell"},              # ~16-18 sec
+        5: {"center": 14.0, "type": "swell"},              # ~14-16 sec
+        6: {"center": 12.0, "type": "swell"},              # ~12-14 sec
+        7: {"center": 10.0, "type": "short_swell"},        # ~10-12 sec
+        8: {"center": 8.0, "type": "short_swell"},         # ~8-10 sec
+        9: {"center": 6.5, "type": "wind_waves"},          # ~6-8 sec
+    }
 
     # Known California CDIP buoys with metadata
     CALIFORNIA_BUOYS = {
@@ -752,6 +773,254 @@ class CDIPBuoyFetcher:
                 rc_set('HTTP.SSL.CAINFO', '/etc/ssl/cert.pem')
             except Exception:
                 pass  # If rc_set fails, continue anyway
+
+    async def _fetch_erddap_latest(self, station_id: str) -> Optional[Dict]:
+        """Fetch latest bulk parameters (Hs, Tp, Dp) from ERDDAP.
+
+        Most reliable source - returns QC'd CSV data via simple HTTP.
+        No netCDF4 dependency needed.
+
+        Args:
+            station_id: CDIP station ID (e.g., "100", "067")
+
+        Returns:
+            Dict with waveHs, waveTp, waveDp, timestamp, lat, lon or None if failed
+        """
+        try:
+            # ERDDAP query for latest observation from specific station
+            # orderByMax("time") ensures we get the most recent record
+            url = (
+                f"{self.ERDDAP_BASE}/wave_agg.csv?"
+                f"station_id,time,waveHs,waveTp,waveDp,latitude,longitude"
+                f'&station_id="{station_id}"'
+                f'&orderByMax("time")'
+            )
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+
+                # Parse CSV response
+                # ERDDAP returns: 1) headers, 2) units, 3) data
+                lines = response.text.strip().split("\n")
+                if len(lines) < 3:
+                    logger.warning(f"ERDDAP returned no data for CDIP {station_id}")
+                    return None
+
+                # First line is headers, second is units, third is data
+                headers = lines[0].split(",")
+                values = lines[2].split(",")  # Skip units row (line 1)
+
+                if len(values) != len(headers):
+                    logger.warning(f"ERDDAP CSV parse error for CDIP {station_id}")
+                    return None
+
+                data = dict(zip(headers, values))
+
+                # Parse values
+                result = {
+                    "station_id": data.get("station_id", "").strip('"'),
+                    "timestamp": data.get("time", "").strip('"'),
+                    "waveHs": self._parse_float(data.get("waveHs")),
+                    "waveTp": self._parse_float(data.get("waveTp")),
+                    "waveDp": self._parse_float(data.get("waveDp")),
+                    "latitude": self._parse_float(data.get("latitude")),
+                    "longitude": self._parse_float(data.get("longitude")),
+                }
+
+                return result
+
+        except httpx.HTTPError as e:
+            logger.warning(f"ERDDAP request failed for CDIP {station_id}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"ERDDAP parse error for CDIP {station_id}: {e}")
+            return None
+
+    async def _fetch_9band_data(self, station_id: str) -> Optional[List[Dict]]:
+        """Fetch 9-band energy/direction breakdown from ndar.cdip CGI.
+
+        Returns energy distribution across 9 period bands with direction.
+        Format: https://cdip.ucsd.edu/data_access/ndar.cdip?{stn}+9c+1+h
+
+        The 9c format returns combined energy (cm²) and direction (deg) for each band.
+        Format is: YYYYMMDDHHMM E1 D1 E2 D2 E3 D3 E4 D4 E5 D5 E6 D6 E7 D7 E8 D8 E9 D9
+
+        Args:
+            station_id: CDIP station ID
+
+        Returns:
+            List of dicts with band_num, energy_m2, direction_deg, or None if failed
+        """
+        try:
+            # 9c = combined 9-band energy + direction, 1 = last 1 day, h = include header
+            url = f"{self.NDAR_BASE}?{station_id}+9c+1+h"
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+
+                lines = response.text.strip().split("\n")
+                if len(lines) < 3:
+                    logger.warning(f"ndar.cdip returned insufficient 9-band data for CDIP {station_id}")
+                    return None
+
+                # Skip header lines (first 2 lines are headers)
+                # Data lines look like: 202601211400      2 283     12 264     70 258 ...
+                # Find the last data line (skip any that start with letters or are too short)
+                data_line = None
+                for line in reversed(lines):
+                    stripped = line.strip()
+                    if stripped and stripped[0].isdigit():
+                        data_line = stripped
+                        break
+
+                if not data_line:
+                    logger.warning(f"No valid data line found for CDIP {station_id}")
+                    return None
+
+                # Split by whitespace - format is: YYYYMMDDHHMM E1 D1 E2 D2 ...
+                fields = data_line.split()
+
+                # Need at least: timestamp + 9 bands * 2 values = 19 fields
+                if len(fields) < 19:
+                    logger.warning(f"9-band data incomplete for CDIP {station_id}: {len(fields)} fields")
+                    return None
+
+                # Parse timestamp (YYYYMMDDHHMM format)
+                timestamp = None
+                try:
+                    ts_str = fields[0]
+                    if len(ts_str) == 12:
+                        year = int(ts_str[0:4])
+                        month = int(ts_str[4:6])
+                        day = int(ts_str[6:8])
+                        hour = int(ts_str[8:10])
+                        minute = int(ts_str[10:12])
+                        timestamp = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+                except (ValueError, IndexError):
+                    pass
+
+                # Parse the 9 band pairs (E1,D1 through E9,D9)
+                # Fields 1-18 are the band data (0 is timestamp)
+                bands = []
+                for band_num in range(1, 10):
+                    e_idx = 1 + (band_num - 1) * 2  # Energy field index
+                    d_idx = e_idx + 1              # Direction field index
+
+                    if e_idx < len(fields) and d_idx < len(fields):
+                        # Energy is in cm², convert to m² (divide by 10000)
+                        energy_cm2 = self._parse_float(fields[e_idx])
+                        direction = self._parse_float(fields[d_idx])
+
+                        # Skip if no valid energy
+                        if energy_cm2 is None:
+                            continue
+
+                        # Convert cm² to m² for Hs calculation
+                        energy_m2 = energy_cm2 / 10000.0
+
+                        bands.append({
+                            "band_num": band_num,
+                            "energy_m2": energy_m2,
+                            "energy_cm2": energy_cm2,  # Keep original for debugging
+                            "direction_deg": direction if direction is not None and 0 <= direction <= 360 else None,
+                            "period_s": self.BAND_PERIODS[band_num]["center"],
+                            "wave_type": self.BAND_PERIODS[band_num]["type"],
+                            "timestamp": timestamp.isoformat() if timestamp else None,
+                        })
+
+                return bands if bands else None
+
+        except httpx.HTTPError as e:
+            logger.warning(f"ndar.cdip request failed for CDIP {station_id}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"9-band parse error for CDIP {station_id}: {e}")
+            return None
+
+    def _9band_to_partitions(self, bands: List[Dict]) -> List[Dict]:
+        """Convert 9-band data to partition format.
+
+        Groups bands by wave type and calculates combined Hs for each group.
+        Returns partitions sorted by energy (descending).
+
+        Args:
+            bands: List of band dicts from _fetch_9band_data()
+
+        Returns:
+            List of partition dicts with height_m, period_s, direction_deg, type, energy_pct
+        """
+        if not bands:
+            return []
+
+        # Group bands by wave type
+        groups = {}
+        for band in bands:
+            wave_type = band.get("wave_type", "unknown")
+            if wave_type not in groups:
+                groups[wave_type] = []
+            groups[wave_type].append(band)
+
+        # Calculate total energy (sum of all band energies)
+        total_energy = sum(b.get("energy_m2", 0) for b in bands)
+        if total_energy <= 0:
+            return []
+
+        # Create partitions from groups
+        partitions = []
+        for wave_type, group_bands in groups.items():
+            group_energy = sum(b.get("energy_m2", 0) for b in group_bands)
+            if group_energy <= 0:
+                continue
+
+            # Hs = 4 * sqrt(m0), where m0 is the zeroth moment (energy)
+            hs = 4 * (group_energy ** 0.5)
+
+            # Energy-weighted average direction
+            dir_sum = 0
+            dir_weight = 0
+            for b in group_bands:
+                if b.get("direction_deg") is not None:
+                    dir_sum += b["direction_deg"] * b.get("energy_m2", 0)
+                    dir_weight += b.get("energy_m2", 0)
+            mean_dir = dir_sum / dir_weight if dir_weight > 0 else None
+
+            # Use the dominant band's period (highest energy in group)
+            dominant_band = max(group_bands, key=lambda b: b.get("energy_m2", 0))
+            period = dominant_band.get("period_s")
+
+            energy_pct = 100 * group_energy / total_energy
+
+            partitions.append({
+                "partition_id": 0,  # Will be renumbered
+                "height_m": round(hs, 2),
+                "height_ft": round(hs * 3.28084, 1),
+                "period_s": period,
+                "direction_deg": round(mean_dir, 0) if mean_dir is not None else None,
+                "type": wave_type,
+                "energy_pct": round(energy_pct, 0),
+            })
+
+        # Sort by energy percentage descending and renumber
+        partitions.sort(key=lambda p: p.get("energy_pct", 0), reverse=True)
+        for i, p in enumerate(partitions):
+            p["partition_id"] = i + 1
+
+        return partitions
+
+    def _parse_float(self, value: Any) -> Optional[float]:
+        """Safely parse a float value, handling missing/invalid data."""
+        if value is None:
+            return None
+        try:
+            val = float(str(value).strip().strip('"'))
+            # Common missing value indicators
+            if val in (999.0, 9999.0, -999.0, -9999.0):
+                return None
+            return val
+        except (ValueError, TypeError):
+            return None
 
     async def fetch_latest_observation(self, station_id: str) -> Dict:
         """Fetch latest observation from CDIP buoy via THREDDS/OpenDAP
@@ -865,41 +1134,84 @@ class CDIPBuoyFetcher:
             }
 
     async def fetch_partitioned_wave_data(self, station_id: str) -> Dict:
-        """Fetch partitioned wave data from CDIP showing multiple swell components
+        """Fetch partitioned wave data from CDIP showing multiple swell components.
 
-        CDIP uses the Maximum Entropy Method (MEM) for 2D spectral estimation,
-        then partitions using methods like Portilla et al. (2009) to identify
-        individual wave fields (multiple swells from different source regions).
+        Uses reliable data sources in order of preference:
+        1. ERDDAP for bulk parameters (Hs, Tp, Dp) - most reliable, QC'd data
+        2. ndar.cdip 9-band product for period-based energy breakdown
+        3. THREDDS/OpenDAP as fallback (slower, requires netCDF4)
 
         Args:
-            station_id: CDIP station ID
+            station_id: CDIP station ID (e.g., "100", "067")
 
         Returns:
-            Dict with partitioned swell data showing multiple wave trains
+            Dict with partitioned swell data showing wave energy by period band
         """
         logger.info(f"Fetching partitioned wave data for CDIP buoy {station_id}")
 
-        if not NETCDF4_AVAILABLE:
-            return {
-                "station_id": station_id,
-                "data_source": "CDIP Partitioned",
-                "error": "netCDF4 library not available",
-                "status": "unavailable"
+        result = {
+            "station_id": station_id,
+            "data_source": "CDIP",
+            "partition_url": f"{self.base_url}/m/products/partition/?stn={station_id}p1",
+            "status": "success",
+            "timestamp": None,
+            "partitions": [],
+            "combined": None,
+        }
+
+        # Step 1: Get bulk parameters from ERDDAP (most reliable)
+        erddap_data = await self._fetch_erddap_latest(station_id)
+        if erddap_data and erddap_data.get("waveHs") is not None:
+            result["timestamp"] = erddap_data.get("timestamp")
+            result["combined"] = {
+                "significant_height_m": erddap_data.get("waveHs"),
+                "significant_height_ft": round(erddap_data.get("waveHs", 0) * 3.28084, 1),
+                "peak_period_s": erddap_data.get("waveTp"),
+                "peak_direction_deg": erddap_data.get("waveDp"),
             }
+            result["data_source"] = "CDIP ERDDAP"
+
+        # Step 2: Get 9-band breakdown for partitions
+        bands = await self._fetch_9band_data(station_id)
+        if bands:
+            result["partitions"] = self._9band_to_partitions(bands)
+            result["data_source"] = "CDIP 9-band"
+
+            # Use 9-band timestamp if we don't have one yet
+            if not result["timestamp"] and bands[0].get("timestamp"):
+                result["timestamp"] = bands[0]["timestamp"]
+
+        # Step 3: Fallback to THREDDS if we have no data
+        if not result["combined"] and not result["partitions"]:
+            logger.info(f"ERDDAP/9-band failed, trying THREDDS for CDIP {station_id}")
+            thredds_data = await self._fetch_thredds_fallback(station_id)
+            if thredds_data:
+                result.update(thredds_data)
+                result["data_source"] = "CDIP THREDDS"
+            else:
+                result["status"] = "error"
+                result["error"] = f"No data available for station {station_id}"
+
+        return result
+
+    async def _fetch_thredds_fallback(self, station_id: str) -> Optional[Dict]:
+        """Fallback to THREDDS/OpenDAP for bulk parameters only.
+
+        Used when ERDDAP and 9-band endpoints fail.
+        Only returns combined parameters, no partition data.
+        """
+        if not NETCDF4_AVAILABLE:
+            return None
 
         try:
             url = f"{self.thredds_url}/dodsC/cdip/realtime/{station_id}p1_rt.nc"
             ds = NetCDFDataset(url)
 
             result = {
-                "station_id": station_id,
-                "data_source": "CDIP Partitioned",
                 "thredds_url": url,
-                "partition_url": f"{self.base_url}/m/products/partition/?stn={station_id}p1",
-                "status": "success",
                 "timestamp": None,
-                "partitions": [],
                 "combined": None,
+                "partitions": [],
             }
 
             # Get timestamp
@@ -926,64 +1238,12 @@ class CDIPBuoyFetcher:
             except (KeyError, IndexError):
                 pass
 
-            # Try to get partitioned wave data
-            # CDIP provides wave source breakdown when available
-            partition_vars = [
-                ('waveSourceHs', 'height'),
-                ('waveSourceTp', 'period'),
-                ('waveSourceDp', 'direction'),
-            ]
-
-            # Check if partition data exists
-            has_partitions = 'waveSourceHs' in ds.variables
-
-            if has_partitions:
-                try:
-                    source_hs = ds.variables['waveSourceHs'][:]
-                    source_tp = ds.variables['waveSourceTp'][:]
-                    source_dp = ds.variables['waveSourceDp'][:]
-
-                    # Get the latest values (last time index, all partitions)
-                    if len(source_hs.shape) > 1:
-                        latest_hs = source_hs[-1, :]
-                        latest_tp = source_tp[-1, :]
-                        latest_dp = source_dp[-1, :]
-
-                        for i in range(len(latest_hs)):
-                            hs_val = float(latest_hs[i])
-                            if hs_val > 0.01:  # Filter out near-zero partitions
-                                partition = {
-                                    "partition_id": i + 1,
-                                    "height_m": hs_val,
-                                    "height_ft": round(hs_val * 3.28084, 1),
-                                    "period_s": float(latest_tp[i]) if i < len(latest_tp) else None,
-                                    "direction_deg": float(latest_dp[i]) if i < len(latest_dp) else None,
-                                    "type": self._classify_wave_type(float(latest_tp[i]) if i < len(latest_tp) else 0),
-                                }
-                                result["partitions"].append(partition)
-                except (KeyError, IndexError, TypeError) as e:
-                    logger.warning(f"Could not parse partition data for {station_id}: {e}")
-
-            # If no partitions available, derive from spectral data
-            if not result["partitions"]:
-                spectral_partitions = self._partition_spectrum(ds)
-                if spectral_partitions:
-                    result["partitions"] = spectral_partitions
-                    result["note"] = "Partitions derived from spectral decomposition"
-                else:
-                    result["note"] = "No partition data available"
-
             ds.close()
-            return result
+            return result if result["combined"] else None
 
         except Exception as e:
-            logger.error(f"Error fetching CDIP partition data for {station_id}: {e}")
-            return {
-                "station_id": station_id,
-                "data_source": "CDIP Partitioned",
-                "error": str(e),
-                "status": "error"
-            }
+            logger.warning(f"THREDDS fallback failed for CDIP {station_id}: {e}")
+            return None
 
     def _classify_wave_type(self, period_s: float) -> str:
         """Classify wave type based on period

@@ -12,6 +12,8 @@ Opens an HTML file in your browser with interactive visualization.
 """
 
 import asyncio
+import contextlib
+import os
 import sys
 import webbrowser
 from dataclasses import dataclass, field
@@ -22,11 +24,35 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+
+# =============================================================================
+# Suppress libcurl verbose output from netCDF4
+# =============================================================================
+
+@contextlib.contextmanager
+def suppress_stderr():
+    """Context manager to suppress stderr output (e.g., libcurl verbose logs)."""
+    # Save original stderr
+    stderr_fd = sys.stderr.fileno()
+    saved_stderr = os.dup(stderr_fd)
+
+    # Open /dev/null and redirect stderr to it
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, stderr_fd)
+    os.close(devnull)
+
+    try:
+        yield
+    finally:
+        # Restore original stderr
+        os.dup2(saved_stderr, stderr_fd)
+        os.close(saved_stderr)
+
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from data.pipelines.buoy.fetcher import NDBCBuoyFetcher
+from data.pipelines.buoy.fetcher import NDBCBuoyFetcher, CDIPBuoyFetcher
 from data.spots import SOCAL_SPOTS, SurfSpot
 from data.swan.analysis.output_reader import SwanOutput, SwanOutputReader
 
@@ -37,7 +63,7 @@ from data.swan.analysis.output_reader import SwanOutput, SwanOutputReader
 
 # NDBC buoys relevant for Southern California with locations
 # Using spectral data with r1 confidence for direction reliability
-SOCAL_BUOYS = {
+SOCAL_NDBC_BUOYS = {
     "46222": {"name": "San Pedro", "lat": 33.618, "lon": -118.317},
     "46025": {"name": "Santa Monica Basin", "lat": 33.749, "lon": -119.053},
     "46047": {"name": "Tanner Bank", "lat": 32.433, "lon": -119.533},
@@ -46,6 +72,26 @@ SOCAL_BUOYS = {
     "46053": {"name": "East Santa Barbara", "lat": 34.252, "lon": -119.841},
     "46219": {"name": "San Nicolas Island", "lat": 33.221, "lon": -119.882},
     "46011": {"name": "Santa Maria", "lat": 34.868, "lon": -120.857},
+}
+
+# CDIP buoys for Southern California - higher quality directional spectra
+# These use Maximum Entropy Method (MEM) for 2D spectral estimation
+SOCAL_CDIP_BUOYS = {
+    "028": {"name": "Santa Monica Bay", "lat": 33.858, "lon": -118.633, "depth_m": 365},
+    "045": {"name": "Oceanside Offshore", "lat": 33.178, "lon": -117.472, "depth_m": 215},
+    "067": {"name": "San Diego", "lat": 32.570, "lon": -117.169, "depth_m": 27},
+    "071": {"name": "Harvest", "lat": 34.451, "lon": -120.779, "depth_m": 549},
+    "093": {"name": "Point Loma South", "lat": 32.530, "lon": -117.431, "depth_m": 305},
+    "094": {"name": "Oceanside Harbor", "lat": 33.216, "lon": -117.435, "depth_m": 183},
+    "096": {"name": "Goleta Point", "lat": 34.430, "lon": -119.872, "depth_m": 549},
+    "100": {"name": "Torrey Pines Outer", "lat": 32.933, "lon": -117.391, "depth_m": 549},
+    "111": {"name": "San Pedro Basin", "lat": 33.616, "lon": -118.316, "depth_m": 100},
+    "168": {"name": "Rincon", "lat": 34.378, "lon": -119.458, "depth_m": 227},
+    "191": {"name": "Huntington Beach", "lat": 33.632, "lon": -118.055, "depth_m": 21},
+    "192": {"name": "San Nicholas Island", "lat": 33.219, "lon": -119.456, "depth_m": 295},
+    "200": {"name": "Anacapa Passage", "lat": 34.055, "lon": -119.360, "depth_m": 265},
+    "203": {"name": "Point Mugu", "lat": 34.037, "lon": -119.241, "depth_m": 183},
+    "214": {"name": "Santa Cruz Basin", "lat": 33.769, "lon": -119.565, "depth_m": 499},
 }
 
 
@@ -196,14 +242,189 @@ async def fetch_buoy_data(buoys: Dict[str, dict]) -> List[BuoyData]:
     return buoy_list
 
 
-def load_buoy_data(buoys: Dict[str, dict] = SOCAL_BUOYS) -> List[BuoyData]:
-    """Load buoy data synchronously (wrapper for async fetch)."""
+def load_ndbc_buoy_data(buoys: Dict[str, dict] = SOCAL_NDBC_BUOYS) -> List[BuoyData]:
+    """Load NDBC buoy data synchronously (wrapper for async fetch)."""
     return asyncio.run(fetch_buoy_data(buoys))
+
+
+# =============================================================================
+# CDIP Buoy Data
+# =============================================================================
+
+@dataclass
+class CDIPPartition:
+    """A single wave partition from CDIP buoy spectral data."""
+    partition_id: int
+    height_m: float
+    period_s: Optional[float] = None
+    direction_deg: Optional[float] = None
+    wave_type: Optional[str] = None
+    energy_pct: Optional[float] = None
+
+
+@dataclass
+class CDIPBuoyData:
+    """Container for CDIP buoy observation data with multiple partitions."""
+    station_id: str
+    name: str
+    lat: float
+    lon: float
+    depth_m: Optional[float] = None
+    timestamp: Optional[str] = None
+    partitions: List[CDIPPartition] = field(default_factory=list)
+    combined_height_m: Optional[float] = None
+    combined_period_s: Optional[float] = None
+    combined_direction_deg: Optional[float] = None
+    error: Optional[str] = None
+
+    def format_hover_text(self) -> str:
+        """Generate HTML hover text for this CDIP buoy."""
+        lines = [
+            f"<b>CDIP Buoy {self.station_id}</b>",
+            f"<b>{self.name}</b>",
+            f"Location: ({self.lat:.3f}, {self.lon:.3f})",
+        ]
+
+        if self.depth_m:
+            lines.append(f"Depth: {self.depth_m}m")
+
+        if self.error:
+            lines.append(f"<span style='color: #ff6666'>Error: {self.error}</span>")
+            return "<br>".join(lines)
+
+        if self.timestamp:
+            time_part = self.timestamp.split("T")[1][:5] if "T" in self.timestamp else self.timestamp
+            lines.append(f"Time: {time_part} UTC")
+
+        lines.append("")
+
+        # Combined
+        if self.combined_height_m is not None:
+            dir_str = f"{self.combined_direction_deg:.0f}°" if self.combined_direction_deg else "--"
+            period_str = f"{self.combined_period_s:.1f}s" if self.combined_period_s else "--"
+            lines.append(f"<b>Combined:</b> {self.combined_height_m:.2f}m, {period_str}, {dir_str}")
+
+        lines.append("")
+        lines.append("<b>Partitions:</b>")
+        lines.append("<i>(CDIP MEM spectral analysis)</i>")
+
+        if not self.partitions:
+            lines.append("  No partition data available")
+        else:
+            for p in self.partitions:
+                dir_str = f"{p.direction_deg:.0f}°" if p.direction_deg else "--"
+                period_str = f"{p.period_s:.1f}s" if p.period_s else "--"
+
+                # Wave type with color
+                wave_type = p.wave_type or "unknown"
+                type_color = wave_type_color(wave_type)
+                type_str = f"<span style='color: {type_color}'>{wave_type}</span>"
+
+                energy_str = f" [{p.energy_pct:.0f}%]" if p.energy_pct else ""
+                lines.append(f"  #{p.partition_id}: {p.height_m:.2f}m, {period_str}, {dir_str} ({type_str}){energy_str}")
+
+        return "<br>".join(lines)
+
+
+async def fetch_single_cdip_buoy(fetcher: CDIPBuoyFetcher, station_id: str, info: dict) -> CDIPBuoyData:
+    """Fetch partitioned wave data for a single CDIP buoy."""
+    buoy_data = CDIPBuoyData(
+        station_id=station_id,
+        name=info["name"],
+        lat=info["lat"],
+        lon=info["lon"],
+        depth_m=info.get("depth_m"),
+    )
+
+    try:
+        # Suppress libcurl verbose output during netCDF4 OpenDAP access
+        with suppress_stderr():
+            result = await fetcher.fetch_partitioned_wave_data(station_id)
+
+        if result.get("status") == "error" or result.get("error"):
+            buoy_data.error = result.get("error", "Unknown error")[:50]
+            return buoy_data
+
+        buoy_data.timestamp = result.get("timestamp")
+
+        # Extract combined wave parameters
+        combined = result.get("combined", {})
+        if combined:
+            buoy_data.combined_height_m = combined.get("significant_height_m")
+            buoy_data.combined_period_s = combined.get("peak_period_s")
+            buoy_data.combined_direction_deg = combined.get("peak_direction_deg")
+
+        # Extract partitions
+        partitions = result.get("partitions", [])
+        for p in partitions:
+            partition = CDIPPartition(
+                partition_id=p.get("partition_id", 0),
+                height_m=p.get("height_m", 0),
+                period_s=p.get("period_s"),
+                direction_deg=p.get("direction_deg"),
+                wave_type=p.get("type"),
+                energy_pct=p.get("energy_pct"),
+            )
+            buoy_data.partitions.append(partition)
+
+    except Exception as e:
+        buoy_data.error = str(e)[:50]
+
+    return buoy_data
+
+
+async def fetch_cdip_buoy_data(buoys: Dict[str, dict]) -> List[CDIPBuoyData]:
+    """Fetch partitioned wave data for all CDIP buoys concurrently."""
+    fetcher = CDIPBuoyFetcher()
+
+    tasks = [
+        fetch_single_cdip_buoy(fetcher, station_id, info)
+        for station_id, info in buoys.items()
+    ]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    buoy_list = []
+    for result in results:
+        if isinstance(result, CDIPBuoyData):
+            buoy_list.append(result)
+        elif isinstance(result, Exception):
+            print(f"  Warning: CDIP buoy fetch failed: {result}")
+
+    return buoy_list
+
+
+def load_cdip_buoy_data(buoys: Dict[str, dict] = SOCAL_CDIP_BUOYS) -> List[CDIPBuoyData]:
+    """Load CDIP buoy data synchronously (wrapper for async fetch)."""
+    return asyncio.run(fetch_cdip_buoy_data(buoys))
 
 
 # =============================================================================
 # Data Structures (extensible for future stats)
 # =============================================================================
+
+def classify_wave_type(period_s: float) -> str:
+    """Classify wave type based on period (same as NDBC classification)."""
+    if period_s >= 16:
+        return "long_period_swell"
+    elif period_s >= 12:
+        return "swell"
+    elif period_s >= 8:
+        return "short_swell"
+    else:
+        return "wind_waves"
+
+
+def wave_type_color(wave_type: str) -> str:
+    """Get color for wave type display."""
+    colors = {
+        "long_period_swell": "#66ccff",  # Light blue - distant groundswell
+        "swell": "#66ff66",               # Green - good swell
+        "short_swell": "#ffff66",         # Yellow - short period
+        "wind_waves": "#ff9966",          # Orange - wind chop
+    }
+    return colors.get(wave_type, "#ffffff")
+
 
 @dataclass
 class PointStats:
@@ -230,30 +451,54 @@ class PointStats:
     # breaking_height: Optional[float] = None
     # iribarren_number: Optional[float] = None
     # surfability_score: Optional[float] = None
-    # energy_percentages: Optional[List[float]] = None
 
     def format_hover_text(self) -> str:
-        """Generate HTML hover text for this point."""
+        """Generate HTML hover text for this point (matching NDBC format)."""
         lines = [
-            f"<b>Location:</b> ({self.lat:.4f}, {self.lon:.4f})",
-            f"<b>Grid:</b> i={self.grid_i}, j={self.grid_j}",
+            f"<b>SWAN Model Output</b>",
+            f"Location: ({self.lat:.4f}, {self.lon:.4f})",
+            f"Grid: i={self.grid_i}, j={self.grid_j}",
             "",
-            f"<b>Total Hsig:</b> {self.hsig:.2f} m",
-            f"<b>Peak Period:</b> {self.tps:.1f} s",
-            f"<b>Direction:</b> {self.dir:.0f}°",
-            "",
-            "<b>Partitions:</b>",
         ]
 
-        for hs, tp, direction, label in self.partitions:
-            if np.isnan(hs) or hs <= 0:
-                lines.append(f"  {label}: --")
-            else:
-                lines.append(f"  {label}: {hs:.2f}m, {tp:.1f}s, {direction:.0f}°")
+        # Combined wave parameters
+        dir_str = f"{self.dir:.0f}°" if not np.isnan(self.dir) else "--"
+        period_str = f"{self.tps:.1f}s" if not np.isnan(self.tps) else "--"
+        hs_str = f"{self.hsig:.2f}m" if not np.isnan(self.hsig) else "--"
+        lines.append(f"<b>Combined:</b> {hs_str}, {period_str}, {dir_str}")
 
-        # === Add future stats here ===
-        # if self.breaking_height is not None:
-        #     lines.append(f"<b>Breaking Ht:</b> {self.breaking_height:.2f} m")
+        lines.append("")
+        lines.append("<b>Partitions:</b>")
+        lines.append("<i>(wave type based on period)</i>")
+
+        # Calculate total energy for percentage (energy ∝ Hs²)
+        valid_partitions = [(hs, tp, d, label) for hs, tp, d, label in self.partitions
+                           if not np.isnan(hs) and hs > 0]
+        total_energy = sum(hs**2 for hs, _, _, _ in valid_partitions)
+
+        if not valid_partitions:
+            lines.append("  No partition data available")
+        else:
+            # Sort by energy (Hs²) descending
+            sorted_partitions = sorted(valid_partitions, key=lambda x: x[0]**2, reverse=True)
+
+            for i, (hs, tp, direction, label) in enumerate(sorted_partitions, 1):
+                dir_str = f"{direction:.0f}°" if not np.isnan(direction) else "--"
+                period_str = f"{tp:.1f}s" if not np.isnan(tp) else "--"
+
+                # Wave type classification
+                wave_type = classify_wave_type(tp) if not np.isnan(tp) else "unknown"
+                type_color = wave_type_color(wave_type)
+
+                # Energy percentage
+                energy_pct = 100 * (hs**2) / total_energy if total_energy > 0 else 0
+
+                # Format similar to NDBC, but include original SWAN label
+                type_str = f"<span style='color: {type_color}'>{wave_type}</span>"
+                lines.append(
+                    f"  #{i} ({label}): {hs:.2f}m, {period_str}, {dir_str} "
+                    f"({type_str}) [{energy_pct:.0f}%]"
+                )
 
         return "<br>".join(lines)
 
@@ -370,15 +615,44 @@ def create_spot_markers(spots: List[SurfSpot], mesh_data: MeshData) -> go.Scatte
         forecast = spot.get_forecast(mesh_data.swan_output)
         lines = [
             f"<b>{spot.display_name}</b>",
+            f"<b>SWAN Forecast</b>",
             f"Grid point: ({forecast.grid_i}, {forecast.grid_j})",
-            f"Distance: {forecast.distance_km:.2f} km",
+            f"Distance to grid: {forecast.distance_km:.2f} km",
             "",
         ]
-        for hs, tp, direction, label in forecast.partitions:
-            if np.isnan(hs) or hs <= 0:
-                lines.append(f"<b>{label}:</b> --")
-            else:
-                lines.append(f"<b>{label}:</b> {hs:.2f}m, {tp:.1f}s, {direction:.0f}°")
+
+        # Get valid partitions and calculate total energy
+        valid_partitions = [(hs, tp, d, label) for hs, tp, d, label in forecast.partitions
+                           if not np.isnan(hs) and hs > 0]
+        total_energy = sum(hs**2 for hs, _, _, _ in valid_partitions)
+
+        # Combined parameters (sum of all partitions)
+        if valid_partitions:
+            combined_hs = np.sqrt(sum(hs**2 for hs, _, _, _ in valid_partitions))
+            # Use dominant partition's period and direction
+            dominant = max(valid_partitions, key=lambda x: x[0])
+            lines.append(f"<b>Combined:</b> {combined_hs:.2f}m, {dominant[1]:.1f}s, {dominant[2]:.0f}°")
+        lines.append("")
+        lines.append("<b>Partitions:</b>")
+
+        if not valid_partitions:
+            lines.append("  No wave energy at this point")
+        else:
+            # Sort by energy descending
+            sorted_partitions = sorted(valid_partitions, key=lambda x: x[0]**2, reverse=True)
+
+            for i, (hs, tp, direction, label) in enumerate(sorted_partitions, 1):
+                wave_type = classify_wave_type(tp) if not np.isnan(tp) else "unknown"
+                type_color = wave_type_color(wave_type)
+                energy_pct = 100 * (hs**2) / total_energy if total_energy > 0 else 0
+
+                type_str = f"<span style='color: {type_color}'>{wave_type}</span>"
+                dir_str = f"{direction:.0f}°" if not np.isnan(direction) else "--"
+                lines.append(
+                    f"  #{i} ({label}): {hs:.2f}m, {tp:.1f}s, {dir_str} "
+                    f"({type_str}) [{energy_pct:.0f}%]"
+                )
+
         hover_texts.append("<br>".join(lines))
 
     return go.Scatter(
@@ -400,8 +674,8 @@ def create_spot_markers(spots: List[SurfSpot], mesh_data: MeshData) -> go.Scatte
     )
 
 
-def create_buoy_markers(buoys: List[BuoyData]) -> go.Scatter:
-    """Create scatter markers for buoys with partitioned swell hover text."""
+def create_ndbc_buoy_markers(buoys: List[BuoyData]) -> go.Scatter:
+    """Create scatter markers for NDBC buoys with partitioned swell hover text."""
     lons = [b.lon for b in buoys]
     lats = [b.lat for b in buoys]
     labels = [b.station_id for b in buoys]
@@ -423,6 +697,32 @@ def create_buoy_markers(buoys: List[BuoyData]) -> go.Scatter:
         hovertemplate="%{customdata}<extra></extra>",
         customdata=hover_texts,
         name="NDBC Buoys",
+    )
+
+
+def create_cdip_buoy_markers(buoys: List[CDIPBuoyData]) -> go.Scatter:
+    """Create scatter markers for CDIP buoys with partitioned swell hover text."""
+    lons = [b.lon for b in buoys]
+    lats = [b.lat for b in buoys]
+    labels = [f"CDIP {b.station_id}" for b in buoys]
+    hover_texts = [b.format_hover_text() for b in buoys]
+
+    return go.Scatter(
+        x=lons,
+        y=lats,
+        mode="markers+text",
+        marker=dict(
+            size=12,
+            color="#ff66ff",  # Magenta to distinguish from NDBC (cyan)
+            symbol="square",
+            line=dict(width=2, color="darkmagenta"),
+        ),
+        text=labels,
+        textposition="bottom center",
+        textfont=dict(size=8, color="#ff66ff"),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=hover_texts,
+        name="CDIP Buoys",
     )
 
 
@@ -449,7 +749,8 @@ def create_heatmap(mesh_data: MeshData) -> go.Heatmap:
 def create_single_mesh_figure(
     mesh_data: MeshData,
     spots: List[SurfSpot],
-    buoys: Optional[List[BuoyData]] = None,
+    ndbc_buoys: Optional[List[BuoyData]] = None,
+    cdip_buoys: Optional[List[CDIPBuoyData]] = None,
 ) -> go.Figure:
     """Create figure for a single mesh."""
     fig = go.Figure()
@@ -460,9 +761,13 @@ def create_single_mesh_figure(
     # Add spot markers
     fig.add_trace(create_spot_markers(spots, mesh_data))
 
-    # Add buoy markers
-    if buoys:
-        fig.add_trace(create_buoy_markers(buoys))
+    # Add NDBC buoy markers
+    if ndbc_buoys:
+        fig.add_trace(create_ndbc_buoy_markers(ndbc_buoys))
+
+    # Add CDIP buoy markers
+    if cdip_buoys:
+        fig.add_trace(create_cdip_buoy_markers(cdip_buoys))
 
     # Layout
     output = mesh_data.swan_output
@@ -493,13 +798,14 @@ def create_single_mesh_figure(
 def create_comparison_figure(
     meshes: Dict[str, MeshData],
     spots: List[SurfSpot],
-    buoys: Optional[List[BuoyData]] = None,
+    ndbc_buoys: Optional[List[BuoyData]] = None,
+    cdip_buoys: Optional[List[CDIPBuoyData]] = None,
 ) -> go.Figure:
     """Create side-by-side comparison figure with dropdown to select meshes."""
     mesh_list = list(meshes.values())
 
     if len(mesh_list) == 1:
-        return create_single_mesh_figure(mesh_list[0], spots, buoys)
+        return create_single_mesh_figure(mesh_list[0], spots, ndbc_buoys, cdip_buoys)
 
     # Create figure with dropdown for mesh selection
     fig = go.Figure()
@@ -518,24 +824,32 @@ def create_comparison_figure(
         markers.visible = visible
         fig.add_trace(markers)
 
-    # Add buoy markers (always visible, not tied to mesh selection)
-    has_buoys = buoys is not None and len(buoys) > 0
-    if has_buoys:
-        buoy_markers = create_buoy_markers(buoys)
-        buoy_markers.visible = True
-        fig.add_trace(buoy_markers)
+    # Add NDBC buoy markers (always visible, not tied to mesh selection)
+    has_ndbc = ndbc_buoys is not None and len(ndbc_buoys) > 0
+    if has_ndbc:
+        ndbc_markers = create_ndbc_buoy_markers(ndbc_buoys)
+        ndbc_markers.visible = True
+        fig.add_trace(ndbc_markers)
+
+    # Add CDIP buoy markers (always visible, not tied to mesh selection)
+    has_cdip = cdip_buoys is not None and len(cdip_buoys) > 0
+    if has_cdip:
+        cdip_markers = create_cdip_buoy_markers(cdip_buoys)
+        cdip_markers.visible = True
+        fig.add_trace(cdip_markers)
 
     # Create dropdown buttons
+    num_buoy_traces = (1 if has_ndbc else 0) + (1 if has_cdip else 0)
     buttons = []
     for i, mesh_data in enumerate(mesh_list):
-        # Each mesh has 2 traces (heatmap + markers), plus 1 buoy trace at the end
+        # Each mesh has 2 traces (heatmap + markers), plus buoy traces at the end
         num_mesh_traces = len(mesh_list) * 2
         visibility = [False] * num_mesh_traces
         visibility[i * 2] = True      # heatmap
         visibility[i * 2 + 1] = True  # markers
 
         # Add buoy visibility (always True)
-        if has_buoys:
+        for _ in range(num_buoy_traces):
             visibility.append(True)
 
         buttons.append(dict(
@@ -669,12 +983,12 @@ def main():
 
     print(f"\nLoaded {len(meshes)} meshes: {list(meshes.keys())}")
 
-    # Load buoy data
+    # Load NDBC buoy data
     print("\nFetching NDBC buoy spectral data with r1 confidence...")
-    buoys = load_buoy_data()
-    print(f"Loaded {len(buoys)} NDBC buoys with spectral partitioning")
+    ndbc_buoys = load_ndbc_buoy_data()
+    print(f"Loaded {len(ndbc_buoys)} NDBC buoys with spectral partitioning")
 
-    for buoy in buoys:
+    for buoy in ndbc_buoys:
         if buoy.error:
             print(f"  {buoy.station_id} ({buoy.name}): Error - {buoy.error}")
         else:
@@ -687,11 +1001,25 @@ def main():
                 conf_str = f", r1={p.r1:.2f} ({p.confidence})" if p.r1 else ""
             print(f"  {buoy.station_id} ({buoy.name}): {n_partitions} partitions, combined {combined_str}{conf_str}")
 
+    # Load CDIP buoy data
+    print("\nFetching CDIP buoy spectral data (MEM analysis)...")
+    cdip_buoys = load_cdip_buoy_data()
+    print(f"Loaded {len(cdip_buoys)} CDIP buoys with spectral partitioning")
+
+    for buoy in cdip_buoys:
+        if buoy.error:
+            print(f"  CDIP {buoy.station_id} ({buoy.name}): Error - {buoy.error}")
+        else:
+            n_partitions = len(buoy.partitions)
+            combined_str = f"{buoy.combined_height_m:.2f}m" if buoy.combined_height_m else "--"
+            depth_str = f", depth={buoy.depth_m}m" if buoy.depth_m else ""
+            print(f"  CDIP {buoy.station_id} ({buoy.name}): {n_partitions} partitions, combined {combined_str}{depth_str}")
+
     # Create visualization
     print("\nGenerating interactive visualization...")
 
     # Single panel with dropdown to switch between meshes
-    fig = create_comparison_figure(meshes, SOCAL_SPOTS, buoys)
+    fig = create_comparison_figure(meshes, SOCAL_SPOTS, ndbc_buoys, cdip_buoys)
 
     # Save and open - full page layout
     output_path = project_root / "scripts" / "dev" / "spot_explorer.html"
