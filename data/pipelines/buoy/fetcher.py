@@ -943,13 +943,14 @@ class CDIPBuoyFetcher:
         """Convert 9-band data to partition format.
 
         Groups bands by wave type and calculates combined Hs for each group.
+        Also estimates directional confidence (r1) from directional spread within bands.
         Returns partitions sorted by energy (descending).
 
         Args:
             bands: List of band dicts from _fetch_9band_data()
 
         Returns:
-            List of partition dicts with height_m, period_s, direction_deg, type, energy_pct
+            List of partition dicts with height_m, period_s, direction_deg, type, energy_pct, r1, confidence
         """
         if not bands:
             return []
@@ -977,14 +978,27 @@ class CDIPBuoyFetcher:
             # Hs = 4 * sqrt(m0), where m0 is the zeroth moment (energy)
             hs = 4 * (group_energy ** 0.5)
 
-            # Energy-weighted average direction
-            dir_sum = 0
-            dir_weight = 0
+            # Collect directions and energies for r1 calculation
+            directions = []
+            energies = []
             for b in group_bands:
-                if b.get("direction_deg") is not None:
-                    dir_sum += b["direction_deg"] * b.get("energy_m2", 0)
-                    dir_weight += b.get("energy_m2", 0)
-            mean_dir = dir_sum / dir_weight if dir_weight > 0 else None
+                if b.get("direction_deg") is not None and b.get("energy_m2", 0) > 0:
+                    directions.append(b["direction_deg"])
+                    energies.append(b["energy_m2"])
+
+            # Energy-weighted average direction using circular mean
+            mean_dir = None
+            r1 = None
+            confidence = None
+            if directions and energies:
+                mean_dir, r1 = self._circular_mean_and_r1(directions, energies)
+                # Classify confidence based on r1
+                if r1 > 0.7:
+                    confidence = "HIGH"
+                elif r1 > 0.4:
+                    confidence = "MED"
+                else:
+                    confidence = "LOW"
 
             # Use the dominant band's period (highest energy in group)
             dominant_band = max(group_bands, key=lambda b: b.get("energy_m2", 0))
@@ -992,7 +1006,7 @@ class CDIPBuoyFetcher:
 
             energy_pct = 100 * group_energy / total_energy
 
-            partitions.append({
+            partition = {
                 "partition_id": 0,  # Will be renumbered
                 "height_m": round(hs, 2),
                 "height_ft": round(hs * 3.28084, 1),
@@ -1000,7 +1014,13 @@ class CDIPBuoyFetcher:
                 "direction_deg": round(mean_dir, 0) if mean_dir is not None else None,
                 "type": wave_type,
                 "energy_pct": round(energy_pct, 0),
-            })
+            }
+
+            if r1 is not None:
+                partition["r1"] = round(r1, 2)
+                partition["confidence"] = confidence
+
+            partitions.append(partition)
 
         # Sort by energy percentage descending and renumber
         partitions.sort(key=lambda p: p.get("energy_pct", 0), reverse=True)
@@ -1008,6 +1028,54 @@ class CDIPBuoyFetcher:
             p["partition_id"] = i + 1
 
         return partitions
+
+    def _circular_mean_and_r1(self, directions: List[float], weights: List[float]) -> tuple:
+        """Calculate energy-weighted circular mean direction and r1 (directional concentration).
+
+        Uses circular statistics to properly average directions (handling 0/360 wraparound)
+        and compute r1, which measures how concentrated the directions are:
+        - r1 = 1.0: All energy from single direction
+        - r1 = 0.0: Energy uniformly spread across all directions
+
+        Args:
+            directions: List of directions in degrees (0-360)
+            weights: List of energy weights for each direction
+
+        Returns:
+            Tuple of (mean_direction_deg, r1)
+        """
+        import math
+
+        if not directions or not weights:
+            return None, None
+
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            return None, None
+
+        # Convert to radians and compute weighted vector components
+        sin_sum = 0.0
+        cos_sum = 0.0
+        for d, w in zip(directions, weights):
+            rad = math.radians(d)
+            sin_sum += w * math.sin(rad)
+            cos_sum += w * math.cos(rad)
+
+        # Normalize by total weight
+        sin_mean = sin_sum / total_weight
+        cos_mean = cos_sum / total_weight
+
+        # Mean direction (circular mean)
+        mean_rad = math.atan2(sin_mean, cos_mean)
+        mean_deg = math.degrees(mean_rad)
+        if mean_deg < 0:
+            mean_deg += 360
+
+        # r1 = length of mean resultant vector
+        # This measures directional concentration (0 = spread, 1 = concentrated)
+        r1 = math.sqrt(sin_mean**2 + cos_mean**2)
+
+        return mean_deg, r1
 
     def _parse_float(self, value: Any) -> Optional[float]:
         """Safely parse a float value, handling missing/invalid data."""
@@ -1379,6 +1447,181 @@ class CDIPBuoyFetcher:
         except (KeyError, IndexError, TypeError) as e:
             logger.warning(f"Spectral partitioning failed: {e}")
             return []
+
+    async def fetch_spectral_r1(self, station_id: str) -> Optional[Dict]:
+        """Fetch r1 directional confidence from THREDDS spectral data.
+
+        CDIP provides first-order Fourier coefficients (a1, b1) per frequency band.
+        r1 = sqrt(a1² + b1²) measures directional concentration:
+        - r1 = 1.0: All energy from single direction (perfect swell)
+        - r1 = 0.0: Energy spread uniformly across all directions
+
+        Args:
+            station_id: CDIP station ID
+
+        Returns:
+            Dict with frequencies, r1 values, energy, and energy-weighted mean r1,
+            or None if data unavailable
+        """
+        if not NETCDF4_AVAILABLE or not NUMPY_AVAILABLE:
+            return None
+
+        try:
+            # Fix SSL certificate path before opening (spaces in path cause corruption)
+            from netCDF4 import rc_set
+            rc_set('HTTP.SSL.CAINFO', '/etc/ssl/cert.pem')
+
+            url = f"{self.thredds_url}/dodsC/cdip/realtime/{station_id}p1_rt.nc"
+            ds = NetCDFDataset(url)
+
+            result = {
+                "station_id": station_id,
+                "frequencies": [],
+                "r1_values": [],
+                "energy_density": [],
+                "bandwidth": [],
+                "mean_r1": None,  # Energy-weighted mean
+            }
+
+            # Get frequency bands
+            try:
+                freqs = ds.variables['waveFrequency'][:]
+                result["frequencies"] = [float(f) for f in freqs]
+            except (KeyError, IndexError):
+                ds.close()
+                return None
+
+            # Get a1 and b1 coefficients (latest time slice)
+            # CDIP uses 'waveA1Value' and 'waveB1Value' (not just 'waveA1')
+            try:
+                a1 = ds.variables['waveA1Value'][:]
+                b1 = ds.variables['waveB1Value'][:]
+
+                # Handle 2D arrays (time x frequency)
+                if len(a1.shape) > 1:
+                    a1 = a1[-1, :]  # Latest time
+                    b1 = b1[-1, :]
+
+                # Compute r1 = sqrt(a1² + b1²)
+                r1_values = np.sqrt(np.array(a1)**2 + np.array(b1)**2)
+                result["r1_values"] = [float(r) for r in r1_values]
+
+            except (KeyError, IndexError) as e:
+                logger.warning(f"Could not get a1/b1 for CDIP {station_id}: {e}")
+                ds.close()
+                return None
+
+            # Get energy density for weighting
+            try:
+                energy = ds.variables['waveEnergyDensity'][:]
+                if len(energy.shape) > 1:
+                    energy = energy[-1, :]
+                result["energy_density"] = [float(e) for e in energy]
+            except (KeyError, IndexError):
+                pass
+
+            # Get bandwidth for proper integration
+            try:
+                bandwidth = ds.variables['waveBandwidth'][:]
+                result["bandwidth"] = [float(b) for b in bandwidth]
+            except (KeyError, IndexError):
+                # Estimate from frequency spacing
+                if len(result["frequencies"]) > 1:
+                    result["bandwidth"] = list(np.gradient(result["frequencies"]))
+
+            # Calculate energy-weighted mean r1
+            if result["energy_density"] and result["r1_values"]:
+                energy = np.array(result["energy_density"])
+                r1 = np.array(result["r1_values"])
+                bw = np.array(result["bandwidth"]) if result["bandwidth"] else np.ones_like(energy)
+
+                # Weight by spectral energy (m0 contribution per band)
+                weights = energy * bw
+                total_weight = np.sum(weights)
+
+                if total_weight > 0:
+                    result["mean_r1"] = float(np.sum(r1 * weights) / total_weight)
+
+            ds.close()
+            return result
+
+        except Exception as e:
+            logger.warning(f"THREDDS r1 fetch failed for CDIP {station_id}: {e}")
+            return None
+
+    def compute_partition_r1(
+        self,
+        partitions: List[Dict],
+        spectral_r1: Dict,
+    ) -> List[Dict]:
+        """Add r1 confidence values to partitions based on spectral r1 data.
+
+        Maps frequency-resolved r1 to period-based partitions by finding
+        the frequency bands that correspond to each partition's period range.
+
+        Args:
+            partitions: List of partition dicts from 9-band data
+            spectral_r1: Dict from fetch_spectral_r1() with frequency-resolved r1
+
+        Returns:
+            Updated partitions list with r1 and confidence fields added
+        """
+        if not spectral_r1 or not NUMPY_AVAILABLE:
+            return partitions
+
+        freqs = np.array(spectral_r1.get("frequencies", []))
+        r1_values = np.array(spectral_r1.get("r1_values", []))
+        energy = np.array(spectral_r1.get("energy_density", []))
+        bandwidth = np.array(spectral_r1.get("bandwidth", []))
+
+        if len(freqs) == 0 or len(r1_values) == 0:
+            return partitions
+
+        # Convert frequencies to periods
+        periods = 1.0 / freqs
+
+        # Period ranges for each wave type (matching BAND_PERIODS grouping)
+        period_ranges = {
+            "long_period_swell": (16.0, 30.0),
+            "swell": (12.0, 16.0),
+            "short_swell": (8.0, 12.0),
+            "wind_waves": (2.0, 8.0),
+        }
+
+        for partition in partitions:
+            wave_type = partition.get("type", "unknown")
+            if wave_type not in period_ranges:
+                continue
+
+            min_period, max_period = period_ranges[wave_type]
+
+            # Find frequency bands in this period range
+            mask = (periods >= min_period) & (periods <= max_period)
+
+            if not np.any(mask):
+                continue
+
+            # Energy-weighted r1 for this partition
+            masked_energy = energy[mask] if len(energy) == len(freqs) else np.ones(np.sum(mask))
+            masked_bw = bandwidth[mask] if len(bandwidth) == len(freqs) else np.ones(np.sum(mask))
+            masked_r1 = r1_values[mask]
+
+            weights = masked_energy * masked_bw
+            total_weight = np.sum(weights)
+
+            if total_weight > 0:
+                mean_r1 = float(np.sum(masked_r1 * weights) / total_weight)
+                partition["r1"] = round(mean_r1, 2)
+
+                # Classify confidence (same thresholds as NDBC)
+                if mean_r1 > 0.7:
+                    partition["confidence"] = "HIGH"
+                elif mean_r1 > 0.4:
+                    partition["confidence"] = "MED"
+                else:
+                    partition["confidence"] = "LOW"
+
+        return partitions
 
     async def fetch_spectral_data(self, station_id: str) -> Dict:
         """Fetch full spectral data from CDIP

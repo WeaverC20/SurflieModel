@@ -264,6 +264,8 @@ class CDIPPartition:
     direction_deg: Optional[float] = None
     wave_type: Optional[str] = None
     energy_pct: Optional[float] = None
+    r1: Optional[float] = None  # Directional confidence (0-1) from THREDDS spectral
+    confidence: Optional[str] = None  # HIGH/MED/LOW based on r1
 
 
 @dataclass
@@ -310,7 +312,7 @@ class CDIPBuoyData:
 
         lines.append("")
         lines.append("<b>Partitions:</b>")
-        lines.append("<i>(CDIP MEM spectral analysis)</i>")
+        lines.append("<i>r1: directional confidence (HIGH=clean swell, LOW=mixed)</i>")
 
         if not self.partitions:
             lines.append("  No partition data available")
@@ -325,13 +327,28 @@ class CDIPBuoyData:
                 type_str = f"<span style='color: {type_color}'>{wave_type}</span>"
 
                 energy_str = f" [{p.energy_pct:.0f}%]" if p.energy_pct else ""
-                lines.append(f"  #{p.partition_id}: {p.height_m:.2f}m, {period_str}, {dir_str} ({type_str}){energy_str}")
+
+                # Show r1 confidence with color coding (same as NDBC)
+                if p.confidence == "HIGH":
+                    conf_str = f" <span style='color: #66ff66'>r1={p.r1:.2f} HIGH</span>"
+                elif p.confidence == "MED":
+                    conf_str = f" <span style='color: #ffff66'>r1={p.r1:.2f} MED</span>"
+                elif p.confidence == "LOW":
+                    conf_str = f" <span style='color: #ff6666'>r1={p.r1:.2f} LOW</span>"
+                else:
+                    conf_str = ""  # No r1 data available
+
+                lines.append(f"  #{p.partition_id}: {p.height_m:.2f}m, {period_str}, {dir_str} ({type_str}){energy_str}{conf_str}")
 
         return "<br>".join(lines)
 
 
 async def fetch_single_cdip_buoy(fetcher: CDIPBuoyFetcher, station_id: str, info: dict) -> CDIPBuoyData:
-    """Fetch partitioned wave data for a single CDIP buoy."""
+    """Fetch partitioned wave data for a single CDIP buoy.
+
+    r1 (directional confidence) is fetched from THREDDS spectral data (a1/b1 coefficients).
+    Falls back to 9-band derived r1 if THREDDS fails.
+    """
     buoy_data = CDIPBuoyData(
         station_id=station_id,
         name=info["name"],
@@ -343,7 +360,17 @@ async def fetch_single_cdip_buoy(fetcher: CDIPBuoyFetcher, station_id: str, info
     try:
         # Suppress libcurl verbose output during netCDF4 OpenDAP access
         with suppress_stderr():
-            result = await fetcher.fetch_partitioned_wave_data(station_id)
+            # Fetch partitioned data (9-band) and spectral r1 (THREDDS) concurrently
+            result, spectral_r1 = await asyncio.gather(
+                fetcher.fetch_partitioned_wave_data(station_id),
+                fetcher.fetch_spectral_r1(station_id),
+                return_exceptions=True,
+            )
+
+        # Handle partition fetch errors
+        if isinstance(result, Exception):
+            buoy_data.error = str(result)[:50]
+            return buoy_data
 
         if result.get("status") == "error" or result.get("error"):
             buoy_data.error = result.get("error", "Unknown error")[:50]
@@ -358,8 +385,14 @@ async def fetch_single_cdip_buoy(fetcher: CDIPBuoyFetcher, station_id: str, info
             buoy_data.combined_period_s = combined.get("peak_period_s")
             buoy_data.combined_direction_deg = combined.get("peak_direction_deg")
 
-        # Extract partitions
+        # Extract partitions from 9-band data
         partitions = result.get("partitions", [])
+
+        # If THREDDS spectral r1 fetch succeeded, use it for more accurate r1
+        # (overrides the 9-band derived r1 which tends to be too high)
+        if not isinstance(spectral_r1, Exception) and spectral_r1 is not None:
+            partitions = fetcher.compute_partition_r1(partitions, spectral_r1)
+
         for p in partitions:
             partition = CDIPPartition(
                 partition_id=p.get("partition_id", 0),
@@ -368,6 +401,8 @@ async def fetch_single_cdip_buoy(fetcher: CDIPBuoyFetcher, station_id: str, info
                 direction_deg=p.get("direction_deg"),
                 wave_type=p.get("type"),
                 energy_pct=p.get("energy_pct"),
+                r1=p.get("r1"),
+                confidence=p.get("confidence"),
             )
             buoy_data.partitions.append(partition)
 
@@ -1210,7 +1245,7 @@ def main():
             print(f"  {buoy.station_id} ({buoy.name}): {n_partitions} partitions, combined {combined_str}{conf_str}")
 
     # Load CDIP buoy data
-    print("\nFetching CDIP buoy spectral data (MEM analysis)...")
+    print("\nFetching CDIP buoy spectral data with r1 confidence...")
     cdip_buoys = load_cdip_buoy_data()
     print(f"Loaded {len(cdip_buoys)} CDIP buoys with spectral partitioning")
 
@@ -1220,8 +1255,12 @@ def main():
         else:
             n_partitions = len(buoy.partitions)
             combined_str = f"{buoy.combined_height_m:.2f}m" if buoy.combined_height_m else "--"
-            depth_str = f", depth={buoy.depth_m}m" if buoy.depth_m else ""
-            print(f"  CDIP {buoy.station_id} ({buoy.name}): {n_partitions} partitions, combined {combined_str}{depth_str}")
+            # Show r1 confidence of primary partition (like NDBC)
+            conf_str = ""
+            if buoy.partitions:
+                p = buoy.partitions[0]
+                conf_str = f", r1={p.r1:.2f} ({p.confidence})" if p.r1 else ""
+            print(f"  CDIP {buoy.station_id} ({buoy.name}): {n_partitions} partitions, combined {combined_str}{conf_str}")
 
     # Load WW3 boundary data
     print("\nFetching WW3 boundary data (partitioned swells)...")
