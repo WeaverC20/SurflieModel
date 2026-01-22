@@ -75,23 +75,26 @@ SOCAL_NDBC_BUOYS = {
 }
 
 # CDIP buoys for Southern California - higher quality directional spectra
-# These use Maximum Entropy Method (MEM) for 2D spectral estimation
+# NOTE: Station numbers get reassigned! These are current as of Jan 2026.
+# Source: https://cdip.ucsd.edu/data_access/sccoos.cdip
 SOCAL_CDIP_BUOYS = {
-    "028": {"name": "Santa Monica Bay", "lat": 33.858, "lon": -118.633, "depth_m": 365},
-    "045": {"name": "Oceanside Offshore", "lat": 33.178, "lon": -117.472, "depth_m": 215},
-    "067": {"name": "San Diego", "lat": 32.570, "lon": -117.169, "depth_m": 27},
-    "071": {"name": "Harvest", "lat": 34.451, "lon": -120.779, "depth_m": 549},
-    "093": {"name": "Point Loma South", "lat": 32.530, "lon": -117.431, "depth_m": 305},
-    "094": {"name": "Oceanside Harbor", "lat": 33.216, "lon": -117.435, "depth_m": 183},
-    "096": {"name": "Goleta Point", "lat": 34.430, "lon": -119.872, "depth_m": 549},
-    "100": {"name": "Torrey Pines Outer", "lat": 32.933, "lon": -117.391, "depth_m": 549},
-    "111": {"name": "San Pedro Basin", "lat": 33.616, "lon": -118.316, "depth_m": 100},
-    "168": {"name": "Rincon", "lat": 34.378, "lon": -119.458, "depth_m": 227},
-    "191": {"name": "Huntington Beach", "lat": 33.632, "lon": -118.055, "depth_m": 21},
-    "192": {"name": "San Nicholas Island", "lat": 33.219, "lon": -119.456, "depth_m": 295},
-    "200": {"name": "Anacapa Passage", "lat": 34.055, "lon": -119.360, "depth_m": 265},
-    "203": {"name": "Point Mugu", "lat": 34.037, "lon": -119.241, "depth_m": 183},
-    "214": {"name": "Santa Cruz Basin", "lat": 33.769, "lon": -119.565, "depth_m": 499},
+    # San Diego region
+    "191": {"name": "Point Loma South", "lat": 32.518, "lon": -117.425, "depth_m": 1050},
+    "220": {"name": "Mission Bay West", "lat": 32.749, "lon": -117.499, "depth_m": 563},
+    "100": {"name": "Torrey Pines Outer", "lat": 32.930, "lon": -117.392, "depth_m": 572},
+    # North San Diego / Camp Pendleton
+    "045": {"name": "Oceanside Offshore", "lat": 33.181, "lon": -117.475, "depth_m": 223},
+    "271": {"name": "Green Beach Offshore", "lat": 33.336, "lon": -117.659, "depth_m": 303},
+    # Channel Islands / Offshore
+    "067": {"name": "San Nicolas Island", "lat": 33.226, "lon": -119.892, "depth_m": 315},
+    "203": {"name": "Santa Cruz Basin", "lat": 33.769, "lon": -119.563, "depth_m": 1890},
+    # LA Basin
+    "213": {"name": "San Pedro South", "lat": 33.578, "lon": -118.182, "depth_m": 66},
+    "092": {"name": "San Pedro", "lat": 33.618, "lon": -118.317, "depth_m": 477},
+    "028": {"name": "Santa Monica Bay", "lat": 33.860, "lon": -118.641, "depth_m": 387},
+    # Santa Barbara Channel
+    "071": {"name": "Harvest", "lat": 34.452, "lon": -120.780, "depth_m": 550},
+    "222": {"name": "Santa Lucia Escarpment", "lat": 34.774, "lon": -121.491, "depth_m": 650},
 }
 
 
