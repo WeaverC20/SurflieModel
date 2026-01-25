@@ -1,0 +1,33 @@
+{
+  "region_name": "socal",
+  "utm_zone": 11,
+  "utm_hemisphere": "N",
+  "config": {
+    "offshore_distance_m": 2500.0,
+    "onshore_distance_m": 50.0,
+    "min_resolution_m": 20.0,
+    "max_resolution_m": 300.0,
+    "coastline_sample_res_m": 50.0,
+    "max_land_elevation_m": 5.0,
+    "coastline_density_bias": 2.5
+  },
+  "lon_range": [
+    -121.0,
+    -117.0
+  ],
+  "lat_range": [
+    32.0,
+    35.0
+  ],
+  "n_points": 2968331,
+  "n_coastline_segments": 2931,
+  "stats": {
+    "n_points": 2968331,
+    "n_ocean": 2811785,
+    "n_land": 156546,
+    "depth_min": 3.999999989900971e-06,
+    "depth_max": 797.9102783203125,
+    "land_min": -0.0,
+    "land_max": 5.0
+  }
+}
