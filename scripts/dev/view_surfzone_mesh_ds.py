@@ -13,6 +13,8 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
+import io
+import base64
 
 import numpy as np
 import pandas as pd
@@ -20,6 +22,8 @@ import holoviews as hv
 from holoviews.operation.datashader import datashade, spread
 import datashader as ds
 import panel as pn
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 hv.extension('bokeh')
 pn.extension()
@@ -42,26 +46,33 @@ def load_mesh(region_name: str):
     return SurfZoneMesh.load(mesh_dir)
 
 
-def create_colorbar(cmap, vmin, vmax, title, width=80, height=300):
-    """Create a vertical colorbar using HoloViews."""
-    gradient = np.linspace(vmax, vmin, 100).reshape(-1, 1)
+def create_matplotlib_colorbar(vmin, vmax, label, cmap_colors, height=400):
+    """Create a colorbar image using matplotlib."""
+    fig, ax = plt.subplots(figsize=(1.2, height/100), dpi=100)
 
-    img = hv.Image(
-        gradient,
-        bounds=(0, vmin, 1, vmax),
-        kdims=['x', 'y'],
-    ).opts(
-        cmap=cmap,
-        xaxis=None,
-        yaxis='right',
-        ylabel=title,
-        width=width,
-        height=height,
-        toolbar=None,
-        default_tools=[],
+    # Create custom colormap
+    cmap = mcolors.LinearSegmentedColormap.from_list('custom', cmap_colors, N=256)
+
+    # Create colorbar
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    cb = plt.colorbar(
+        plt.cm.ScalarMappable(norm=norm, cmap=cmap),
+        cax=ax,
+        orientation='vertical'
     )
+    cb.set_label(label, fontsize=10)
+    cb.ax.tick_params(labelsize=8)
 
-    return img
+    # Save to bytes
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=100,
+                facecolor='white', edgecolor='none')
+    plt.close(fig)
+    buf.seek(0)
+
+    # Convert to base64 for Panel
+    img_data = base64.b64encode(buf.read()).decode('utf-8')
+    return f'<img src="data:image/png;base64,{img_data}" />'
 
 
 def view_mesh(
@@ -103,15 +114,7 @@ def view_mesh(
     print(f"  Ocean points: {n_ocean:,}")
     print(f"  Land points: {n_land:,}")
 
-    # Get actual depth range for colorbar
-    depths = -elevation[ocean_mask]
-    actual_depth_max = min(depths.max(), depth_max)
-
-    # Get actual land range
-    heights = elevation[land_mask]
-    actual_land_max = min(heights.max(), land_max) if len(heights) > 0 else land_max
-
-    # Create DataFrames for ocean and land
+    # Create DataFrames
     ocean_df = pd.DataFrame({
         'x': x[ocean_mask],
         'y': y[ocean_mask],
@@ -128,11 +131,11 @@ def view_mesh(
     ocean_points = hv.Points(ocean_df, kdims=['x', 'y'], vdims=['depth'])
     land_points = hv.Points(land_df, kdims=['x', 'y'], vdims=['height'])
 
-    # Custom colormaps
+    # Colormaps
     ocean_cmap = ['#e0f7ff', '#b3ecff', '#80dfff', '#4dd2ff', '#1ac6ff', '#00b3e6', '#0099cc', '#007399', '#004d66']
     land_cmap = ['#f5f5dc', '#e6daa6', '#c4b454', '#a89932', '#8b7d32', '#6b5b2a', '#4a3f1d', '#2d2612', '#1a1609']
 
-    # Create datashaded plots with spread for larger points
+    # Create datashaded plots
     ocean_shaded = spread(
         datashade(
             ocean_points,
@@ -140,7 +143,7 @@ def view_mesh(
             cmap=ocean_cmap,
             cnorm='linear',
         ),
-        px=3,  # Fixed pixel spread
+        px=3,
     )
 
     land_shaded = spread(
@@ -150,11 +153,11 @@ def view_mesh(
             cmap=land_cmap,
             cnorm='linear',
         ),
-        px=3,  # Fixed pixel spread
+        px=3,
     )
 
-    # Combine ocean and land - use fixed size with aspect='equal'
-    combined = (ocean_shaded * land_shaded).opts(
+    # Combine plots
+    plot = (ocean_shaded * land_shaded).opts(
         width=1400,
         height=900,
         xlabel=x_label,
@@ -162,39 +165,32 @@ def view_mesh(
         tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
         active_tools=['wheel_zoom', 'pan'],
         bgcolor='#e8e8e8',
-        aspect='equal',  # This ensures top-down orthographic view
+        aspect='equal',
     )
 
-    # Create colorbars
-    ocean_colorbar = create_colorbar(
-        ocean_cmap, 0, actual_depth_max,
-        f'Depth (m)', width=60, height=400
+    # Create matplotlib colorbars as images
+    ocean_colorbar_html = create_matplotlib_colorbar(
+        0, depth_max, 'Ocean Depth (m)', ocean_cmap, height=300
+    )
+    land_colorbar_html = create_matplotlib_colorbar(
+        0, land_max, 'Land Elevation (m)', land_cmap, height=150
     )
 
-    land_colorbar = create_colorbar(
-        land_cmap, 0, actual_land_max,
-        f'Land (m)', width=60, height=200
-    )
-
-    # Create layout with colorbars on the right
+    # Layout with colorbars
     colorbar_col = pn.Column(
-        pn.pane.Markdown("### Ocean Depth"),
-        pn.pane.HoloViews(ocean_colorbar, sizing_mode='fixed', width=100, height=420),
+        pn.pane.HTML(ocean_colorbar_html, width=120, height=350),
         pn.Spacer(height=20),
-        pn.pane.Markdown("### Land Elevation"),
-        pn.pane.HoloViews(land_colorbar, sizing_mode='fixed', width=100, height=220),
+        pn.pane.HTML(land_colorbar_html, width=120, height=200),
         width=140,
     )
 
-    # Title
     title = pn.pane.Markdown(
         f"# Surf Zone Mesh: {region_name.upper()} ({n_points:,} points)",
         sizing_mode='stretch_width',
     )
 
-    # Main layout
     main_row = pn.Row(
-        pn.pane.HoloViews(combined, sizing_mode='fixed'),
+        pn.pane.HoloViews(plot, sizing_mode='fixed'),
         colorbar_col,
     )
 
