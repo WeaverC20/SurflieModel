@@ -9,6 +9,7 @@
     "max_resolution_m": 300.0,
     "coastline_sample_res_m": 50.0,
     "max_land_elevation_m": 5.0,
+    "min_coastline_length_m": 500.0,
     "coastline_density_bias": 2.5
   },
   "lon_range": [
@@ -19,15 +20,15 @@
     32.0,
     35.0
   ],
-  "n_points": 1624643,
-  "n_coastline_segments": 2119,
+  "n_points": 321368,
+  "n_coastline_segments": 118,
   "stats": {
-    "n_points": 1624643,
-    "n_ocean": 1347063,
-    "n_land": 277580,
-    "depth_min": 7.171787577871236e-13,
-    "depth_max": 828.55517578125,
+    "n_points": 321368,
+    "n_ocean": 127690,
+    "n_land": 193678,
+    "depth_min": 2.9053364158926342e-09,
+    "depth_max": 485.8097839355469,
     "land_min": 0.0,
-    "land_max": 5.0
+    "land_max": 4.999567985534668
   }
 }

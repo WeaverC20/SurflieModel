@@ -45,6 +45,9 @@ class SurfZoneMeshConfig:
     # Land filtering
     max_land_elevation_m: float = 5.0     # Exclude land points above this elevation
 
+    # Coastline filtering
+    min_coastline_length_m: float = 500.0  # Minimum coastline segment length (filters small features)
+
     # Point density bias (higher = more points near coastline)
     # 1.0 = linear, 2.0 = quadratic, 3.0 = cubic bias towards coast
     coastline_density_bias: float = 2.5
@@ -58,13 +61,21 @@ class SurfZoneMeshConfig:
             'max_resolution_m': self.max_resolution_m,
             'coastline_sample_res_m': self.coastline_sample_res_m,
             'max_land_elevation_m': self.max_land_elevation_m,
+            'min_coastline_length_m': self.min_coastline_length_m,
             'coastline_density_bias': self.coastline_density_bias,
         }
 
     @classmethod
     def from_dict(cls, d: Dict) -> 'SurfZoneMeshConfig':
-        """Create from dictionary."""
-        return cls(**d)
+        """Create from dictionary (with backwards compatibility)."""
+        # Filter to only known fields for backwards compatibility
+        known_fields = {
+            'offshore_distance_m', 'onshore_distance_m', 'min_resolution_m',
+            'max_resolution_m', 'coastline_sample_res_m', 'max_land_elevation_m',
+            'min_coastline_length_m', 'coastline_density_bias'
+        }
+        filtered = {k: v for k, v in d.items() if k in known_fields}
+        return cls(**filtered)
 
 
 class SurfZoneMesh:
@@ -273,7 +284,8 @@ class SurfZoneMesh:
         print(f"\n  Step 4: Generating mesh points along offset curves...")
         all_x, all_y = self._generate_offset_curve_points(
             coastlines, offshore_distances, onshore_distances,
-            cfg.min_resolution_m, cfg.max_resolution_m, cfg.offshore_distance_m
+            cfg.min_resolution_m, cfg.max_resolution_m, cfg.offshore_distance_m,
+            sample_x, sample_y, elev_grid
         )
 
         print(f"    Total mesh points: {len(all_x):,}")
@@ -347,35 +359,58 @@ class SurfZoneMesh:
         elevation: np.ndarray,
     ) -> List[np.ndarray]:
         """
-        Extract coastline as contours at elevation = 0.
+        Extract coastline as contours at the land/water boundary.
 
-        Uses matplotlib's contour algorithm (marching squares).
+        Uses matplotlib's contour algorithm (marching squares) on a BINARY land mask.
+        This prevents false coastlines at data void boundaries (NaN regions).
+
         Returns list of (N, 2) arrays, each representing a coastline segment.
         """
         import matplotlib.pyplot as plt
+        from scipy import ndimage
 
-        # Replace NaN with a value that won't create false contours
-        elev_filled = np.where(np.isnan(elevation), 1000, elevation)
+        # Create binary land mask: 1 = land (elev >= 0), 0 = water OR no data
+        # By treating NaN as water, we avoid creating false coastlines at data voids
+        valid_data = ~np.isnan(elevation)
+        land_mask = np.where(valid_data, elevation >= 0, False)
 
-        # Use matplotlib's contour to extract the 0-level contour
+        # Apply morphological closing to remove thin parallel features (sandbars, tidal zones)
+        # Structure size of 3 at 50m resolution = 150m
+        structure_size = 3
+        structure = np.ones((structure_size, structure_size))
+        land_mask = ndimage.binary_closing(land_mask, structure=structure)
+        land_mask = land_mask.astype(float)
+
+        # Use matplotlib's contour to extract the 0.5-level contour of the binary mask
+        # This finds the boundary between land (1) and water (0)
         fig, ax = plt.subplots()
-        cs = ax.contour(x, y, elev_filled, levels=[0])
+        cs = ax.contour(x, y, land_mask, levels=[0.5])
         plt.close(fig)
 
         # Extract contour paths (compatible with newer matplotlib versions)
-        coastlines = []
-        # allsegs[level_index] contains list of (N, 2) arrays for that level
+        raw_coastlines = []
         if hasattr(cs, 'allsegs') and len(cs.allsegs) > 0:
-            for segment in cs.allsegs[0]:  # Level 0 (our only level)
+            for segment in cs.allsegs[0]:
                 if len(segment) >= 2:
-                    coastlines.append(segment.copy())
+                    raw_coastlines.append(segment.copy())
         else:
             # Fallback for older matplotlib
             for collection in cs.collections:
                 for path in collection.get_paths():
                     vertices = path.vertices
                     if len(vertices) >= 2:
-                        coastlines.append(vertices.copy())
+                        raw_coastlines.append(vertices.copy())
+
+        # Filter out short segments (lagoons, harbors, small islands)
+        min_segment_length = self.config.min_coastline_length_m
+        coastlines = []
+        for segment in raw_coastlines:
+            if self._polyline_length(segment) >= min_segment_length:
+                coastlines.append(segment)
+
+        n_filtered = len(raw_coastlines) - len(coastlines)
+        if n_filtered > 0:
+            print(f"    Filtered {n_filtered} short coastline segments (<{min_segment_length/1000:.1f}km)")
 
         return coastlines
 
@@ -434,83 +469,150 @@ class SurfZoneMesh:
         min_spacing: float,
         max_spacing: float,
         max_offshore: float,
+        x_grid: np.ndarray,
+        y_grid: np.ndarray,
+        elevation_grid: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate points along offset curves parallel to coastline.
+        Generate points along iso-distance contours from the coastline.
 
-        For each coastline segment:
-        1. Compute normals at each vertex
-        2. Offset the curve by each distance
-        3. Sample points along the offset curve with spacing proportional to distance
+        Uses a signed distance field approach:
+        1. Compute distance transform from land mask boundary
+        2. Extract iso-contours at each desired offset distance
+        3. Sample points along those unified contours
+
+        This treats all coastline segments as one unified feature, avoiding
+        overlapping offset curves from individual segments.
         """
+        from scipy import ndimage
+
         all_x = []
         all_y = []
 
-        for coast_idx, coastline in enumerate(coastlines):
-            if len(coastline) < 2:
+        # Get grid resolution (should be uniform)
+        dx = x_grid[1] - x_grid[0] if len(x_grid) > 1 else self.config.coastline_sample_res_m
+
+        # Create binary land mask (same as in _extract_coastline_contours)
+        valid_data = ~np.isnan(elevation_grid)
+        land_mask = np.where(valid_data, elevation_grid >= 0, False)
+
+        # Apply same morphological closing as coastline extraction
+        structure_size = 3
+        structure = np.ones((structure_size, structure_size))
+        land_mask = ndimage.binary_closing(land_mask, structure=structure)
+
+        # Compute distance transforms (in grid cells, then convert to meters)
+        # Distance from ocean cells to nearest land cell
+        dist_from_ocean = ndimage.distance_transform_edt(~land_mask) * dx
+        # Distance from land cells to nearest ocean cell
+        dist_from_land = ndimage.distance_transform_edt(land_mask) * dx
+
+        # Create signed distance field: positive = ocean (distance from shore into water)
+        #                               negative = land (distance from shore into land)
+        signed_distance = np.where(land_mask, -dist_from_land, dist_from_ocean)
+
+        print(f"    Distance field range: {signed_distance.min():.0f}m to {signed_distance.max():.0f}m")
+
+        # Add coastline points (distance = 0) - sample from extracted coastlines
+        for coastline in coastlines:
+            sampled = self._sample_polyline(coastline, min_spacing)
+            all_x.extend(sampled[:, 0])
+            all_y.extend(sampled[:, 1])
+        n_coastline = len(all_x)
+        print(f"    Coastline points: {n_coastline:,}")
+
+        # Extract iso-contours for offshore distances (positive = into ocean)
+        n_offshore = 0
+        for dist in offshore_distances:
+            if dist <= 0:
+                continue  # Skip 0, already added coastline points
+
+            # Spacing along curve proportional to distance from shore
+            t = dist / max_offshore if max_offshore > 0 else 0
+            along_spacing = min_spacing + t * (max_spacing - min_spacing)
+
+            # Extract iso-contour at this distance
+            contour_points = self._extract_iso_contour(
+                x_grid, y_grid, signed_distance, dist, along_spacing
+            )
+            if len(contour_points) > 0:
+                all_x.extend(contour_points[:, 0])
+                all_y.extend(contour_points[:, 1])
+                n_offshore += len(contour_points)
+
+        print(f"    Offshore points: {n_offshore:,} ({len(offshore_distances)-1} contours)")
+
+        # Extract iso-contours for onshore distances (negative = into land)
+        n_onshore = 0
+        for dist in onshore_distances:
+            if dist <= 0:
                 continue
 
-            # Compute normals at each point (perpendicular to local tangent)
-            normals = self._compute_polyline_normals(coastline)
+            along_spacing = min_spacing  # Keep dense onshore
 
-            # Generate points for offshore distances
-            for dist in offshore_distances:
-                # Spacing along curve proportional to distance from shore
-                if max_offshore > 0:
-                    t = dist / max_offshore  # 0 at coast, 1 at max offshore
-                else:
-                    t = 0
-                along_spacing = min_spacing + t * (max_spacing - min_spacing)
+            # Negative distance for land side
+            contour_points = self._extract_iso_contour(
+                x_grid, y_grid, signed_distance, -dist, along_spacing
+            )
+            if len(contour_points) > 0:
+                all_x.extend(contour_points[:, 0])
+                all_y.extend(contour_points[:, 1])
+                n_onshore += len(contour_points)
 
-                # Offset the coastline
-                offset_points = coastline + normals * dist
-
-                # Sample points along the offset curve
-                sampled = self._sample_polyline(offset_points, along_spacing)
-                all_x.extend(sampled[:, 0])
-                all_y.extend(sampled[:, 1])
-
-            # Generate points for onshore distances (negative offset)
-            for dist in onshore_distances[1:]:  # Skip 0 (already done with offshore)
-                along_spacing = min_spacing  # Keep dense onshore
-
-                # Offset the coastline in opposite direction
-                offset_points = coastline - normals * dist
-
-                sampled = self._sample_polyline(offset_points, along_spacing)
-                all_x.extend(sampled[:, 0])
-                all_y.extend(sampled[:, 1])
+        print(f"    Onshore points: {n_onshore:,} ({len(onshore_distances)-1} contours)")
 
         return np.array(all_x), np.array(all_y)
 
-    def _compute_polyline_normals(self, points: np.ndarray) -> np.ndarray:
+    def _extract_iso_contour(
+        self,
+        x_grid: np.ndarray,
+        y_grid: np.ndarray,
+        distance_field: np.ndarray,
+        target_distance: float,
+        spacing: float,
+    ) -> np.ndarray:
         """
-        Compute outward-pointing normals at each polyline vertex.
+        Extract points along an iso-distance contour.
 
-        Normal is perpendicular to local tangent, pointing "left" of the
-        curve direction. We assume coastline is traced with ocean on the left.
+        Args:
+            x_grid: 1D array of x coordinates
+            y_grid: 1D array of y coordinates
+            distance_field: 2D signed distance field
+            target_distance: Distance level to extract (positive=ocean, negative=land)
+            spacing: Point spacing along the contour
+
+        Returns:
+            (N, 2) array of sampled points along the iso-contour
         """
-        n = len(points)
-        normals = np.zeros_like(points)
+        import matplotlib.pyplot as plt
 
-        for i in range(n):
-            # Compute tangent using neighbors
-            if i == 0:
-                tangent = points[1] - points[0]
-            elif i == n - 1:
-                tangent = points[-1] - points[-2]
-            else:
-                tangent = points[i + 1] - points[i - 1]
+        # Use matplotlib contour to extract iso-line
+        fig, ax = plt.subplots()
+        cs = ax.contour(x_grid, y_grid, distance_field, levels=[target_distance])
+        plt.close(fig)
 
-            # Normalize tangent
-            length = np.sqrt(tangent[0]**2 + tangent[1]**2)
-            if length > 0:
-                tangent = tangent / length
+        all_points = []
 
-            # Normal is perpendicular (rotate 90 degrees left)
-            normals[i] = np.array([-tangent[1], tangent[0]])
+        # Extract contour paths (compatible with newer matplotlib versions)
+        if hasattr(cs, 'allsegs') and len(cs.allsegs) > 0:
+            segments = cs.allsegs[0]
+        else:
+            segments = []
+            for collection in cs.collections:
+                for path in collection.get_paths():
+                    if len(path.vertices) >= 2:
+                        segments.append(path.vertices.copy())
 
-        return normals
+        # Sample points along each segment
+        for segment in segments:
+            if len(segment) >= 2:
+                sampled = self._sample_polyline(segment, spacing)
+                all_points.append(sampled)
+
+        if not all_points:
+            return np.array([]).reshape(0, 2)
+
+        return np.vstack(all_points)
 
     def _sample_polyline(self, points: np.ndarray, spacing: float) -> np.ndarray:
         """

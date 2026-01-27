@@ -145,6 +145,17 @@ def view_mesh(
     # Land: yellow/gold for low -> orange/red for high
     land_cmap = ['#ffff00', '#ffdd00', '#ffbb00', '#ff9900', '#ff7700', '#ff5500', '#e64400', '#cc3300', '#aa2200']
 
+    # Prepare coastline segments for overlay
+    coastline_paths = []
+    if mesh.coastlines:
+        print(f"  Coastline segments: {len(mesh.coastlines)}")
+        for coastline in mesh.coastlines:
+            if use_lonlat:
+                cl_x, cl_y = mesh.utm_to_lon_lat(coastline[:, 0], coastline[:, 1])
+            else:
+                cl_x, cl_y = coastline[:, 0], coastline[:, 1]
+            coastline_paths.append(np.column_stack([cl_x, cl_y]))
+
     # Create datashaded plots
     ocean_shaded = spread(
         datashade(
@@ -166,17 +177,33 @@ def view_mesh(
         px=3,
     )
 
-    # Combine plots
-    plot = (ocean_shaded * land_shaded).opts(
-        width=1400,
-        height=900,
-        xlabel=x_label,
-        ylabel=y_label,
-        tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
-        active_tools=['wheel_zoom', 'pan'],
-        bgcolor='#1a1a2e',
-        aspect='equal',
-    )
+    # Create coastline overlay (magenta, stands out against cyan/yellow)
+    if coastline_paths:
+        coastline_overlay = hv.Path(coastline_paths).opts(
+            color='#ff00ff',  # Magenta
+            line_width=2,
+        )
+        plot = (ocean_shaded * land_shaded * coastline_overlay).opts(
+            width=1400,
+            height=900,
+            xlabel=x_label,
+            ylabel=y_label,
+            tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
+            active_tools=['wheel_zoom', 'pan'],
+            bgcolor='#1a1a2e',
+            aspect='equal',
+        )
+    else:
+        plot = (ocean_shaded * land_shaded).opts(
+            width=1400,
+            height=900,
+            xlabel=x_label,
+            ylabel=y_label,
+            tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
+            active_tools=['wheel_zoom', 'pan'],
+            bgcolor='#1a1a2e',
+            aspect='equal',
+        )
 
     # Create matplotlib colorbars as images
     ocean_colorbar_html = create_matplotlib_colorbar(
