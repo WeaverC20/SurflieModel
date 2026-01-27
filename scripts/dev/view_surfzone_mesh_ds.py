@@ -63,10 +63,18 @@ def create_matplotlib_colorbar(vmin, vmax, label, cmap_colors, height=400):
     cb.set_label(label, fontsize=10)
     cb.ax.tick_params(labelsize=8)
 
+    # Style for dark theme
+    ax.tick_params(colors='white')
+    cb.ax.yaxis.set_tick_params(color='white')
+    cb.outline.set_edgecolor('white')
+    cb.ax.yaxis.label.set_color('white')
+    for label in cb.ax.get_yticklabels():
+        label.set_color('white')
+
     # Save to bytes
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100,
-                facecolor='white', edgecolor='none')
+                facecolor='#1a1a2e', edgecolor='none')
     plt.close(fig)
     buf.seek(0)
 
@@ -131,9 +139,11 @@ def view_mesh(
     ocean_points = hv.Points(ocean_df, kdims=['x', 'y'], vdims=['depth'])
     land_points = hv.Points(land_df, kdims=['x', 'y'], vdims=['height'])
 
-    # Colormaps
-    ocean_cmap = ['#e0f7ff', '#b3ecff', '#80dfff', '#4dd2ff', '#1ac6ff', '#00b3e6', '#0099cc', '#007399', '#004d66']
-    land_cmap = ['#f5f5dc', '#e6daa6', '#c4b454', '#a89932', '#8b7d32', '#6b5b2a', '#4a3f1d', '#2d2612', '#1a1609']
+    # Colormaps - vibrant colors that show well on dark background
+    # Ocean: cyan/teal for shallow -> deep blue for deep
+    ocean_cmap = ['#00ffff', '#00e5e5', '#00cccc', '#00b3b3', '#0099cc', '#0080b3', '#006699', '#004d80', '#003366']
+    # Land: yellow/gold for low -> orange/red for high
+    land_cmap = ['#ffff00', '#ffdd00', '#ffbb00', '#ff9900', '#ff7700', '#ff5500', '#e64400', '#cc3300', '#aa2200']
 
     # Create datashaded plots
     ocean_shaded = spread(
@@ -164,7 +174,7 @@ def view_mesh(
         ylabel=y_label,
         tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
         active_tools=['wheel_zoom', 'pan'],
-        bgcolor='#e8e8e8',
+        bgcolor='#1a1a2e',
         aspect='equal',
     )
 

@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from data.regions.region import Region
     from data.bathymetry.usace_lidar import USACELidar
     from data.bathymetry.ncei_crm import NCECRM
+    from data.bathymetry.noaa_topobathy import NOAATopobathy
+    from typing import Union
+    BathymetrySource = Union[USACELidar, NOAATopobathy]
 
 
 @dataclass
@@ -140,7 +143,7 @@ class SurfZoneMesh:
     def from_region(
         cls,
         region: 'Region',
-        lidar: 'USACELidar',
+        bathymetry: 'BathymetrySource',
         config: Optional[SurfZoneMeshConfig] = None,
         utm_zone: Optional[int] = None,
         fallback_bathy: Optional['NCECRM'] = None,
@@ -150,18 +153,19 @@ class SurfZoneMesh:
 
         Args:
             region: Region definition
-            lidar: USACE Lidar data source (primary, high resolution)
+            bathymetry: Primary bathymetry data source (USACELidar or NOAATopobathy)
+                       Must implement find_tiles() and sample_points()
             config: Mesh configuration
             utm_zone: UTM zone (auto-detected if None)
             fallback_bathy: Optional fallback bathymetry source (e.g., NCEI CRM)
-                           Used for points without Lidar coverage
+                           Used for points without primary coverage
 
         Algorithm:
         1. Sample elevation on regular grid
         2. Extract coastline using contour at elevation = 0
         3. Generate offset curves at log-spaced distances
         4. Sample points along each offset curve
-        5. Sample elevation at all points (Lidar primary, fallback for gaps)
+        5. Sample elevation at all points (primary source, fallback for gaps)
         """
         config = config or SurfZoneMeshConfig()
 
@@ -182,13 +186,13 @@ class SurfZoneMesh:
         mesh.lon_range = region.lon_range
         mesh.lat_range = region.lat_range
 
-        mesh._build_mesh(region, lidar, fallback_bathy)
+        mesh._build_mesh(region, bathymetry, fallback_bathy)
         return mesh
 
     def _build_mesh(
         self,
         region: 'Region',
-        lidar: 'USACELidar',
+        bathymetry: 'BathymetrySource',
         fallback_bathy: Optional['NCECRM'] = None,
     ) -> None:
         """Build the mesh using contour extraction and offset curves."""
@@ -199,26 +203,27 @@ class SurfZoneMesh:
         print(f"  Max land elevation: {cfg.max_land_elevation_m}m")
         print(f"  Coastline density bias: {cfg.coastline_density_bias}")
         if fallback_bathy:
-            print(f"  Fallback bathymetry: {fallback_bathy.filepath.name}")
+            print(f"  Fallback bathymetry: {getattr(fallback_bathy, 'filepath', fallback_bathy)}")
 
-        # Step 1: Find Lidar coverage
-        tiles = lidar.find_tiles(region.lon_range, region.lat_range)
+        # Step 1: Check coverage
+        tiles = bathymetry.find_tiles(region.lon_range, region.lat_range)
         if not tiles:
-            raise ValueError(f"No Lidar tiles found for region {region.name}")
+            raise ValueError(f"No bathymetry data found for region {region.name}")
 
-        lidar_lon_min = max(min(t.lon_min for t in tiles), region.lon_range[0])
-        lidar_lon_max = min(max(t.lon_max for t in tiles), region.lon_range[1])
-        lidar_lat_min = max(min(t.lat_min for t in tiles), region.lat_range[0])
-        lidar_lat_max = min(max(t.lat_max for t in tiles), region.lat_range[1])
+        # Use region bounds (bathymetry coverage may be larger)
+        bathy_lon_min = region.lon_range[0]
+        bathy_lon_max = region.lon_range[1]
+        bathy_lat_min = region.lat_range[0]
+        bathy_lat_max = region.lat_range[1]
 
         print(f"\n  Step 1: Sampling elevation grid...")
-        print(f"    Lidar coverage: Lon [{lidar_lon_min:.4f}, {lidar_lon_max:.4f}]")
-        print(f"                    Lat [{lidar_lat_min:.4f}, {lidar_lat_max:.4f}]")
+        print(f"    Region bounds: Lon [{bathy_lon_min:.4f}, {bathy_lon_max:.4f}]")
+        print(f"                   Lat [{bathy_lat_min:.4f}, {bathy_lat_max:.4f}]")
 
         # Convert to UTM
         corners_x, corners_y = self.lon_lat_to_utm(
-            np.array([lidar_lon_min, lidar_lon_max, lidar_lon_max, lidar_lon_min]),
-            np.array([lidar_lat_min, lidar_lat_min, lidar_lat_max, lidar_lat_max])
+            np.array([bathy_lon_min, bathy_lon_max, bathy_lon_max, bathy_lon_min]),
+            np.array([bathy_lat_min, bathy_lat_min, bathy_lat_max, bathy_lat_max])
         )
         x_min, x_max = corners_x.min(), corners_x.max()
         y_min, y_max = corners_y.min(), corners_y.max()
@@ -229,9 +234,11 @@ class SurfZoneMesh:
         X, Y = np.meshgrid(sample_x, sample_y)
 
         print(f"    Grid size: {len(sample_x)} x {len(sample_y)} = {X.size:,} points")
+        print(f"    (This step fetches elevation data remotely - may take several minutes)")
 
         lon_grid, lat_grid = self.utm_to_lon_lat(X, Y)
-        elev_grid = lidar.sample_points(lon_grid, lat_grid)
+        print(f"    Fetching elevation data...")
+        elev_grid = bathymetry.sample_points(lon_grid, lat_grid)
 
         valid_count = np.sum(~np.isnan(elev_grid))
         print(f"    Valid elevation samples: {valid_count:,} ({100*valid_count/elev_grid.size:.1f}%)")
@@ -273,13 +280,15 @@ class SurfZoneMesh:
 
         # Step 5: Sample elevation at mesh points
         print(f"\n  Step 5: Sampling elevation at mesh points...")
+        print(f"    (This step fetches elevation data remotely - may take several minutes)")
         all_lon, all_lat = self.utm_to_lon_lat(all_x, all_y)
 
-        # Primary source: Lidar
-        all_elev = lidar.sample_points(all_lon, all_lat)
-        lidar_valid = ~np.isnan(all_elev)
-        n_lidar = np.sum(lidar_valid)
-        print(f"    From Lidar: {n_lidar:,} points ({100*n_lidar/len(all_x):.1f}%)")
+        # Primary source: bathymetry
+        print(f"    Fetching elevation data for {len(all_x):,} mesh points...")
+        all_elev = bathymetry.sample_points(all_lon, all_lat)
+        primary_valid = ~np.isnan(all_elev)
+        n_primary = np.sum(primary_valid)
+        print(f"    From primary source: {n_primary:,} points ({100*n_primary/len(all_x):.1f}%)")
 
         # Fallback source: NCEI CRM (if provided)
         if fallback_bathy is not None:
