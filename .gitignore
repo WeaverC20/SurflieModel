@@ -68,12 +68,18 @@ data/grids/
 data/swan_runs/
 data/swan/runs/
 data/swan/analysis/plots/
+data/meshes/
 *.grd
 *.swn
 *.tpar
 *.sp2
 *.bot
 *.mat
+
+# Surfzone model
+data/surfzone/meshes/
+data/surfzone/runs/
+*.npz
 
 # Jupyter
 .ipynb_checkpoints/
