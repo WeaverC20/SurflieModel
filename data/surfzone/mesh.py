@@ -36,8 +36,9 @@ class SurfZoneMeshConfig:
     onshore_distance_m: float = 50.0      # How far onshore for tidal buffer (meters)
 
     # Resolution settings
-    min_resolution_m: float = 20.0        # Finest resolution at coastline
-    max_resolution_m: float = 300.0       # Coarsest resolution at max offshore distance
+    min_resolution_m: float = 5.0         # Finest resolution at coastline (meters)
+    max_resolution_m: float = 200.0       # Coarsest resolution at max offshore distance
+    n_uniform_layers: int = 10            # Number of layers at min_resolution before coarsening
 
     # Coastline detection
     coastline_sample_res_m: float = 50.0  # Resolution for initial elevation sampling
@@ -59,6 +60,7 @@ class SurfZoneMeshConfig:
             'onshore_distance_m': self.onshore_distance_m,
             'min_resolution_m': self.min_resolution_m,
             'max_resolution_m': self.max_resolution_m,
+            'n_uniform_layers': self.n_uniform_layers,
             'coastline_sample_res_m': self.coastline_sample_res_m,
             'max_land_elevation_m': self.max_land_elevation_m,
             'min_coastline_length_m': self.min_coastline_length_m,
@@ -71,8 +73,8 @@ class SurfZoneMeshConfig:
         # Filter to only known fields for backwards compatibility
         known_fields = {
             'offshore_distance_m', 'onshore_distance_m', 'min_resolution_m',
-            'max_resolution_m', 'coastline_sample_res_m', 'max_land_elevation_m',
-            'min_coastline_length_m', 'coastline_density_bias'
+            'max_resolution_m', 'n_uniform_layers', 'coastline_sample_res_m',
+            'max_land_elevation_m', 'min_coastline_length_m', 'coastline_density_bias'
         }
         filtered = {k: v for k, v in d.items() if k in known_fields}
         return cls(**filtered)
@@ -119,6 +121,9 @@ class SurfZoneMesh:
         # Interpolation (lazy loaded)
         self._triangulation: Optional[Delaunay] = None
         self._interpolator: Optional[LinearNDInterpolator] = None
+
+        # Spatial index for fast triangle lookup (built once, saved with mesh)
+        self._spatial_index: Optional[Dict[str, np.ndarray]] = None
 
         # Transformers (lazy loaded)
         self._transformer_to_utm = None
@@ -210,6 +215,7 @@ class SurfZoneMesh:
         cfg = self.config
         print(f"Building surf zone mesh for {region.display_name}...")
         print(f"  Min resolution: {cfg.min_resolution_m}m (at coast)")
+        print(f"  Uniform layers: {cfg.n_uniform_layers} (first {cfg.min_resolution_m * cfg.n_uniform_layers:.0f}m)")
         print(f"  Max resolution: {cfg.max_resolution_m}m (at {cfg.offshore_distance_m}m offshore)")
         print(f"  Max land elevation: {cfg.max_land_elevation_m}m")
         print(f"  Coastline density bias: {cfg.coastline_density_bias}")
@@ -265,19 +271,22 @@ class SurfZoneMesh:
         print(f"    Found {len(coastlines)} coastline segments")
         print(f"    Total coastline length: {total_coastline_length/1000:.1f} km")
 
-        # Step 3: Generate offset distances (biased towards coastline)
+        # Step 3: Generate offset distances (uniform near coast, then biased)
         print(f"\n  Step 3: Generating offset distances...")
         offshore_distances = self._generate_offset_distances(
             cfg.min_resolution_m, cfg.max_resolution_m, cfg.offshore_distance_m,
-            density_bias=cfg.coastline_density_bias
+            density_bias=cfg.coastline_density_bias,
+            n_uniform_layers=cfg.n_uniform_layers,
         )
-        # Onshore uses lower bias (more uniform) since it's a small area
+        # Onshore uses lower bias and fewer uniform layers since it's a small area
         onshore_distances = self._generate_offset_distances(
             cfg.min_resolution_m, cfg.min_resolution_m * 2, cfg.onshore_distance_m,
-            density_bias=1.5
+            density_bias=1.5,
+            n_uniform_layers=3,
         )
 
-        print(f"    Offshore: {len(offshore_distances)} layers from 0 to {offshore_distances[-1]:.0f}m")
+        uniform_zone = cfg.min_resolution_m * cfg.n_uniform_layers
+        print(f"    Offshore: {len(offshore_distances)} layers (uniform to {uniform_zone:.0f}m, then coarsening to {offshore_distances[-1]:.0f}m)")
         print(f"    Onshore: {len(onshore_distances)} layers from 0 to {onshore_distances[-1]:.0f}m")
 
         # Step 4: Generate points along offset curves
@@ -428,38 +437,55 @@ class SurfZoneMesh:
         max_spacing: float,
         max_distance: float,
         density_bias: float = 2.5,
+        n_uniform_layers: int = 10,
     ) -> np.ndarray:
         """
-        Generate offset distances with bias towards coastline.
+        Generate offset distances with uniform spacing near coast, then coarsening.
 
-        Uses a power function to concentrate more offset layers near the coast.
-        Higher density_bias = more layers near coastline, fewer far offshore.
+        First generates n_uniform_layers at min_spacing, then uses a power function
+        to concentrate more layers near that transition zone.
 
         Args:
             min_spacing: Minimum spacing between offsets (at coast)
             max_spacing: Maximum spacing between offsets (at max distance)
             max_distance: Maximum offset distance
-            density_bias: Power factor for density bias (1.0=linear, 2.0=quadratic, etc.)
+            density_bias: Power factor for density bias in coarsening zone
+            n_uniform_layers: Number of layers at uniform min_spacing before coarsening
+
+        Returns:
+            Array of offset distances from coastline
         """
-        # Estimate number of layers based on average spacing
+        distances = [0.0]
+
+        # Phase 1: Uniform spacing near coastline
+        uniform_zone_end = min_spacing * n_uniform_layers
+        for i in range(1, n_uniform_layers + 1):
+            d = min_spacing * i
+            if d <= max_distance:
+                distances.append(d)
+
+        if uniform_zone_end >= max_distance:
+            return np.array(distances)
+
+        # Phase 2: Biased spacing from uniform zone to max distance
+        remaining_distance = max_distance - uniform_zone_end
+
+        # Estimate number of coarsening layers
         avg_spacing = (min_spacing + max_spacing) / 2
-        n_layers = max(5, int(max_distance / avg_spacing))
+        n_coarse_layers = max(5, int(remaining_distance / avg_spacing))
 
         # Generate normalized positions [0, 1] with uniform spacing
-        t = np.linspace(0, 1, n_layers)
+        t = np.linspace(0, 1, n_coarse_layers + 1)[1:]  # Skip 0 (already have uniform_zone_end)
 
-        # Apply power function to concentrate values near 0 (coastline)
-        # t_biased will have more values near 0, fewer near 1
+        # Apply power function to concentrate values near 0 (transition zone)
         t_biased = t ** density_bias
 
-        # Scale to actual distances
-        distances = t_biased * max_distance
+        # Scale to remaining distance and add offset
+        coarse_distances = uniform_zone_end + t_biased * remaining_distance
 
-        # Ensure 0 is included
-        if distances[0] != 0:
-            distances = np.concatenate([[0], distances])
+        distances.extend(coarse_distances.tolist())
 
-        return distances
+        return np.array(distances)
 
     def _generate_offset_curve_points(
         self,
@@ -691,15 +717,125 @@ class SurfZoneMesh:
         return dz_dx, dz_dy
 
     # =========================================================================
+    # Spatial Index for Fast Triangle Lookup
+    # =========================================================================
+
+    def build_spatial_index(self, cell_size: float = 50.0) -> None:
+        """
+        Build a grid-based spatial index for fast triangle lookup.
+
+        This index is saved with the mesh and loaded on subsequent runs,
+        so it only needs to be built once per mesh.
+
+        Args:
+            cell_size: Size of grid cells in meters (default 50m)
+        """
+        import time
+        t0 = time.time()
+
+        if self._triangulation is None:
+            self._build_interpolator()
+
+        points_x = self.points_x
+        points_y = self.points_y
+        triangles = self._triangulation.simplices
+
+        # Compute bounding box with padding
+        x_min = points_x.min() - cell_size
+        x_max = points_x.max() + cell_size
+        y_min = points_y.min() - cell_size
+        y_max = points_y.max() + cell_size
+
+        n_cells_x = int(np.ceil((x_max - x_min) / cell_size))
+        n_cells_y = int(np.ceil((y_max - y_min) / cell_size))
+        n_cells = n_cells_x * n_cells_y
+        n_triangles = triangles.shape[0]
+
+        print(f"  Building spatial index: {n_cells_x}x{n_cells_y} = {n_cells:,} cells, cell_size={cell_size}m")
+
+        # Vectorized: get all triangle vertex coordinates
+        v0_x = points_x[triangles[:, 0]]
+        v0_y = points_y[triangles[:, 0]]
+        v1_x = points_x[triangles[:, 1]]
+        v1_y = points_y[triangles[:, 1]]
+        v2_x = points_x[triangles[:, 2]]
+        v2_y = points_y[triangles[:, 2]]
+
+        # Vectorized: compute bounding box for all triangles
+        tri_x_min = np.minimum(np.minimum(v0_x, v1_x), v2_x)
+        tri_x_max = np.maximum(np.maximum(v0_x, v1_x), v2_x)
+        tri_y_min = np.minimum(np.minimum(v0_y, v1_y), v2_y)
+        tri_y_max = np.maximum(np.maximum(v0_y, v1_y), v2_y)
+
+        # Vectorized: compute cell ranges for all triangles
+        cx_min = np.clip(((tri_x_min - x_min) / cell_size).astype(np.int32), 0, n_cells_x - 1)
+        cx_max = np.clip(((tri_x_max - x_min) / cell_size).astype(np.int32), 0, n_cells_x - 1)
+        cy_min = np.clip(((tri_y_min - y_min) / cell_size).astype(np.int32), 0, n_cells_y - 1)
+        cy_max = np.clip(((tri_y_max - y_min) / cell_size).astype(np.int32), 0, n_cells_y - 1)
+
+        # Count cells per triangle and total entries
+        cells_per_tri = (cx_max - cx_min + 1) * (cy_max - cy_min + 1)
+        total_entries = int(cells_per_tri.sum())
+
+        print(f"  Total cell entries: {total_entries:,} (avg {total_entries/n_triangles:.1f} per triangle)")
+
+        # Build the index using pure Python (simpler, still fast enough for one-time build)
+        cell_counts = np.zeros(n_cells, dtype=np.int32)
+
+        # First pass: count
+        for tri_idx in range(n_triangles):
+            for cy in range(cy_min[tri_idx], cy_max[tri_idx] + 1):
+                for cx in range(cx_min[tri_idx], cx_max[tri_idx] + 1):
+                    cell_idx = cy * n_cells_x + cx
+                    cell_counts[cell_idx] += 1
+
+        # Compute start indices
+        cell_starts = np.zeros(n_cells + 1, dtype=np.int32)
+        cell_starts[1:] = np.cumsum(cell_counts)
+
+        # Second pass: fill
+        grid_triangles = np.empty(total_entries, dtype=np.int32)
+        cell_fill = np.zeros(n_cells, dtype=np.int32)
+
+        for tri_idx in range(n_triangles):
+            for cy in range(cy_min[tri_idx], cy_max[tri_idx] + 1):
+                for cx in range(cx_min[tri_idx], cx_max[tri_idx] + 1):
+                    cell_idx = cy * n_cells_x + cx
+                    pos = cell_starts[cell_idx] + cell_fill[cell_idx]
+                    grid_triangles[pos] = tri_idx
+                    cell_fill[cell_idx] += 1
+
+        self._spatial_index = {
+            'grid_x_min': np.float64(x_min),
+            'grid_y_min': np.float64(y_min),
+            'grid_cell_size': np.float64(cell_size),
+            'grid_n_cells_x': np.int32(n_cells_x),
+            'grid_n_cells_y': np.int32(n_cells_y),
+            'grid_cell_starts': cell_starts.astype(np.int32),
+            'grid_cell_counts': cell_counts.astype(np.int32),
+            'grid_triangles': grid_triangles.astype(np.int32),
+        }
+
+        print(f"  Spatial index built in {time.time() - t0:.1f}s")
+
+    def has_spatial_index(self) -> bool:
+        """Check if spatial index has been built."""
+        return self._spatial_index is not None
+
+    # =========================================================================
     # Numba-Compatible Data Export
     # =========================================================================
 
     def get_numba_arrays(self) -> Dict[str, np.ndarray]:
-        """Get arrays formatted for Numba ray tracing."""
+        """
+        Get arrays formatted for Numba ray tracing.
+
+        Includes spatial index if available.
+        """
         if self._triangulation is None:
             self._build_interpolator()
 
-        return {
+        result = {
             'points_x': np.ascontiguousarray(self.points_x, dtype=np.float64),
             'points_y': np.ascontiguousarray(self.points_y, dtype=np.float64),
             'elevation': np.ascontiguousarray(self.elevation, dtype=np.float64),
@@ -707,14 +843,31 @@ class SurfZoneMesh:
             'triangles': np.ascontiguousarray(self._triangulation.simplices, dtype=np.int32),
         }
 
+        # Include spatial index if available
+        if self._spatial_index is not None:
+            result.update(self._spatial_index)
+
+        return result
+
     # =========================================================================
     # Save / Load
     # =========================================================================
 
-    def save(self, directory: Path) -> Path:
-        """Save mesh to directory."""
+    def save(self, directory: Path, build_spatial_index: bool = True) -> Path:
+        """
+        Save mesh to directory.
+
+        Args:
+            directory: Output directory
+            build_spatial_index: If True, build spatial index before saving
+        """
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
+
+        # Build spatial index if requested and not already built
+        if build_spatial_index and self._spatial_index is None:
+            print("\n  Step 7: Building spatial index for ray tracing...")
+            self.build_spatial_index()
 
         npz_path = directory / f"{self.region_name}_surfzone.npz"
         save_dict = {
@@ -727,6 +880,11 @@ class SurfZoneMesh:
         if self.coastlines:
             for i, coastline in enumerate(self.coastlines):
                 save_dict[f'coastline_{i}'] = coastline
+
+        # Save spatial index if available
+        if self._spatial_index is not None:
+            for key, value in self._spatial_index.items():
+                save_dict[f'spatial_{key}'] = value
 
         np.savez_compressed(npz_path, **save_dict)
         print(f"Saved: {npz_path}")
@@ -814,8 +972,25 @@ class SurfZoneMesh:
             mesh.coastlines.append(data[f'coastline_{i}'])
             i += 1
 
-        print(f"Loaded surf zone mesh: {region_name}")
-        print(f"  Points: {len(mesh.points_x):,}")
+        # Load spatial index if available
+        if 'spatial_grid_x_min' in data:
+            mesh._spatial_index = {
+                'grid_x_min': float(data['spatial_grid_x_min']),
+                'grid_y_min': float(data['spatial_grid_y_min']),
+                'grid_cell_size': float(data['spatial_grid_cell_size']),
+                'grid_n_cells_x': int(data['spatial_grid_n_cells_x']),
+                'grid_n_cells_y': int(data['spatial_grid_n_cells_y']),
+                'grid_cell_starts': data['spatial_grid_cell_starts'],
+                'grid_cell_counts': data['spatial_grid_cell_counts'],
+                'grid_triangles': data['spatial_grid_triangles'],
+            }
+            print(f"Loaded surf zone mesh: {region_name}")
+            print(f"  Points: {len(mesh.points_x):,}")
+            print(f"  Spatial index: loaded from disk")
+        else:
+            print(f"Loaded surf zone mesh: {region_name}")
+            print(f"  Points: {len(mesh.points_x):,}")
+            print(f"  Spatial index: not found (will build on first use)")
 
         return mesh
 
