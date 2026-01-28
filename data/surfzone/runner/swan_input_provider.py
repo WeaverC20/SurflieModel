@@ -262,9 +262,15 @@ class SwanInputProvider:
             for var_name, values in data.items():
                 key = f"{part_id}_{var_name}"
                 # SWAN output is (ny+1, nx+1), indexed as (lat, lon)
+                # Mask exception values (-99) as NaN to prevent interpolation
+                # from producing garbage when near land cells
+                values_masked = values.copy()
+                values_masked[values_masked == EXCEPTION_VALUE] = np.nan
+                values_masked[values_masked <= 0] = np.nan
+
                 interpolators[key] = RegularGridInterpolator(
                     (self.lats, self.lons),
-                    values,
+                    values_masked,
                     method='linear',
                     bounds_error=False,
                     fill_value=np.nan
@@ -277,17 +283,85 @@ class SwanInputProvider:
         if self._interpolators is None:
             self._interpolators = self._build_interpolators()
 
+    def _find_nearest_valid_partition_data(
+        self,
+        lon: float,
+        lat: float,
+        part_id: int,
+        max_search_radius: int = 50,
+    ) -> Optional[Dict[str, float]]:
+        """
+        Find nearest grid cell with valid partition data.
+
+        Searches in expanding radius around the target point until valid
+        partition data is found.
+
+        Args:
+            lon: Target longitude
+            lat: Target latitude
+            part_id: Partition ID to search for
+            max_search_radius: Maximum grid cells to search
+
+        Returns:
+            Dict with 'hs', 'tp', 'dir' if found, None otherwise
+        """
+        if self._partition_data is None or part_id not in self._partition_data:
+            return None
+
+        data = self._partition_data[part_id]
+        hs_grid = data['hs']
+        tp_grid = data['tp']
+        dir_grid = data['dir']
+
+        # Find nearest grid indices
+        i = np.argmin(np.abs(self.lons - lon))
+        j = np.argmin(np.abs(self.lats - lat))
+
+        ny, nx = hs_grid.shape
+
+        # Search in expanding radius
+        for r in range(0, max_search_radius + 1):
+            for di in range(-r, r + 1):
+                for dj in range(-r, r + 1):
+                    # Only check cells at this radius (skip inner cells already checked)
+                    if r > 0 and abs(di) < r and abs(dj) < r:
+                        continue
+
+                    ni, nj = i + di, j + dj
+                    if 0 <= ni < nx and 0 <= nj < ny:
+                        hs_val = hs_grid[nj, ni]
+                        tp_val = tp_grid[nj, ni]
+                        dir_val = dir_grid[nj, ni]
+
+                        # Check if valid
+                        if (not np.isnan(hs_val) and hs_val > 0 and
+                            hs_val != EXCEPTION_VALUE and
+                            not np.isnan(tp_val) and tp_val > 0):
+                            return {
+                                'hs': hs_val,
+                                'tp': tp_val,
+                                'dir': dir_val,
+                            }
+
+        return None
+
     def sample_at_points(
         self,
         lons: np.ndarray,
-        lats: np.ndarray
+        lats: np.ndarray,
+        use_nearest_fallback: bool = True,
     ) -> Dict[int, Dict[str, np.ndarray]]:
         """
         Sample all partition data at arbitrary lon/lat points.
 
+        Uses bilinear interpolation, with optional nearest-neighbor fallback
+        for points that fall on land or have no valid data.
+
         Args:
             lons: Longitude coordinates
             lats: Latitude coordinates
+            use_nearest_fallback: If True, use nearest valid point when
+                interpolation returns invalid data (default: True)
 
         Returns:
             Dict mapping partition_id to dict of {'hs': array, 'tp': array, 'dir': array}
@@ -306,6 +380,31 @@ class SwanInputProvider:
             hs = self._interpolators[f"{part_id}_hs"](points)
             tp = self._interpolators[f"{part_id}_tp"](points)
             direction = self._interpolators[f"{part_id}_dir"](points)
+
+            # Apply nearest-neighbor fallback for invalid points
+            if use_nearest_fallback:
+                invalid_mask = np.isnan(hs) | (hs <= 0) | np.isnan(tp) | (tp <= 0)
+                n_invalid = np.sum(invalid_mask)
+
+                if n_invalid > 0:
+                    invalid_indices = np.where(invalid_mask)[0]
+                    n_fixed = 0
+
+                    for idx in invalid_indices:
+                        nearest = self._find_nearest_valid_partition_data(
+                            lons[idx], lats[idx], part_id
+                        )
+                        if nearest is not None:
+                            hs[idx] = nearest['hs']
+                            tp[idx] = nearest['tp']
+                            direction[idx] = nearest['dir']
+                            n_fixed += 1
+
+                    if n_fixed > 0:
+                        logger.debug(
+                            f"Partition {part_id}: fixed {n_fixed}/{n_invalid} "
+                            f"invalid points with nearest-neighbor fallback"
+                        )
 
             results[part_id] = {
                 'hs': hs,

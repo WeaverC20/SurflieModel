@@ -7,7 +7,7 @@ breaking wave locations, heights, and types.
 
 Usage:
     python data/surfzone/run_surfzone.py --region socal
-    python data/surfzone/run_surfzone.py --region socal --swan-resolution coarse
+    python data/surfzone/run_surfzone.py --region socal --swan-resolution fine
     python data/surfzone/run_surfzone.py --region socal --dry-run
     python data/surfzone/run_surfzone.py --region socal --fast
 
@@ -148,7 +148,7 @@ class SurfzoneRunner:
     def __init__(
         self,
         region: str,
-        swan_resolution: str = "fine",
+        swan_resolution: str = "ultrafine",
         step_size: float = 10.0,
         max_steps: int = 1000,
         min_depth: float = 0.15,
@@ -195,7 +195,9 @@ class SurfzoneRunner:
         Generate boundary points at the offshore edge of the mesh.
 
         Finds mesh points that are approximately at the target distance from
-        the coastline, then downsamples to the desired spacing.
+        the coastline, then downsamples to the desired spacing. For coastal
+        sections where the mesh doesn't extend to the target distance, uses
+        the farthest available offshore points to ensure complete coverage.
 
         Args:
             spacing_m: Spacing between boundary points (m)
@@ -222,31 +224,73 @@ class SurfzoneRunner:
         mesh_points = np.column_stack([self.mesh.points_x, self.mesh.points_y])
 
         # Query distance to nearest coastline point for all mesh points
-        distances, _ = coast_tree.query(mesh_points)
+        distances, nearest_coast_idx = coast_tree.query(mesh_points)
+
+        # Also filter to water only (depth > 0)
+        water_mask = self.mesh.elevation < 0
 
         # Find points near the target offshore distance
         min_dist = target_offshore_m - tolerance_m
         max_dist = target_offshore_m + tolerance_m
         offshore_mask = (distances >= min_dist) & (distances <= max_dist)
-
-        # Also filter to water only (depth > 0)
-        water_mask = self.mesh.elevation < 0
         valid_mask = offshore_mask & water_mask
 
         candidate_x = self.mesh.points_x[valid_mask]
         candidate_y = self.mesh.points_y[valid_mask]
-        candidate_dist = distances[valid_mask]
 
         logger.info(f"Found {len(candidate_x)} candidate points at {min_dist:.0f}-{max_dist:.0f}m offshore")
 
-        if len(candidate_x) == 0:
-            # Fallback: use points at maximum distance from shore
-            logger.warning("No points at target distance, using farthest offshore points")
-            water_distances = distances[water_mask]
-            threshold = np.percentile(water_distances, 95)  # Top 5% farthest
-            far_mask = water_mask & (distances >= threshold)
-            candidate_x = self.mesh.points_x[far_mask]
-            candidate_y = self.mesh.points_y[far_mask]
+        # Check for gaps in coverage by dividing coast into segments
+        # and ensuring each segment has boundary points
+        y_min, y_max = self.mesh.points_y.min(), self.mesh.points_y.max()
+        segment_size = spacing_m * 2  # Check coverage at 2x boundary spacing
+        n_segments = int((y_max - y_min) / segment_size) + 1
+
+        # Track which segments have coverage
+        segment_has_coverage = np.zeros(n_segments, dtype=bool)
+        if len(candidate_y) > 0:
+            candidate_segments = ((candidate_y - y_min) / segment_size).astype(int)
+            candidate_segments = np.clip(candidate_segments, 0, n_segments - 1)
+            segment_has_coverage[np.unique(candidate_segments)] = True
+
+        # For segments without coverage, find the farthest offshore points
+        gap_segments = np.where(~segment_has_coverage)[0]
+        if len(gap_segments) > 0:
+            logger.info(f"Found {len(gap_segments)} coastal segments without boundary points at target distance")
+
+            # Collect candidates from gap segments
+            gap_x = []
+            gap_y = []
+
+            water_x = self.mesh.points_x[water_mask]
+            water_y = self.mesh.points_y[water_mask]
+            water_dist = distances[water_mask]
+
+            for seg_idx in gap_segments:
+                seg_y_min = y_min + seg_idx * segment_size
+                seg_y_max = seg_y_min + segment_size
+
+                # Find water points in this Y range
+                in_segment = (water_y >= seg_y_min) & (water_y < seg_y_max)
+                if not np.any(in_segment):
+                    continue
+
+                seg_x = water_x[in_segment]
+                seg_y_pts = water_y[in_segment]
+                seg_dist = water_dist[in_segment]
+
+                # Use the farthest offshore points in this segment
+                # (top 20% by distance, or at least the farthest point)
+                if len(seg_dist) > 0:
+                    threshold = np.percentile(seg_dist, 80)
+                    far_mask = seg_dist >= threshold
+                    gap_x.extend(seg_x[far_mask])
+                    gap_y.extend(seg_y_pts[far_mask])
+
+            if gap_x:
+                logger.info(f"Added {len(gap_x)} points from gap segments")
+                candidate_x = np.concatenate([candidate_x, np.array(gap_x)])
+                candidate_y = np.concatenate([candidate_y, np.array(gap_y)])
 
         # Downsample to desired spacing using a greedy approach
         if len(candidate_x) > 0:
@@ -479,7 +523,7 @@ class SurfzoneRunner:
 
 def run_surfzone(
     region: str,
-    swan_resolution: str = "fine",
+    swan_resolution: str = "ultrafine",
     step_size: float = 10.0,
     max_steps: int = 1000,
     boundary_spacing_m: float = 500.0,
@@ -529,8 +573,8 @@ Examples:
     )
     parser.add_argument(
         "--swan-resolution", "-s",
-        default="fine",
-        help="SWAN mesh resolution to use (default: fine)"
+        default="ultrafine",
+        help="SWAN mesh resolution to use (default: ultrafine)"
     )
     parser.add_argument(
         "--step-size",

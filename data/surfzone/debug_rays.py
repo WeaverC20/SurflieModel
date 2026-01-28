@@ -307,7 +307,7 @@ def main():
     # Initialize runner
     runner = SurfzoneRunner(
         region=region,
-        swan_resolution="fine",
+        swan_resolution="ultrafine",
         step_size=50.0,  # Fast mode
         max_steps=500,
     )
