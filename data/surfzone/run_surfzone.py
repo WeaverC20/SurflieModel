@@ -240,25 +240,30 @@ class SurfzoneRunner:
 
         logger.info(f"Found {len(candidate_x)} candidate points at {min_dist:.0f}-{max_dist:.0f}m offshore")
 
-        # Check for gaps in coverage by dividing coast into segments
-        # and ensuring each segment has boundary points
+        # Check for gaps/sparse areas by dividing coast into segments
+        # and ensuring each segment has sufficient boundary point density
         y_min, y_max = self.mesh.points_y.min(), self.mesh.points_y.max()
-        segment_size = spacing_m * 2  # Check coverage at 2x boundary spacing
+        segment_size = spacing_m  # Use spacing_m for finer segment checking
         n_segments = int((y_max - y_min) / segment_size) + 1
 
-        # Track which segments have coverage
-        segment_has_coverage = np.zeros(n_segments, dtype=bool)
+        # Count points per segment - we want at least 1 point per segment
+        # (after downsampling, this ensures ~spacing_m coverage)
+        segment_point_count = np.zeros(n_segments, dtype=int)
         if len(candidate_y) > 0:
             candidate_segments = ((candidate_y - y_min) / segment_size).astype(int)
             candidate_segments = np.clip(candidate_segments, 0, n_segments - 1)
-            segment_has_coverage[np.unique(candidate_segments)] = True
+            for seg_idx in candidate_segments:
+                segment_point_count[seg_idx] += 1
 
-        # For segments without coverage, find the farthest offshore points
-        gap_segments = np.where(~segment_has_coverage)[0]
-        if len(gap_segments) > 0:
-            logger.info(f"Found {len(gap_segments)} coastal segments without boundary points at target distance")
+        # Find segments that need more points (sparse or empty)
+        # A segment needs filling if it has fewer than min_points_per_segment
+        min_points_per_segment = 1
+        sparse_segments = np.where(segment_point_count < min_points_per_segment)[0]
 
-            # Collect candidates from gap segments
+        if len(sparse_segments) > 0:
+            logger.info(f"Found {len(sparse_segments)} sparse/empty coastal segments")
+
+            # Collect candidates from sparse segments
             gap_x = []
             gap_y = []
 
@@ -266,7 +271,7 @@ class SurfzoneRunner:
             water_y = self.mesh.points_y[water_mask]
             water_dist = distances[water_mask]
 
-            for seg_idx in gap_segments:
+            for seg_idx in sparse_segments:
                 seg_y_min = y_min + seg_idx * segment_size
                 seg_y_max = seg_y_min + segment_size
 
@@ -288,7 +293,7 @@ class SurfzoneRunner:
                     gap_y.extend(seg_y_pts[far_mask])
 
             if gap_x:
-                logger.info(f"Added {len(gap_x)} points from gap segments")
+                logger.info(f"Added {len(gap_x)} points from sparse segments")
                 candidate_x = np.concatenate([candidate_x, np.array(gap_x)])
                 candidate_y = np.concatenate([candidate_y, np.array(gap_y)])
 
