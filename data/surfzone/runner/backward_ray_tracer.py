@@ -333,14 +333,19 @@ def trace_backward_single(
     Celerity gradients are NEGATED so rays bend toward FASTER celerity
     (deeper water) instead of slower celerity as in forward tracing.
 
+    Boundary detection:
+    - If boundary_depth_threshold > 0: ray reaches boundary when depth exceeds threshold
+    - If boundary_depth_threshold <= 0: ray reaches boundary when it exits the mesh domain
+    - Hitting land (depth <= 0) is always a failure
+
     Args:
         start_x, start_y: Starting position (mesh point) in UTM
         T: Wave period (s)
         theta_M_nautical: Direction at mesh point (degrees, nautical)
         points_x, points_y, depth, triangles: Mesh arrays
         grid_*: Spatial index arrays
-        boundary_depth_threshold: Depth threshold (m) - ray has "reached boundary"
-                                   when depth exceeds this value (offshore deep water)
+        boundary_depth_threshold: Depth threshold (m). Set to 0 or negative to use
+                                   mesh boundary instead of depth threshold.
         step_size: Ray marching step size (m)
         max_steps: Maximum steps before giving up
 
@@ -349,7 +354,7 @@ def trace_backward_single(
         theta_arrival_nautical: Direction ray had when arriving at boundary
         Cg_start: Group velocity at start (mesh point)
         Cg_end: Group velocity at end (boundary)
-        reached_boundary: True if ray reached the boundary
+        reached_boundary: True if ray reached the boundary (mesh edge or depth threshold)
         path_x, path_y: Arrays of ray path coordinates
     """
     # Initialize path storage
@@ -392,6 +397,11 @@ def trace_backward_single(
     # Track end Cg (will be updated as we trace)
     Cg_end = Cg_start
 
+    # Track previous valid state for when ray exits mesh
+    x_prev, y_prev = x, y
+    dx_prev, dy_prev = dx, dy
+    h_prev = h_start
+
     step = 0
     for step in range(max_steps):
         # Store path point
@@ -406,8 +416,22 @@ def trace_backward_single(
             grid_cell_starts, grid_cell_counts, grid_triangles
         )
 
-        if np.isnan(h) or h <= 0:
-            # Left valid domain (hit land or outside mesh)
+        # Check for invalid position
+        if np.isnan(h):
+            # Left mesh domain - this is SUCCESS (reached offshore boundary)
+            # Use last valid position and direction
+            theta_current = np.arctan2(-dy_prev, -dx_prev)
+            theta_arrival_nautical = math_to_nautical(theta_current)
+
+            path_x = path_x[:step + 1].copy()
+            path_y = path_y[:step + 1].copy()
+            return (
+                x_prev, y_prev, theta_arrival_nautical, Cg_start, Cg_end, True,
+                path_x, path_y,
+            )
+
+        if h <= 0:
+            # Hit land - this is FAILURE
             path_x = path_x[:step + 1].copy()
             path_y = path_y[:step + 1].copy()
             return (
@@ -415,15 +439,12 @@ def trace_backward_single(
                 path_x, path_y,
             )
 
-        # Check if reached boundary (deep water)
-        if h > boundary_depth_threshold:
-            # Ray has reached boundary
-            # Wave direction is OPPOSITE of ray direction (we're tracing backward)
-            # Negate to get wave travel direction
+        # Optional: also check depth threshold if provided (for backward compatibility)
+        if boundary_depth_threshold > 0 and h > boundary_depth_threshold:
+            # Ray has reached depth threshold boundary
             theta_current = np.arctan2(-dy, -dx)
             theta_arrival_nautical = math_to_nautical(theta_current)
 
-            # Trim path arrays
             path_x = path_x[:step + 1].copy()
             path_y = path_y[:step + 1].copy()
 
@@ -435,6 +456,11 @@ def trace_backward_single(
         # Local wave properties (h was already computed above)
         L, k, C, n, Cg = local_wave_properties(L0, T, h)
         Cg_end = Cg  # Update end Cg
+
+        # Save current valid state before moving
+        x_prev, y_prev = x, y
+        dx_prev, dy_prev = dx, dy
+        h_prev = h
 
         # Get celerity gradient for refraction
         dC_dx, dC_dy = celerity_gradient_indexed(

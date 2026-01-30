@@ -208,8 +208,6 @@ def plot_backward_rays(
     ax3.set_ylabel('Water Depth (m)')
     ax3.set_title('Depth vs Distance\n(Rays: shallow -> deep)')
     ax3.grid(True, alpha=0.3)
-    ax3.axhline(y=50, color='blue', linestyle='--', linewidth=2, label='Boundary (50m)')
-    ax3.legend(loc='lower right')
 
     plt.suptitle(title, fontsize=14, fontweight='bold')
     plt.tight_layout()
@@ -288,7 +286,8 @@ def trace_rays_for_debug(
         n_rays: Number of rays to trace
         T: Wave period (s)
         partition_direction: Swell direction at boundary (nautical degrees)
-        boundary_depth: Depth threshold for "reached boundary" (m)
+        boundary_depth: Depth threshold for "reached boundary" (m).
+                        Set to 0 to use mesh boundary instead of depth threshold.
         step_size: Ray marching step size (m)
         max_steps: Maximum steps per ray
         deep_weight: Blend weight for depth gradient (0-1)
@@ -439,12 +438,13 @@ def run_debug(args):
     print(f"  Cg0 = {Cg0:.1f} m/s")
 
     # Trace rays using ACTUAL functions
+    # boundary_depth=0 means use mesh boundary (not depth threshold)
     rays_data = trace_rays_for_debug(
         mesh,
         n_rays=100,
         T=T,
         partition_direction=partition_direction,
-        boundary_depth=50.0,
+        boundary_depth=0.0,  # 0 = use mesh boundary, not depth threshold
         step_size=15.0,
         max_steps=3000,
         deep_weight=0.8,  # 80% depth gradient, 20% partition
