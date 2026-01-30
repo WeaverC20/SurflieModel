@@ -713,6 +713,12 @@ def update_ray_direction(
     (shallower water). If C decreases to the left (dC_dn < 0), the ray
     should turn left (dtheta > 0).
 
+    BACKWARD TRACING NOTE: For backward ray tracing, the direction vector
+    (dx, dy) is negated. This also changes the perpendicular direction,
+    which naturally causes dC_dn to have opposite sign. Therefore rays
+    automatically bend toward FASTER celerity (deeper water) without any
+    modification to the gradient inputs.
+
     Args:
         dx: Current x-direction component (normalized)
         dy: Current y-direction component (normalized)

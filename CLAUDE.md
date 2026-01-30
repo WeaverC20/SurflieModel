@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-SurflieModel is a surf forecast system that will use NOAA WaveWatch III (WW3) data propagated through SWAN (Simulating WAves Nearshore) models to predict surf conditions at specific beach locations.
+SurflieModel is a surf forecast system that uses NOAA WaveWatch III (WW3) data propagated through backward ray tracing to predict surf conditions at specific beach locations.
 
-**Current Status**: Data fetching infrastructure is complete. SWAN modeling is being rebuilt from scratch.
+**Current Status**: Data fetching infrastructure is complete. Surfzone modeling uses backward ray tracing from mesh points to SWAN boundary.
 
 ## Directory Structure
 
@@ -33,6 +33,17 @@ SurflieModel/
 │   ├── bathymetry/           # Bathymetry processing (OOP)
 │   │   └── gebco.py          # GEBCOBathymetry class
 │   │
+│   ├── surfzone/             # Surfzone wave modeling
+│   │   ├── mesh.py           # SurfZoneMesh class
+│   │   ├── SURFZONE_MODEL.md # Technical documentation
+│   │   └── runner/           # Ray tracing engine
+│   │       ├── wave_physics.py            # Numba wave physics
+│   │       ├── backward_ray_tracer.py     # Primary backward tracer
+│   │       ├── backward_ray_tracer_debug.py # Visualization tool
+│   │       ├── ray_tracer.py              # Legacy forward tracer (unused)
+│   │       ├── swan_input_provider.py     # SWAN boundary conditions
+│   │       └── output_writer.py           # Results storage
+│   │
 │   ├── pipelines/            # Data fetching pipelines
 │   │   ├── noaa/             # NOAA data (tides, WW3, GFS)
 │   │   ├── wave/             # WaveWatch III fetcher
@@ -46,6 +57,7 @@ SurflieModel/
 ├── packages/python/common/    # Shared Python utilities
 ├── scripts/                   # Utility scripts
 └── docs/                      # Documentation
+    └── surfzone_wave_simulation_approach.md  # Detailed backward tracing docs
 ```
 
 ## Key Components
@@ -86,18 +98,64 @@ The frontend displays 4 real-time heatmaps:
 3. Ocean Currents (RTOFS)
 4. Buoy Observations (NDBC)
 
+### Surfzone Wave Modeling (`data/surfzone/`)
+
+The surfzone module uses **backward ray tracing** to propagate waves from near-shore mesh points back to the SWAN boundary (deep water).
+
+**Key Components:**
+
+- **SurfZoneMesh** (`mesh.py`): Coastline-following mesh with bathymetry and spatial index
+- **BackwardRayTracer** (`runner/backward_ray_tracer.py`): Primary wave propagation engine
+- **wave_physics.py**: Numba-accelerated physics (shoaling, refraction, breaking)
+- **backward_ray_tracer_debug.py**: Visualization tool for ray paths
+
+**Backward Ray Tracing Physics:**
+
+Rays are traced BACKWARD from near-shore points toward deep water. Key differences from forward tracing:
+
+1. **Direction is NEGATED** - rays point away from shore (opposite of wave travel)
+2. **Gradients are NEGATED** - rays bend toward FASTER celerity (deeper water)
+
+```python
+# Forward: bends toward slower C (shallow)
+dθ/ds = -(1/C) · ∂C/∂n
+
+# Backward: bends toward faster C (deep) - achieved by negating gradients
+dx, dy = update_ray_direction(dx, dy, C, -dC_dx, -dC_dy, step_size)
+```
+
+**Usage:**
+
+```python
+from data.surfzone.runner.backward_ray_tracer import BackwardRayTracer
+
+tracer = BackwardRayTracer(mesh, boundary_depth_threshold=50.0)  # 50m depth
+result = tracer.trace_mesh_point(x, y, partitions)
+print(f"Total Hs: {result.total_Hs:.2f}m")
+```
+
+**Visualization:**
+
+```bash
+venv/bin/python data/surfzone/runner/backward_ray_tracer_debug.py
+```
+
+See `docs/surfzone_wave_simulation_approach.md` for detailed documentation.
+
 ## Development Notes
 
 ### What Exists
 - Complete data fetching infrastructure (NOAA, WW3, GFS, RTOFS, NDBC)
 - Frontend dashboard with 4 working heatmaps
 - GEBCO bathymetry viewing capability
+- Surfzone mesh generation with spatial indexing
+- Backward ray tracing for wave propagation (with correct physics)
+- Wave physics (shoaling, refraction, breaking criteria)
 
-### What Will Be Built (SWAN Modeling)
-- SWAN domain creation from GEBCO bathymetry
-- WW3 boundary condition extraction
-- SWAN model execution
-- Surf spot predictions
+### What Will Be Built
+- Integration with live SWAN boundary conditions
+- Breaking statistics and visualization
+- Surf spot predictions at specific locations
 
 ### Code Style
 - Use object-oriented programming for new modules
@@ -114,6 +172,9 @@ uvicorn app.main:app --reload
 # Frontend (from project root)
 cd apps/web
 npm run dev
+
+# Run backward ray tracer visualization
+venv/bin/python data/surfzone/runner/backward_ray_tracer_debug.py
 ```
 
 ## Notes for Claude
@@ -123,3 +184,11 @@ npm run dev
 3. **Build incrementally**: Work closely with user to design and implement features
 4. **Data fetching is done**: Don't modify pipelines in `data/pipelines/` unless asked
 5. **Frontend is stable**: The 4 heatmaps work - don't modify unless asked
+6. **Backward ray tracing**: Use `BackwardRayTracer` for wave propagation
+   - Rays trace from near-shore toward deep water boundary
+   - Direction and gradients are NEGATED to make rays bend toward faster C (deeper water)
+   - See `data/surfzone/SURFZONE_MODEL.md` for physics details
+7. **Wave physics**: Functions in `wave_physics.py` use standard formulas
+   - `update_ray_direction()` uses forward formula: dθ/ds = -(1/C)·∂C/∂n
+   - For backward tracing, pass NEGATED gradients to get correct behavior
+8. **Legacy code**: `ray_tracer.py` is the old forward tracer - don't use

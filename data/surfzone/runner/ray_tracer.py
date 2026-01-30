@@ -1,8 +1,15 @@
 """
-Ray Tracer for Surfzone Wave Propagation
+Ray Tracer for Surfzone Wave Propagation (LEGACY - DO NOT USE)
 
-Traces wave rays from offshore boundary through surfzone mesh to shore.
-Uses Numba for performance-critical inner loops.
+DEPRECATED: This is the old FORWARD ray tracer. Use backward_ray_tracer.py instead.
+
+The forward approach traces rays from offshore boundary toward shore, which is
+inefficient because many rays miss areas of interest. The backward approach
+(backward_ray_tracer.py) traces from mesh points toward the boundary, ensuring
+every computation is useful.
+
+This file is kept only for the utility functions (interpolate_depth_indexed,
+celerity_gradient_indexed) which are used by the backward tracer.
 """
 
 import logging
