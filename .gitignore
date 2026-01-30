@@ -79,6 +79,10 @@ data/meshes/
 # Surfzone model
 data/surfzone/meshes/
 data/surfzone/runs/
+data/surfzone/debug_*.png
+data/surfzone/debug_*.html
+data/surfzone/*.png
+data/surfzone/*.html
 *.npz
 
 # Jupyter

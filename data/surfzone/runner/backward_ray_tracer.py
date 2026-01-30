@@ -170,6 +170,131 @@ class BoundarySegment:
 
 
 # =============================================================================
+# Initial Guess Computation
+# =============================================================================
+
+@njit(cache=True)
+def compute_initial_direction_blended(
+    x: float,
+    y: float,
+    theta_partition_nautical: float,
+    points_x: np.ndarray,
+    points_y: np.ndarray,
+    depth: np.ndarray,
+    triangles: np.ndarray,
+    grid_x_min: float,
+    grid_y_min: float,
+    grid_cell_size: float,
+    grid_n_cells_x: int,
+    grid_n_cells_y: int,
+    grid_cell_starts: np.ndarray,
+    grid_cell_counts: np.ndarray,
+    grid_triangles: np.ndarray,
+    deep_weight: float = 0.8,
+    h_step: float = 20.0,
+) -> float:
+    """
+    Compute initial wave direction as weighted blend of depth gradient and partition.
+
+    Blends two directions:
+    - Direction toward deeper water (from local depth gradient)
+    - Partition direction from boundary
+
+    For backward tracing, the ray travels in direction (-cos(θ_M), -sin(θ_M)).
+    The depth gradient component aligns the ray with deepening water.
+    The partition component biases toward the expected swell direction.
+
+    Args:
+        x, y: Mesh point location
+        theta_partition_nautical: Partition direction at boundary (nautical degrees)
+        points_x, points_y, depth, triangles: Mesh arrays
+        grid_*: Spatial index arrays
+        deep_weight: Weight for depth gradient direction (0-1), default 0.8
+                     Partition gets weight (1 - deep_weight)
+        h_step: Finite difference step size (m)
+
+    Returns:
+        Blended initial wave direction θ_M in nautical convention (degrees),
+        or partition direction if depth gradient cannot be computed.
+    """
+    # Compute depth gradient using finite differences
+    d_xp = interpolate_depth_indexed(
+        x + h_step, y, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+    d_xm = interpolate_depth_indexed(
+        x - h_step, y, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+    d_yp = interpolate_depth_indexed(
+        x, y + h_step, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+    d_ym = interpolate_depth_indexed(
+        x, y - h_step, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+
+    # Compute gradients (handle edge cases)
+    if np.isnan(d_xp) or np.isnan(d_xm) or d_xp <= 0 or d_xm <= 0:
+        dh_dx = 0.0
+    else:
+        dh_dx = (d_xp - d_xm) / (2.0 * h_step)
+
+    if np.isnan(d_yp) or np.isnan(d_ym) or d_yp <= 0 or d_ym <= 0:
+        dh_dy = 0.0
+    else:
+        dh_dy = (d_yp - d_ym) / (2.0 * h_step)
+
+    # Check if we have a valid gradient
+    grad_mag = np.sqrt(dh_dx**2 + dh_dy**2)
+    if grad_mag < 1e-8:
+        # Flat bottom or invalid - fall back to partition direction
+        return theta_partition_nautical
+
+    # Depth gradient (dh_dx, dh_dy) points toward deeper water.
+    # For backward tracing, ray direction is (-cos(θ_M), -sin(θ_M)).
+    # We want ray direction to align with depth gradient:
+    #   (-cos(θ_M), -sin(θ_M)) ∝ (dh_dx, dh_dy)
+    # So: (cos(θ_M), sin(θ_M)) ∝ (-dh_dx, -dh_dy)
+    # Therefore: θ_deep (math) = atan2(-dh_dy, -dh_dx)
+    theta_deep_math = np.arctan2(-dh_dy, -dh_dx)
+
+    # Convert partition direction to math convention (radians)
+    theta_partition_math = nautical_to_math(theta_partition_nautical)
+
+    # Blend directions using vector interpolation (proper for circular quantities)
+    # Convert both to unit vectors, blend, then back to angle
+    partition_weight = 1.0 - deep_weight
+
+    # Unit vectors for each direction
+    deep_x = np.cos(theta_deep_math)
+    deep_y = np.sin(theta_deep_math)
+    partition_x = np.cos(theta_partition_math)
+    partition_y = np.sin(theta_partition_math)
+
+    # Weighted blend
+    blend_x = deep_weight * deep_x + partition_weight * partition_x
+    blend_y = deep_weight * deep_y + partition_weight * partition_y
+
+    # Normalize (in case weights don't sum to 1 or vectors partially cancel)
+    blend_mag = np.sqrt(blend_x**2 + blend_y**2)
+    if blend_mag < 1e-8:
+        # Vectors cancelled out (opposite directions) - use partition
+        return theta_partition_nautical
+
+    # Convert back to angle
+    theta_blend_math = np.arctan2(blend_y, blend_x)
+
+    # Convert to nautical
+    return math_to_nautical(theta_blend_math)
+
+
+# =============================================================================
 # Core Backward Tracing (Numba-accelerated)
 # =============================================================================
 
@@ -378,10 +503,22 @@ def _trace_single_partition_converge(
     """
     Trace single partition with convergence - pure Numba version.
 
+    Initial guess is a blend of:
+    - 80% direction toward deeper water (from depth gradient)
+    - 20% partition direction from boundary
+
     Returns:
         H_mesh, T, direction, K_shoaling, converged, n_iterations
     """
-    theta_M = theta_partition  # Initial guess
+    # Compute initial guess: blend of depth gradient (80%) and partition (20%)
+    theta_M = compute_initial_direction_blended(
+        mesh_x, mesh_y, theta_partition,
+        points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size,
+        grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles,
+        deep_weight=0.8,
+    )
 
     for iteration in range(max_iterations):
         # Trace backward
@@ -588,8 +725,15 @@ def backward_trace_with_convergence(
     delta_theta = partition.directional_spread
     H_partition = partition.Hs
 
-    # Initial guess: wave at mesh point has same direction as partition
-    theta_M = theta_partition
+    # Initial guess: blend of depth gradient (80%) and partition (20%)
+    theta_M = compute_initial_direction_blended(
+        mesh_x, mesh_y, theta_partition,
+        points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size,
+        grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles,
+        deep_weight=0.8,
+    )
 
     path_x_final = None
     path_y_final = None
