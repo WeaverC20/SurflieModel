@@ -109,10 +109,14 @@ class SurfZoneMesh:
         # Coastline as ordered polylines
         self.coastlines: Optional[List[np.ndarray]] = None  # List of (N, 2) arrays
 
+        # Offshore boundary as ordered polylines (at offshore_distance_m from coastline)
+        self.offshore_boundary: Optional[List[np.ndarray]] = None  # List of (N, 2) arrays
+
         # All mesh points (irregular point cloud)
         self.points_x: Optional[np.ndarray] = None
         self.points_y: Optional[np.ndarray] = None
         self.elevation: Optional[np.ndarray] = None
+        self.coast_distance: Optional[np.ndarray] = None  # Distance from coastline (m)
 
         # Reference bounds
         self.lon_range: Optional[Tuple[float, float]] = None
@@ -360,6 +364,11 @@ class SurfZoneMesh:
         if np.any(land):
             heights = self.elevation[land]
             print(f"    Land height: {heights.min():.1f}m to {heights.max():.1f}m")
+
+        # Step 7: Compute offshore boundary and coast distance
+        print(f"\n  Step 7: Computing offshore boundary and coast distance...")
+        self.compute_offshore_boundary()
+        self.compute_coast_distance()
 
     def _extract_coastline_contours(
         self,
@@ -667,6 +676,163 @@ class SurfZoneMesh:
 
         return np.column_stack([sampled_x, sampled_y])
 
+    def compute_offshore_boundary(
+        self,
+        grid_resolution: float = 50.0,
+        boundary_spacing: float = 100.0,
+    ) -> List[np.ndarray]:
+        """
+        Compute the offshore boundary as polylines at offshore_distance_m from coastline.
+
+        Uses a signed distance field approach:
+        1. Create a grid covering the mesh extent
+        2. Compute signed distance from coastline points
+        3. Extract iso-contour at offshore_distance_m
+
+        This can be called on an existing mesh to compute/recompute the boundary.
+
+        Args:
+            grid_resolution: Resolution of the distance field grid (meters)
+            boundary_spacing: Point spacing along the extracted boundary (meters)
+
+        Returns:
+            List of (N, 2) arrays representing boundary polylines
+        """
+        from scipy import ndimage
+        import matplotlib.pyplot as plt
+
+        if self.coastlines is None or len(self.coastlines) == 0:
+            print("Warning: No coastlines available to compute offshore boundary")
+            return []
+
+        if self.points_x is None or len(self.points_x) == 0:
+            print("Warning: No mesh points available")
+            return []
+
+        print(f"  Computing offshore boundary at {self.config.offshore_distance_m}m...")
+
+        # Create a grid covering the mesh extent with padding
+        padding = self.config.offshore_distance_m * 1.5
+        x_min, x_max = self.points_x.min() - padding, self.points_x.max() + padding
+        y_min, y_max = self.points_y.min() - padding, self.points_y.max() + padding
+
+        x_grid = np.arange(x_min, x_max, grid_resolution)
+        y_grid = np.arange(y_min, y_max, grid_resolution)
+
+        # Rasterize coastline points onto grid to create land mask
+        # First, collect all coastline points
+        coastline_points = []
+        for coastline in self.coastlines:
+            # Sample coastline at grid resolution for accurate rasterization
+            sampled = self._sample_polyline(coastline, grid_resolution / 2)
+            coastline_points.append(sampled)
+
+        if not coastline_points:
+            print("Warning: No coastline points found")
+            return []
+
+        all_coast_pts = np.vstack(coastline_points)
+
+        # Create binary mask: 1 = near coastline, 0 = far from coastline
+        # We'll use distance transform to get signed distance
+        coast_mask = np.zeros((len(y_grid), len(x_grid)), dtype=bool)
+
+        # Mark grid cells containing coastline points
+        for pt in all_coast_pts:
+            ix = int((pt[0] - x_min) / grid_resolution)
+            iy = int((pt[1] - y_min) / grid_resolution)
+            if 0 <= ix < len(x_grid) and 0 <= iy < len(y_grid):
+                coast_mask[iy, ix] = True
+
+        # Dilate coastline mask slightly to ensure connectivity
+        from scipy.ndimage import binary_dilation
+        coast_mask = binary_dilation(coast_mask, iterations=2)
+
+        # Compute distance from coastline for all grid cells
+        # Distance transform gives distance to nearest True cell
+        dist_from_coast = ndimage.distance_transform_edt(~coast_mask) * grid_resolution
+
+        print(f"    Distance field range: 0 to {dist_from_coast.max():.0f}m")
+
+        # Extract iso-contour at offshore_distance_m
+        target_distance = self.config.offshore_distance_m
+
+        fig, ax = plt.subplots()
+        cs = ax.contour(x_grid, y_grid, dist_from_coast, levels=[target_distance])
+        plt.close(fig)
+
+        boundary_segments = []
+
+        # Extract contour paths
+        if hasattr(cs, 'allsegs') and len(cs.allsegs) > 0:
+            segments = cs.allsegs[0]
+        else:
+            segments = []
+            for collection in cs.collections:
+                for path in collection.get_paths():
+                    if len(path.vertices) >= 2:
+                        segments.append(path.vertices.copy())
+
+        # Sample points along each segment
+        for segment in segments:
+            if len(segment) >= 2:
+                # Filter to only keep segments within reasonable bounds of mesh
+                sampled = self._sample_polyline(segment, boundary_spacing)
+                if len(sampled) >= 2:
+                    boundary_segments.append(sampled)
+
+        print(f"    Extracted {len(boundary_segments)} boundary segments")
+        total_points = sum(len(seg) for seg in boundary_segments)
+        print(f"    Total boundary points: {total_points:,}")
+
+        self.offshore_boundary = boundary_segments
+        return boundary_segments
+
+    def compute_coast_distance(self) -> np.ndarray:
+        """
+        Compute distance from coastline for each mesh point.
+
+        Uses the stored coastlines to compute the minimum distance from each
+        mesh point to any coastline segment. This is used by the ray tracer
+        to determine when rays have reached the offshore boundary.
+
+        Returns:
+            Array of distances (m) from coastline for each mesh point
+        """
+        from scipy.spatial import cKDTree
+
+        if self.coastlines is None or len(self.coastlines) == 0:
+            print("Warning: No coastlines available to compute coast distance")
+            return np.array([])
+
+        if self.points_x is None or len(self.points_x) == 0:
+            print("Warning: No mesh points available")
+            return np.array([])
+
+        print(f"  Computing coast distance for {len(self.points_x):,} mesh points...")
+
+        # Collect all coastline points (sample densely for accuracy)
+        coast_pts = []
+        for coastline in self.coastlines:
+            # Sample coastline at fine resolution
+            sampled = self._sample_polyline(coastline, 10.0)  # 10m spacing
+            coast_pts.append(sampled)
+
+        all_coast_pts = np.vstack(coast_pts)
+        print(f"    Using {len(all_coast_pts):,} coastline points")
+
+        # Build KD-tree for fast nearest neighbor lookup
+        tree = cKDTree(all_coast_pts)
+
+        # Query distance for each mesh point
+        mesh_pts = np.column_stack([self.points_x, self.points_y])
+        distances, _ = tree.query(mesh_pts)
+
+        print(f"    Distance range: {distances.min():.1f}m to {distances.max():.1f}m")
+
+        self.coast_distance = distances.astype(np.float64)
+        return self.coast_distance
+
     def _build_interpolator(self) -> None:
         """Build Delaunay triangulation and interpolator."""
         if self.points_x is None or len(self.points_x) < 3:
@@ -843,6 +1009,13 @@ class SurfZoneMesh:
             'triangles': np.ascontiguousarray(self._triangulation.simplices, dtype=np.int32),
         }
 
+        # Include coast_distance if available (for boundary detection)
+        if self.coast_distance is not None:
+            result['coast_distance'] = np.ascontiguousarray(self.coast_distance, dtype=np.float64)
+
+        # Include offshore_distance_m from config (for boundary threshold)
+        result['offshore_distance_m'] = self.config.offshore_distance_m
+
         # Include spatial index if available
         if self._spatial_index is not None:
             result.update(self._spatial_index)
@@ -866,7 +1039,7 @@ class SurfZoneMesh:
 
         # Build spatial index if requested and not already built
         if build_spatial_index and self._spatial_index is None:
-            print("\n  Step 7: Building spatial index for ray tracing...")
+            print("\n  Step 8: Building spatial index for ray tracing...")
             self.build_spatial_index()
 
         npz_path = directory / f"{self.region_name}_surfzone.npz"
@@ -876,10 +1049,19 @@ class SurfZoneMesh:
             'elevation': self.elevation,
         }
 
+        # Save coast_distance if available
+        if self.coast_distance is not None:
+            save_dict['coast_distance'] = self.coast_distance
+
         # Save coastlines as separate arrays
         if self.coastlines:
             for i, coastline in enumerate(self.coastlines):
                 save_dict[f'coastline_{i}'] = coastline
+
+        # Save offshore boundary as separate arrays
+        if self.offshore_boundary:
+            for i, boundary in enumerate(self.offshore_boundary):
+                save_dict[f'offshore_boundary_{i}'] = boundary
 
         # Save spatial index if available
         if self._spatial_index is not None:
@@ -965,12 +1147,27 @@ class SurfZoneMesh:
         mesh.points_y = data['points_y']
         mesh.elevation = data['elevation']
 
+        # Load coast_distance if available
+        if 'coast_distance' in data:
+            mesh.coast_distance = data['coast_distance']
+        else:
+            mesh.coast_distance = None
+
         # Load coastlines
         mesh.coastlines = []
         i = 0
         while f'coastline_{i}' in data:
             mesh.coastlines.append(data[f'coastline_{i}'])
             i += 1
+
+        # Load offshore boundary if available
+        mesh.offshore_boundary = []
+        i = 0
+        while f'offshore_boundary_{i}' in data:
+            mesh.offshore_boundary.append(data[f'offshore_boundary_{i}'])
+            i += 1
+        if not mesh.offshore_boundary:
+            mesh.offshore_boundary = None  # No boundary saved
 
         # Load spatial index if available
         if 'spatial_grid_x_min' in data:

@@ -37,6 +37,7 @@ from .wave_physics import (
 )
 from .ray_tracer import (
     interpolate_depth_indexed,
+    interpolate_coast_distance_indexed,
     celerity_gradient_indexed,
 )
 
@@ -320,8 +321,11 @@ def trace_backward_single(
     grid_cell_starts: np.ndarray,
     grid_cell_counts: np.ndarray,
     grid_triangles: np.ndarray,
-    # Boundary definition (depth threshold for "reached offshore boundary")
-    boundary_depth_threshold: float,
+    # Boundary definition
+    boundary_depth_threshold: float,  # Depth threshold (m), or 0 to disable
+    # Coast distance boundary (primary boundary method)
+    coast_distance: np.ndarray,  # Distance from coastline at each mesh vertex
+    offshore_distance_m: float,  # Threshold for offshore boundary (e.g., 2500m)
     # Configuration
     step_size: float = DEFAULT_STEP_SIZE,
     max_steps: int = DEFAULT_MAX_STEPS,
@@ -333,9 +337,11 @@ def trace_backward_single(
     Celerity gradients are NEGATED so rays bend toward FASTER celerity
     (deeper water) instead of slower celerity as in forward tracing.
 
-    Boundary detection:
-    - If boundary_depth_threshold > 0: ray reaches boundary when depth exceeds threshold
-    - If boundary_depth_threshold <= 0: ray reaches boundary when it exits the mesh domain
+    Boundary detection (in order of priority):
+    1. If offshore_distance_m > 0 and coast_distance available: ray reaches boundary
+       when interpolated coast_distance exceeds offshore_distance_m
+    2. If boundary_depth_threshold > 0: ray reaches boundary when depth exceeds threshold
+    3. Otherwise: ray reaches boundary when it exits the mesh domain (NaN from interpolation)
     - Hitting land (depth <= 0) is always a failure
 
     Args:
@@ -344,8 +350,9 @@ def trace_backward_single(
         theta_M_nautical: Direction at mesh point (degrees, nautical)
         points_x, points_y, depth, triangles: Mesh arrays
         grid_*: Spatial index arrays
-        boundary_depth_threshold: Depth threshold (m). Set to 0 or negative to use
-                                   mesh boundary instead of depth threshold.
+        boundary_depth_threshold: Depth threshold (m). Set to 0 or negative to disable.
+        coast_distance: Distance from coastline at each mesh vertex (m)
+        offshore_distance_m: Offshore boundary distance (m). Set to 0 to disable.
         step_size: Ray marching step size (m)
         max_steps: Maximum steps before giving up
 
@@ -354,7 +361,7 @@ def trace_backward_single(
         theta_arrival_nautical: Direction ray had when arriving at boundary
         Cg_start: Group velocity at start (mesh point)
         Cg_end: Group velocity at end (boundary)
-        reached_boundary: True if ray reached the boundary (mesh edge or depth threshold)
+        reached_boundary: True if ray reached the boundary
         path_x, path_y: Arrays of ray path coordinates
     """
     # Initialize path storage
@@ -402,6 +409,15 @@ def trace_backward_single(
     dx_prev, dy_prev = dx, dy
     h_prev = h_start
 
+    # Track max coast_distance seen (for boundary detection when interpolation fails)
+    max_coast_dist_seen = 0.0
+    # Track steps since coast_dist increased (for plateau detection)
+    steps_since_increase = 0
+
+    # Use 98% of offshore_distance_m as threshold to account for mesh point spacing
+    # (outermost mesh points may be slightly inside the boundary)
+    effective_threshold = 0.98 * offshore_distance_m
+
     step = 0
     for step in range(max_steps):
         # Store path point
@@ -439,7 +455,69 @@ def trace_backward_single(
                 path_x, path_y,
             )
 
-        # Optional: also check depth threshold if provided (for backward compatibility)
+        # PRIMARY BOUNDARY CHECK: coast_distance-based boundary
+        # Check if ray has traveled beyond offshore_distance_m from coastline
+        if offshore_distance_m > 0 and len(coast_distance) > 0:
+            coast_dist = interpolate_coast_distance_indexed(
+                x, y, points_x, points_y, coast_distance, triangles,
+                grid_x_min, grid_y_min, grid_cell_size,
+                grid_n_cells_x, grid_n_cells_y,
+                grid_cell_starts, grid_cell_counts, grid_triangles
+            )
+
+            if np.isnan(coast_dist):
+                # Lost coast_distance coverage - check if we were in the boundary region
+                # If we've traveled >80% of the way to boundary, treat NaN as reaching it
+                if max_coast_dist_seen > 0.8 * offshore_distance_m:
+                    theta_current = np.arctan2(-dy_prev, -dx_prev)
+                    theta_arrival_nautical = math_to_nautical(theta_current)
+
+                    path_x = path_x[:step + 1].copy()
+                    path_y = path_y[:step + 1].copy()
+
+                    return (
+                        x_prev, y_prev, theta_arrival_nautical, Cg_start, Cg_end, True,
+                        path_x, path_y,
+                    )
+                # Otherwise fall through to other checks (might be in a gap in coverage)
+            else:
+                # Valid coast_distance - track max and check threshold
+                if coast_dist > max_coast_dist_seen + 1.0:  # Need >1m increase to reset counter
+                    max_coast_dist_seen = coast_dist
+                    steps_since_increase = 0
+                else:
+                    steps_since_increase += 1
+
+                # Check if we've reached the boundary threshold
+                if coast_dist >= effective_threshold:
+                    # Ray has reached the offshore boundary
+                    theta_current = np.arctan2(-dy, -dx)
+                    theta_arrival_nautical = math_to_nautical(theta_current)
+
+                    path_x = path_x[:step + 1].copy()
+                    path_y = path_y[:step + 1].copy()
+
+                    return (
+                        x, y, theta_arrival_nautical, Cg_start, Cg_end, True,
+                        path_x, path_y,
+                    )
+
+                # Plateau detection: if we're >90% to boundary and coast_dist
+                # hasn't increased for 10+ steps, we're at the boundary
+                if (coast_dist > 0.90 * offshore_distance_m and
+                        steps_since_increase >= 10):
+                    theta_current = np.arctan2(-dy, -dx)
+                    theta_arrival_nautical = math_to_nautical(theta_current)
+
+                    path_x = path_x[:step + 1].copy()
+                    path_y = path_y[:step + 1].copy()
+
+                    return (
+                        x, y, theta_arrival_nautical, Cg_start, Cg_end, True,
+                        path_x, path_y,
+                    )
+
+        # FALLBACK: depth threshold if provided (for backward compatibility)
         if boundary_depth_threshold > 0 and h > boundary_depth_threshold:
             # Ray has reached depth threshold boundary
             theta_current = np.arctan2(-dy, -dx)
@@ -519,6 +597,9 @@ def _trace_single_partition_converge(
     grid_triangles: np.ndarray,
     # Boundary
     boundary_depth_threshold: float,
+    # Coast distance boundary
+    coast_distance: np.ndarray,
+    offshore_distance_m: float,
     # Config
     alpha: float,
     max_iterations: int,
@@ -557,7 +638,9 @@ def _trace_single_partition_converge(
             grid_x_min, grid_y_min, grid_cell_size,
             grid_n_cells_x, grid_n_cells_y,
             grid_cell_starts, grid_cell_counts, grid_triangles,
-            boundary_depth_threshold, step_size, max_steps,
+            boundary_depth_threshold,
+            coast_distance, offshore_distance_m,
+            step_size, max_steps,
         )
 
         if not reached:
@@ -622,6 +705,9 @@ def trace_all_parallel(
     grid_triangles: np.ndarray,
     # Boundary
     boundary_depth_threshold: float,
+    # Coast distance boundary
+    coast_distance: np.ndarray,
+    offshore_distance_m: float,
     # Config
     alpha: float,
     max_iterations: int,
@@ -679,6 +765,7 @@ def trace_all_parallel(
                 grid_n_cells_x, grid_n_cells_y,
                 grid_cell_starts, grid_cell_counts, grid_triangles,
                 boundary_depth_threshold,
+                coast_distance, offshore_distance_m,
                 alpha, max_iterations, tolerance, step_size, max_steps,
             )
 
@@ -716,6 +803,9 @@ def backward_trace_with_convergence(
     grid_triangles: np.ndarray,
     # Boundary
     boundary_depth_threshold: float,
+    # Coast distance boundary
+    coast_distance: np.ndarray,
+    offshore_distance_m: float,
     # Configuration
     alpha: float = DEFAULT_ALPHA,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -775,7 +865,9 @@ def backward_trace_with_convergence(
             grid_x_min, grid_y_min, grid_cell_size,
             grid_n_cells_x, grid_n_cells_y,
             grid_cell_starts, grid_cell_counts, grid_triangles,
-            boundary_depth_threshold, step_size, max_steps,
+            boundary_depth_threshold,
+            coast_distance, offshore_distance_m,
+            step_size, max_steps,
         )
 
         if not reached:
@@ -932,10 +1024,21 @@ class BackwardRayTracer:
                 "Regenerate mesh with build_spatial_index=True"
             )
 
+        # Coast distance boundary (primary boundary method if available)
+        if 'coast_distance' in arrays:
+            self.coast_distance = arrays['coast_distance']
+            self.offshore_distance_m = arrays.get('offshore_distance_m', 0.0)
+        else:
+            # Fallback: no coast_distance available
+            self.coast_distance = np.array([], dtype=np.float64)
+            self.offshore_distance_m = 0.0
+
         logger.info(
             f"BackwardRayTracer initialized: {len(self.points_x)} mesh points, "
             f"boundary_depth={boundary_depth_threshold}m, step={step_size}m"
         )
+        if self.offshore_distance_m > 0:
+            logger.info(f"  Using coast_distance boundary at {self.offshore_distance_m}m")
 
     def trace_mesh_point(
         self,
@@ -968,6 +1071,7 @@ class BackwardRayTracer:
                 self.grid_n_cells_x, self.grid_n_cells_y,
                 self.grid_cell_starts, self.grid_cell_counts, self.grid_triangles,
                 self.boundary_depth_threshold,
+                self.coast_distance, self.offshore_distance_m,
                 self.alpha, self.max_iterations, self.convergence_tolerance,
                 self.step_size, self.max_steps, store_paths,
             )
@@ -1146,6 +1250,7 @@ class BackwardRayTracer:
             self.grid_n_cells_x, self.grid_n_cells_y,
             self.grid_cell_starts, self.grid_cell_counts, self.grid_triangles,
             self.boundary_depth_threshold,
+            self.coast_distance, self.offshore_distance_m,
             self.alpha, self.max_iterations, self.convergence_tolerance,
             self.step_size, self.max_steps,
         )

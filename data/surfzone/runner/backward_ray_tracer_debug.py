@@ -313,6 +313,10 @@ def trace_rays_for_debug(
     grid_cell_counts = arrays['grid_cell_counts']
     grid_triangles = arrays['grid_triangles']
 
+    # Coast distance boundary (if available)
+    coast_distance = arrays.get('coast_distance', np.array([], dtype=np.float64))
+    offshore_distance_m = arrays.get('offshore_distance_m', 0.0)
+
     # Find shallow water start points
     min_depth, max_depth = depth_range
     shallow_mask = (depth > min_depth) & (depth < max_depth)
@@ -334,7 +338,7 @@ def trace_rays_for_debug(
     print(f"  - compute_initial_direction_blended(deep_weight={deep_weight})")
 
     rays_data = []
-    termination_counts = {'boundary': 0, 'domain': 0, 'max_steps': 0}
+    termination_counts = {'boundary': 0, 'domain': 0, 'land': 0, 'max_steps': 0}
 
     for i, idx in enumerate(sample_indices):
         start_x = points_x[idx]
@@ -360,15 +364,22 @@ def trace_rays_for_debug(
             grid_x_min, grid_y_min, grid_cell_size,
             grid_n_cells_x, grid_n_cells_y,
             grid_cell_starts, grid_cell_counts, grid_triangles,
-            boundary_depth,
+            boundary_depth,  # depth threshold (0 = disabled)
+            coast_distance, offshore_distance_m,  # coast distance boundary
             step_size, max_steps,
         )
 
         # Determine termination reason
+        # - boundary: ray reached offshore boundary (coast_distance >= threshold)
+        # - domain: ray left mesh domain (NaN position)
+        # - land: ray hit land (depth <= 0), returns reached_boundary=False, theta=NaN
+        # - max_steps: ray exceeded max iterations without reaching boundary
         if reached_boundary:
             termination = 'boundary'
         elif np.isnan(end_x):
             termination = 'domain'
+        elif np.isnan(theta_arrival):
+            termination = 'land'
         else:
             termination = 'max_steps'
 
@@ -401,6 +412,7 @@ def trace_rays_for_debug(
 
     print(f"\nResults:")
     print(f"  Reached boundary: {termination_counts['boundary']}")
+    print(f"  Hit land: {termination_counts['land']}")
     print(f"  Left domain: {termination_counts['domain']}")
     print(f"  Max steps: {termination_counts['max_steps']}")
 

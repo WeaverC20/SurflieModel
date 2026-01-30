@@ -283,6 +283,78 @@ def interpolate_depth_indexed(
 
 
 @njit(cache=True)
+def interpolate_coast_distance_indexed(
+    x: float,
+    y: float,
+    points_x: np.ndarray,
+    points_y: np.ndarray,
+    coast_distance: np.ndarray,
+    triangles: np.ndarray,
+    grid_x_min: float,
+    grid_y_min: float,
+    grid_cell_size: float,
+    grid_n_cells_x: int,
+    grid_n_cells_y: int,
+    grid_cell_starts: np.ndarray,
+    grid_cell_counts: np.ndarray,
+    grid_triangles: np.ndarray,
+) -> float:
+    """
+    Interpolate distance-from-coastline at a point using grid-indexed triangle lookup.
+
+    Uses the spatial index for O(1) cell lookup instead of O(n) linear search.
+
+    Args:
+        x, y: Query point in UTM
+        points_x, points_y: Mesh vertex coordinates
+        coast_distance: Distance from coastline values at vertices (m)
+        triangles: Triangle vertex indices
+        grid_*: Spatial index arrays
+
+    Returns:
+        Interpolated distance from coastline (m), NaN if outside mesh
+    """
+    # Find grid cell
+    cx = int((x - grid_x_min) / grid_cell_size)
+    cy = int((y - grid_y_min) / grid_cell_size)
+
+    # Check bounds
+    if cx < 0 or cx >= grid_n_cells_x or cy < 0 or cy >= grid_n_cells_y:
+        return np.nan
+
+    cell_idx = cy * grid_n_cells_x + cx
+    start = grid_cell_starts[cell_idx]
+    count = grid_cell_counts[cell_idx]
+
+    # Search only triangles in this cell
+    for j in range(count):
+        tri_idx = grid_triangles[start + j]
+        i0, i1, i2 = triangles[tri_idx]
+
+        x0, y0 = points_x[i0], points_y[i0]
+        x1, y1 = points_x[i1], points_y[i1]
+        x2, y2 = points_x[i2], points_y[i2]
+
+        # Barycentric coordinates
+        denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+
+        if abs(denom) < 1e-10:
+            continue
+
+        a = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) / denom
+        b = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) / denom
+        c = 1.0 - a - b
+
+        # Check if inside triangle
+        eps = -1e-6
+        if a >= eps and b >= eps and c >= eps:
+            d0, d1, d2 = coast_distance[i0], coast_distance[i1], coast_distance[i2]
+            return a * d0 + b * d1 + c * d2
+
+    return np.nan
+
+
+@njit(cache=True)
 def celerity_gradient_indexed(
     x: float,
     y: float,
