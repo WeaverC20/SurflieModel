@@ -181,7 +181,7 @@ def plot_backward_rays(
 
     # Legend
     for term, color in termination_colors.items():
-        label = {'boundary': 'Reached boundary', 'domain': 'Left domain', 'max_steps': 'Max steps'}[term]
+        label = {'boundary': 'Reached boundary', 'land': 'Hit land', 'domain': 'Left domain', 'max_steps': 'Max steps'}[term]
         ax2.plot([], [], 's', color=color, markersize=10, label=label)
     ax2.legend(loc='upper left')
 
@@ -433,7 +433,7 @@ def trace_rays_with_convergence(
     depth_range: tuple = (2, 10),
     seed: int = 42,
     # Convergence parameters
-    alpha: float = 0.6,
+    alpha: float = 0.3,
     max_iterations: int = 20,
     tolerance: float = 0.05,  # 5% of directional spread = converged
 ):
@@ -552,10 +552,22 @@ def trace_rays_with_convergence(
         best_path_x = None
         best_path_y = None
 
-        # Adaptive alpha
+        # Adaptive alpha for gradient descent phase
         current_alpha = alpha
         prev_error = None
         consecutive_failures = 0
+
+        # Bounds tracking for bisection fallback
+        # Track theta_M values that gave positive vs negative errors
+        lower_bound = None  # theta_M that gave negative error (need to increase theta_M)
+        upper_bound = None  # theta_M that gave positive error (need to decrease theta_M)
+        lower_error = None
+        upper_error = None
+
+        # Oscillation detection
+        sign_changes = 0
+        prev_sign = None
+        using_bisection = False
 
         for iteration in range(max_iterations):
             # Trace ray backward
@@ -582,6 +594,7 @@ def trace_rays_with_convergence(
                 'alpha': current_alpha,
                 'path_x': path_x.copy(),
                 'path_y': path_y.copy(),
+                'method': 'bisection' if using_bisection else 'gradient',
             }
 
             if not reached_boundary:
@@ -597,7 +610,7 @@ def trace_rays_with_convergence(
 
                 # Backtrack: revert toward best known direction with smaller step
                 current_alpha *= 0.5
-                if prev_error is not None and best_theta_M is not None:
+                if best_theta_M is not None:
                     # Move back toward best direction
                     theta_M = best_theta_M
                 continue
@@ -630,15 +643,54 @@ def trace_rays_with_convergence(
                 converged = True
                 break
 
-            # Adaptive alpha: reduce if error increased
-            if prev_error is not None and abs(angle_diff) > abs(prev_error) * 1.1:
-                current_alpha *= 0.7  # Reduce step size
-                current_alpha = max(current_alpha, 0.1)  # Don't go below 0.1
+            # Update bounds for bisection
+            # Positive error means theta_arrival > target, so we need to adjust theta_M
+            # The relationship depends on local geometry, so we track bounds empirically
+            if angle_diff > 0:
+                # This theta_M gave too-positive arrival angle
+                if upper_bound is None or abs(angle_diff) < abs(upper_error):
+                    upper_bound = theta_M
+                    upper_error = angle_diff
+            else:
+                # This theta_M gave too-negative arrival angle
+                if lower_bound is None or abs(angle_diff) < abs(lower_error):
+                    lower_bound = theta_M
+                    lower_error = angle_diff
 
-            prev_error = angle_diff
+            # Detect oscillation (sign changes)
+            current_sign = 1 if angle_diff > 0 else -1
+            if prev_sign is not None and current_sign != prev_sign:
+                sign_changes += 1
+            prev_sign = current_sign
 
-            # Gradient descent update
-            theta_M = theta_M - current_alpha * angle_diff
+            # Switch to bisection after detecting oscillation (2+ sign changes)
+            # OR if we have valid bounds and gradient descent is struggling
+            have_valid_bounds = (lower_bound is not None and upper_bound is not None)
+
+            if not using_bisection and have_valid_bounds and sign_changes >= 2:
+                using_bisection = True
+
+            # Choose update method
+            if using_bisection and have_valid_bounds:
+                # Bisection: take midpoint between bounds
+                # Handle angle wraparound carefully
+                diff = upper_bound - lower_bound
+                while diff > 180:
+                    diff -= 360
+                while diff < -180:
+                    diff += 360
+                theta_M = lower_bound + diff / 2
+            else:
+                # Gradient descent with adaptive alpha
+                # Reduce alpha if error increased
+                if prev_error is not None and abs(angle_diff) > abs(prev_error) * 1.1:
+                    current_alpha *= 0.7
+                    current_alpha = max(current_alpha, 0.05)
+
+                prev_error = angle_diff
+
+                # Standard gradient descent update
+                theta_M = theta_M - current_alpha * angle_diff
 
             # Keep in valid range
             while theta_M > 360:
@@ -1329,7 +1381,7 @@ Examples:
     parser.add_argument(
         '--alpha', '-a',
         type=float,
-        default=0.6,
+        default=0.3,
         help='Relaxation factor for gradient descent (default: 0.6)'
     )
     parser.add_argument(
@@ -1341,7 +1393,7 @@ Examples:
     parser.add_argument(
         '--tolerance',
         type=float,
-        default=0.05,
+        default=0.1,
         help='Convergence tolerance as fraction of directional spread (default: 0.05 = 5%%)'
     )
 
