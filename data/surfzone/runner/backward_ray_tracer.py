@@ -375,8 +375,10 @@ def trace_backward_single(
     theta_M = nautical_to_math(theta_M_nautical)
 
     # BACKWARD: Negate direction to point AWAY from shore (toward ocean)
-    # Combined with negated gradients below, this makes rays bend toward
-    # FASTER celerity (deeper water) - the correct backward behavior
+    # This negation automatically causes the perpendicular (left-hand normal)
+    # to flip, which flips the sign of dC/dn in the refraction formula.
+    # As a result, rays naturally bend toward FASTER celerity (deeper water)
+    # without needing to modify the gradient inputs.
     dx = -np.cos(theta_M)  # NEGATED for backward tracing
     dy = -np.sin(theta_M)  # NEGATED for backward tracing
 
@@ -548,11 +550,12 @@ def trace_backward_single(
             grid_cell_starts, grid_cell_counts, grid_triangles
         )
 
-        # BACKWARD: NEGATE gradients so rays bend toward FASTER celerity (deeper water)
-        # Forward: dθ/ds = -(1/C) · ∂C/∂n (bends toward slower C / shallow)
-        # Backward: dθ/ds = +(1/C) · ∂C/∂n (bends toward faster C / deep)
-        # We achieve this by passing negated gradients to the standard formula
-        dx, dy = update_ray_direction(dx, dy, C, -dC_dx, -dC_dy, step_size)
+        # Refraction: use standard formula with UN-NEGATED gradients
+        # The direction (dx, dy) is already negated (pointing toward ocean),
+        # which automatically flips the perpendicular direction and causes
+        # dC/dn to have opposite sign. This makes rays bend toward FASTER
+        # celerity (deeper water) - the correct backward tracing behavior.
+        dx, dy = update_ray_direction(dx, dy, C, dC_dx, dC_dy, step_size)
 
         # Normal positive step (direction already points toward ocean)
         x += dx * step_size
