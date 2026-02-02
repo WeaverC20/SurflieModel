@@ -222,7 +222,8 @@ def view_result(
         px=2,
     )
 
-    layers = [bg_shaded]
+    # Start combining with * operator (like mesh viewer does)
+    plot = bg_shaded
 
     if ns_points is not None:
         ns_shaded = spread(
@@ -233,7 +234,7 @@ def view_result(
             ),
             px=2,
         )
-        layers.append(ns_shaded)
+        plot = plot * ns_shaded
 
     if nc_points is not None:
         nc_shaded = spread(
@@ -244,7 +245,7 @@ def view_result(
             ),
             px=3,
         )
-        layers.append(nc_shaded)
+        plot = plot * nc_shaded
 
     if conv_points is not None:
         conv_shaded = spread(
@@ -256,7 +257,7 @@ def view_result(
             ),
             px=4,
         )
-        layers.append(conv_shaded)
+        plot = plot * conv_shaded
 
     # Coastline overlay
     coastline_paths = []
@@ -273,12 +274,12 @@ def view_result(
             color='#ff00ff',  # Magenta
             line_width=2,
         )
-        layers.append(coastline_overlay)
+        plot = plot * coastline_overlay
 
-    # Combine all layers
-    plot = hv.Overlay(layers).opts(
-        width=1600,
-        height=1000,
+    # Apply final opts (like mesh viewer does)
+    plot = plot.opts(
+        width=1400,
+        height=900,
         xlabel=x_label,
         ylabel=y_label,
         tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
@@ -331,7 +332,7 @@ def view_result(
         """
     stats_html += "</div>"
 
-    # Layout
+    # Layout (match mesh viewer pattern)
     sidebar = pn.Column(
         pn.pane.HTML(legend_html, width=180),
         pn.Spacer(height=20),
@@ -341,6 +342,7 @@ def view_result(
         width=200,
     )
 
+    # Match mesh viewer layout exactly
     title = pn.pane.Markdown(
         f"# Surfzone Simulation Result: {result.region_name}",
         sizing_mode='stretch_width',
