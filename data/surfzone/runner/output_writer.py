@@ -396,6 +396,7 @@ def save_surfzone_result(
         mesh_x=result.mesh_x,
         mesh_y=result.mesh_y,
         mesh_depth=result.mesh_depth,
+        sampled=result.sampled,
         H_at_mesh=result.H_at_mesh,
         converged=result.converged,
         direction_at_mesh=result.direction_at_mesh,
@@ -442,7 +443,9 @@ def save_surfzone_result(
         "depth_range": list(result.depth_range),
         "partition_id": result.partition_id,
         "n_points": result.n_points,
+        "n_sampled": result.n_sampled,
         "n_converged": result.n_converged,
+        "sample_rate": result.sample_rate,
         "convergence_rate": result.convergence_rate,
         "statistics": stats,
         "bounds": {
@@ -494,6 +497,12 @@ def load_surfzone_result(npz_path: Path) -> 'SurfzoneSimulationResult':
     boundary_Tp = data['boundary_Tp']
     boundary_direction = data['boundary_direction']
 
+    # Load sampled array (backwards compatible - default to all True for old files)
+    if 'sampled' in data:
+        sampled = data['sampled']
+    else:
+        sampled = np.ones(len(mesh_x), dtype=bool)
+
     # Load metadata
     if json_path.exists():
         with open(json_path) as f:
@@ -509,6 +518,7 @@ def load_surfzone_result(npz_path: Path) -> 'SurfzoneSimulationResult':
         partition_id = 1
 
     n_points = len(mesh_x)
+    n_sampled = int(np.sum(sampled))
     n_converged = int(np.sum(converged))
 
     return SurfzoneSimulationResult(
@@ -517,11 +527,13 @@ def load_surfzone_result(npz_path: Path) -> 'SurfzoneSimulationResult':
         depth_range=depth_range,
         partition_id=partition_id,
         n_points=n_points,
+        n_sampled=n_sampled,
         n_converged=n_converged,
         point_results=[],  # Not stored in file
         mesh_x=mesh_x,
         mesh_y=mesh_y,
         mesh_depth=mesh_depth,
+        sampled=sampled,
         H_at_mesh=H_at_mesh,
         converged=converged,
         direction_at_mesh=direction_at_mesh,

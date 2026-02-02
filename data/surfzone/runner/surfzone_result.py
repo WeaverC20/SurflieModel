@@ -48,6 +48,9 @@ class SurfzoneSimulationResult:
 
     Contains individual point results and quick-access numpy arrays
     for efficient analysis and visualization.
+
+    When sampling is used, all filtered points are included but only
+    sampled ones have computed values (non-sampled have NaN).
     """
     # Metadata
     region_name: str
@@ -56,21 +59,23 @@ class SurfzoneSimulationResult:
     partition_id: int        # 1 = primary swell
 
     # Counts
-    n_points: int
-    n_converged: int
+    n_points: int            # Total points in depth range
+    n_sampled: int           # Points actually processed
+    n_converged: int         # Points that converged
 
-    # Individual point results
+    # Individual point results (only for sampled points)
     point_results: List[SurfzonePointResult]
 
     # Quick-access arrays (for visualization/analysis)
-    # All arrays have shape (n_points,)
+    # All arrays have shape (n_points,) - includes ALL filtered points
     mesh_x: np.ndarray
     mesh_y: np.ndarray
     mesh_depth: np.ndarray
-    H_at_mesh: np.ndarray    # Wave heights at all mesh points
-    converged: np.ndarray    # Boolean convergence flags
-    direction_at_mesh: np.ndarray  # Wave directions at mesh points
-    K_shoaling: np.ndarray   # Shoaling coefficients
+    sampled: np.ndarray      # Boolean: True if point was processed
+    H_at_mesh: np.ndarray    # Wave heights (NaN for non-sampled)
+    converged: np.ndarray    # Boolean convergence flags (False for non-sampled)
+    direction_at_mesh: np.ndarray  # Wave directions (NaN for non-sampled)
+    K_shoaling: np.ndarray   # Shoaling coefficients (NaN for non-sampled)
 
     # Boundary arrays (corresponding to each mesh point)
     boundary_Hs: np.ndarray
@@ -79,8 +84,13 @@ class SurfzoneSimulationResult:
 
     @property
     def convergence_rate(self) -> float:
-        """Fraction of points that converged."""
-        return self.n_converged / self.n_points if self.n_points > 0 else 0.0
+        """Fraction of sampled points that converged."""
+        return self.n_converged / self.n_sampled if self.n_sampled > 0 else 0.0
+
+    @property
+    def sample_rate(self) -> float:
+        """Fraction of points that were sampled."""
+        return self.n_sampled / self.n_points if self.n_points > 0 else 0.0
 
     @property
     def mean_H_converged(self) -> float:
@@ -102,7 +112,8 @@ class SurfzoneSimulationResult:
             f"SurfzoneSimulationResult: {self.region_name}",
             f"  Timestamp: {self.timestamp}",
             f"  Depth range: {self.depth_range[0]:.1f} - {self.depth_range[1]:.1f} m",
-            f"  Points: {self.n_points} total, {self.n_converged} converged ({100*self.convergence_rate:.1f}%)",
+            f"  Points: {self.n_points} total, {self.n_sampled} sampled ({100*self.sample_rate:.1f}%)",
+            f"  Converged: {self.n_converged} ({100*self.convergence_rate:.1f}% of sampled)",
         ]
 
         if self.n_converged > 0:
@@ -122,36 +133,46 @@ def create_simulation_result(
     region_name: str,
     depth_range: tuple,
     partition_id: int,
-    point_results: List[SurfzonePointResult],
+    point_results: List,
+    all_x: Optional[np.ndarray] = None,
+    all_y: Optional[np.ndarray] = None,
+    all_depths: Optional[np.ndarray] = None,
+    sampled_mask: Optional[np.ndarray] = None,
 ) -> SurfzoneSimulationResult:
     """
-    Create a SurfzoneSimulationResult from a list of point results.
+    Create a SurfzoneSimulationResult from point results.
 
-    Extracts arrays from point results for efficient access.
+    When sampling is used, point_results contains (index, result) tuples,
+    and all_x/all_y/all_depths/sampled_mask provide info for all filtered points.
 
     Args:
         region_name: Name of the region (e.g., "Southern California")
         depth_range: (min_depth, max_depth) tuple
         partition_id: Partition ID (1 = primary swell)
-        point_results: List of SurfzonePointResult objects
+        point_results: List of SurfzonePointResult objects, or (index, result) tuples
+        all_x: X coordinates of all filtered points (optional, for sampling)
+        all_y: Y coordinates of all filtered points (optional, for sampling)
+        all_depths: Depths of all filtered points (optional, for sampling)
+        sampled_mask: Boolean mask indicating which points were sampled (optional)
 
     Returns:
         SurfzoneSimulationResult with arrays extracted
     """
-    n_points = len(point_results)
-
-    if n_points == 0:
+    # Handle empty case
+    if len(point_results) == 0 and (all_x is None or len(all_x) == 0):
         return SurfzoneSimulationResult(
             region_name=region_name,
             timestamp=datetime.now().isoformat(),
             depth_range=depth_range,
             partition_id=partition_id,
             n_points=0,
+            n_sampled=0,
             n_converged=0,
             point_results=[],
             mesh_x=np.array([]),
             mesh_y=np.array([]),
             mesh_depth=np.array([]),
+            sampled=np.array([], dtype=bool),
             H_at_mesh=np.array([]),
             converged=np.array([], dtype=bool),
             direction_at_mesh=np.array([]),
@@ -161,18 +182,52 @@ def create_simulation_result(
             boundary_direction=np.array([]),
         )
 
-    # Extract arrays from point results
-    mesh_x = np.array([r.mesh_x for r in point_results])
-    mesh_y = np.array([r.mesh_y for r in point_results])
-    mesh_depth = np.array([r.mesh_depth for r in point_results])
-    H_at_mesh = np.array([r.H_at_mesh for r in point_results])
-    converged = np.array([r.converged for r in point_results], dtype=bool)
-    direction_at_mesh = np.array([r.direction_at_mesh for r in point_results])
-    K_shoaling = np.array([r.K_shoaling for r in point_results])
-    boundary_Hs = np.array([r.boundary_Hs for r in point_results])
-    boundary_Tp = np.array([r.boundary_Tp for r in point_results])
-    boundary_direction = np.array([r.boundary_direction for r in point_results])
+    # Check if point_results contains (index, result) tuples (sampling mode)
+    # or just SurfzonePointResult objects (legacy mode)
+    if len(point_results) > 0 and isinstance(point_results[0], tuple):
+        # Sampling mode: point_results is [(index, result), ...]
+        indexed_results = point_results
+        results_only = [r for _, r in indexed_results]
+    else:
+        # Legacy mode: point_results is [result, ...] with no sampling
+        results_only = point_results
+        indexed_results = [(i, r) for i, r in enumerate(point_results)]
 
+    # Determine total points and sampled mask
+    if all_x is not None:
+        n_points = len(all_x)
+        mesh_x = all_x.copy()
+        mesh_y = all_y.copy()
+        mesh_depth = all_depths.copy()
+        sampled = sampled_mask.copy() if sampled_mask is not None else np.ones(n_points, dtype=bool)
+    else:
+        # Legacy mode: all points were sampled
+        n_points = len(results_only)
+        mesh_x = np.array([r.mesh_x for r in results_only])
+        mesh_y = np.array([r.mesh_y for r in results_only])
+        mesh_depth = np.array([r.mesh_depth for r in results_only])
+        sampled = np.ones(n_points, dtype=bool)
+
+    # Initialize arrays with NaN (for non-sampled points)
+    H_at_mesh = np.full(n_points, np.nan)
+    converged = np.zeros(n_points, dtype=bool)
+    direction_at_mesh = np.full(n_points, np.nan)
+    K_shoaling = np.full(n_points, np.nan)
+    boundary_Hs = np.full(n_points, np.nan)
+    boundary_Tp = np.full(n_points, np.nan)
+    boundary_direction = np.full(n_points, np.nan)
+
+    # Fill in values from point results at their indices
+    for idx, result in indexed_results:
+        H_at_mesh[idx] = result.H_at_mesh
+        converged[idx] = result.converged
+        direction_at_mesh[idx] = result.direction_at_mesh
+        K_shoaling[idx] = result.K_shoaling
+        boundary_Hs[idx] = result.boundary_Hs
+        boundary_Tp[idx] = result.boundary_Tp
+        boundary_direction[idx] = result.boundary_direction
+
+    n_sampled = int(np.sum(sampled))
     n_converged = int(np.sum(converged))
 
     return SurfzoneSimulationResult(
@@ -181,11 +236,13 @@ def create_simulation_result(
         depth_range=depth_range,
         partition_id=partition_id,
         n_points=n_points,
+        n_sampled=n_sampled,
         n_converged=n_converged,
-        point_results=point_results,
+        point_results=results_only,
         mesh_x=mesh_x,
         mesh_y=mesh_y,
         mesh_depth=mesh_depth,
+        sampled=sampled,
         H_at_mesh=H_at_mesh,
         converged=converged,
         direction_at_mesh=direction_at_mesh,

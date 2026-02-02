@@ -46,6 +46,12 @@ def main():
                         help='Mesh directory (default: auto-detect socal mesh)')
     parser.add_argument('--swan-dir', type=str, default=None,
                         help='SWAN run directory (default: data/swan/runs/socal/coarse/latest)')
+    parser.add_argument('--sample-fraction', type=float, default=None,
+                        help='Fraction of points to sample (e.g., 0.1 for 10%%)')
+    parser.add_argument('--sample-count', type=int, default=None,
+                        help='Exact number of points to sample')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for reproducible sampling')
     args = parser.parse_args()
 
     # Default paths
@@ -86,6 +92,12 @@ def main():
     logger.info(f"SWAN: {args.swan_dir}")
     logger.info(f"Depth range: {args.min_depth} - {args.max_depth} m")
     logger.info(f"Output: {args.output_dir}")
+    if args.sample_fraction is not None:
+        logger.info(f"Sampling: {args.sample_fraction * 100:.1f}% of points")
+    elif args.sample_count is not None:
+        logger.info(f"Sampling: {args.sample_count} points")
+    if args.seed is not None:
+        logger.info(f"Random seed: {args.seed}")
     logger.info("=" * 60)
 
     # Load mesh
@@ -169,6 +181,9 @@ def main():
         min_depth=args.min_depth,
         max_depth=args.max_depth,
         partition_id=1,  # Primary swell
+        sample_fraction=args.sample_fraction,
+        sample_count=args.sample_count,
+        random_seed=args.seed,
     )
 
     # Run simulation

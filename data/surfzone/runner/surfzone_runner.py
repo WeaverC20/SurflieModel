@@ -58,6 +58,11 @@ class SurfzoneRunnerConfig:
     # Default directional spread (degrees) if not available from SWAN
     default_directional_spread: float = 30.0
 
+    # Sampling options (for fast iteration/debugging)
+    sample_fraction: Optional[float] = None  # e.g., 0.1 for 10% of points
+    sample_count: Optional[int] = None       # e.g., 1000 for exactly 1000 points
+    random_seed: Optional[int] = None        # For reproducibility
+
 
 class SurfzoneRunner:
     """
@@ -293,6 +298,10 @@ class SurfzoneRunner:
         """
         Run simulation for all filtered mesh points.
 
+        If sampling is configured, only a subset of points will be processed,
+        but results are returned for all filtered points with non-sampled ones
+        marked in the `sampled` array.
+
         Args:
             region_name: Name of the region for metadata
 
@@ -301,37 +310,69 @@ class SurfzoneRunner:
         """
         # Get filtered points
         x, y, depths, indices = self.get_filtered_points()
-        n_points = len(x)
+        n_total = len(x)
 
-        if n_points == 0:
+        if n_total == 0:
             logger.warning("No mesh points in specified depth range")
             return create_simulation_result(
                 region_name=region_name,
                 depth_range=(self.config.min_depth, self.config.max_depth),
                 partition_id=self.config.partition_id,
                 point_results=[],
+                all_x=np.array([]),
+                all_y=np.array([]),
+                all_depths=np.array([]),
+                sampled_mask=np.array([], dtype=bool),
             )
 
-        logger.info(f"Running simulation for {n_points} points...")
+        # Determine which points to sample
+        sampled_mask = np.ones(n_total, dtype=bool)  # Default: all sampled
+
+        if self.config.sample_fraction is not None or self.config.sample_count is not None:
+            # Set random seed if specified
+            if self.config.random_seed is not None:
+                np.random.seed(self.config.random_seed)
+
+            # Determine number of points to sample
+            if self.config.sample_count is not None:
+                n_sample = min(self.config.sample_count, n_total)
+            else:
+                n_sample = max(1, int(n_total * self.config.sample_fraction))
+
+            # Randomly select indices to sample
+            sample_indices = np.random.choice(n_total, n_sample, replace=False)
+            sampled_mask = np.zeros(n_total, dtype=bool)
+            sampled_mask[sample_indices] = True
+
+            logger.info(f"Sampling {n_sample} of {n_total} points ({100*n_sample/n_total:.1f}%)")
+
+        n_to_run = np.sum(sampled_mask)
+        logger.info(f"Running simulation for {n_to_run} points...")
         t_start = time.perf_counter()
 
-        # Process each point
+        # Process only sampled points
         point_results = []
         n_converged = 0
+        processed = 0
 
-        for i, (mx, my, md) in enumerate(zip(x, y, depths)):
-            result = self.run_single_point(mx, my, md)
-            point_results.append(result)
+        for i in range(n_total):
+            if not sampled_mask[i]:
+                continue
+
+            result = self.run_single_point(x[i], y[i], depths[i])
+            point_results.append((i, result))  # Store index with result
 
             if result.converged:
                 n_converged += 1
 
+            processed += 1
+
             # Progress logging
-            if (i + 1) % 500 == 0 or i == n_points - 1:
+            if processed % 500 == 0 or processed == n_to_run:
                 elapsed = time.perf_counter() - t_start
-                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                rate = processed / elapsed if elapsed > 0 else 0
                 logger.info(
-                    f"  Progress: {i+1}/{n_points} ({100*(i+1)/n_points:.1f}%), "
+                    f"  Progress: {processed}/{n_to_run} ({100*processed/n_to_run:.1f}%), "
                     f"converged: {n_converged}, rate: {rate:.1f} pts/sec"
                 )
 
@@ -342,12 +383,16 @@ class SurfzoneRunner:
             depth_range=(self.config.min_depth, self.config.max_depth),
             partition_id=self.config.partition_id,
             point_results=point_results,
+            all_x=x,
+            all_y=y,
+            all_depths=depths,
+            sampled_mask=sampled_mask,
         )
 
         logger.info(
-            f"Simulation complete: {n_points} points in {elapsed:.1f}s "
-            f"({n_points/elapsed:.1f} pts/sec), "
-            f"{n_converged} converged ({100*n_converged/n_points:.1f}%)"
+            f"Simulation complete: {n_to_run} points in {elapsed:.1f}s "
+            f"({n_to_run/elapsed:.1f} pts/sec), "
+            f"{n_converged} converged ({100*n_converged/n_to_run:.1f}%)"
         )
 
         return result

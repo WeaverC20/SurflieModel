@@ -131,8 +131,9 @@ def view_result(
     in_range_mask = (depth_all >= depth_range[0]) & (depth_all <= depth_range[1])
     n_in_range = np.sum(in_range_mask)
     print(f"Points in depth range [{depth_range[0]}-{depth_range[1]}m]: {n_in_range:,}")
-    print(f"Simulated points: {result.n_points}")
-    print(f"Converged: {result.n_converged} ({100*result.convergence_rate:.1f}%)")
+    print(f"Total filtered points: {result.n_points}")
+    print(f"Sampled: {result.n_sampled} ({100*result.sample_rate:.1f}%)")
+    print(f"Converged: {result.n_converged} ({100*result.convergence_rate:.1f}% of sampled)")
 
     # Convert coordinates if needed
     if use_lonlat:
@@ -168,8 +169,22 @@ def view_result(
     bg_points = hv.Points(bg_df, kdims=['x', 'y'], vdims=['val'])
     bg_cmap = ['#333344', '#333344']  # Dark gray
 
-    # Layer 2: Non-converged points (orange/amber - distinct from wave colors)
-    non_converged_mask = ~result.converged
+    # Layer 2: Not sampled points (light gray - in depth range but not processed)
+    not_sampled_mask = ~result.sampled
+    n_not_sampled = np.sum(not_sampled_mask)
+    if n_not_sampled > 0:
+        ns_df = pd.DataFrame({
+            'x': result_x[not_sampled_mask],
+            'y': result_y[not_sampled_mask],
+            'val': np.ones(n_not_sampled),
+        })
+        ns_points = hv.Points(ns_df, kdims=['x', 'y'], vdims=['val'])
+        ns_cmap = ['#666677', '#666677']  # Light gray
+    else:
+        ns_points = None
+
+    # Layer 3: Non-converged points (orange/amber - sampled but didn't converge)
+    non_converged_mask = result.sampled & ~result.converged
     n_non_converged = np.sum(non_converged_mask)
     if n_non_converged > 0:
         nc_df = pd.DataFrame({
@@ -182,7 +197,7 @@ def view_result(
     else:
         nc_points = None
 
-    # Layer 3: Converged points - colored by wave height
+    # Layer 4: Converged points - colored by wave height
     # Using blue-cyan-green colormap (avoids orange/red used for non-converged)
     converged_mask = result.converged
     if result.n_converged > 0:
@@ -208,6 +223,17 @@ def view_result(
     )
 
     layers = [bg_shaded]
+
+    if ns_points is not None:
+        ns_shaded = spread(
+            datashade(
+                ns_points,
+                aggregator=ds.mean('val'),
+                cmap=ns_cmap,
+            ),
+            px=2,
+        )
+        layers.append(ns_shaded)
 
     if nc_points is not None:
         nc_shaded = spread(
@@ -270,6 +296,7 @@ def view_result(
     <div style="color: white; font-size: 12px; padding: 10px; background: #1a1a2e;">
         <b>Legend</b><br><br>
         <span style="color: #333344;">●</span> Outside depth range<br>
+        <span style="color: #666677;">●</span> Not sampled (skipped)<br>
         <span style="color: #ff8800;">●</span> Did not converge<br>
         <span style="color: #00cccc;">●</span> Converged (see colorbar)<br>
         <span style="color: #ff00ff;">—</span> Coastline<br>
@@ -285,8 +312,9 @@ def view_result(
         Partition: {result.partition_id} (primary swell)<br><br>
         Total mesh: {n_mesh:,}<br>
         In range: {n_in_range:,}<br>
-        Simulated: {result.n_points:,}<br>
-        Converged: {result.n_converged:,} ({100*result.convergence_rate:.1f}%)<br><br>
+        Filtered: {result.n_points:,}<br>
+        Sampled: {result.n_sampled:,} ({100*result.sample_rate:.1f}%)<br>
+        Converged: {result.n_converged:,} ({100*result.convergence_rate:.1f}% of sampled)<br><br>
     """
     if result.n_converged > 0:
         H_conv = result.H_at_mesh[result.converged]
