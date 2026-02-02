@@ -47,13 +47,13 @@ class SurfzoneRunnerConfig:
     # Partition selection
     partition_id: int = 1    # 1 = primary swell (default)
 
-    # Ray tracing parameters
+    # Ray tracing parameters (tuned to match debugger for high convergence)
     boundary_depth_threshold: float = 50.0  # Depth threshold for boundary (m)
     step_size: float = 15.0   # Ray step size (m)
     max_steps: int = 3000     # Maximum steps per ray
-    max_iterations: int = 15  # Maximum convergence iterations
+    max_iterations: int = 20  # Maximum convergence iterations (was 15)
     convergence_tolerance: float = 0.10  # Convergence tolerance (fraction of spread)
-    alpha: float = 0.6        # Gradient descent relaxation factor
+    alpha: float = 0.3        # Gradient descent relaxation factor (was 0.6 - too aggressive)
 
     # Default directional spread (degrees) if not available from SWAN
     default_directional_spread: float = 30.0
