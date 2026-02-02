@@ -171,6 +171,190 @@ class BoundarySegment:
 
 
 # =============================================================================
+# Boundary Direction Lookup (KD-tree based)
+# =============================================================================
+
+class BoundaryDirectionLookup:
+    """
+    Fast KD-tree based lookup of wave partition directions at boundary points.
+
+    When a ray arrives at boundary location (x, y), this class efficiently
+    finds the nearest SWAN boundary point and returns the wave direction there.
+
+    This allows the convergence algorithm to check if the ray's arrival direction
+    matches the ACTUAL SWAN direction at that specific boundary location,
+    rather than using a fixed target direction everywhere.
+
+    Example usage:
+        # Setup (once per forecast)
+        from data.surfzone.runner.swan_input_provider import SwanInputProvider
+        swan = SwanInputProvider(run_dir)
+        boundary_conditions = swan.get_boundary_from_mesh(mesh)
+        lookup = BoundaryDirectionLookup(boundary_conditions)
+
+        # Per-ray query (fast)
+        direction = lookup.get_direction_at(end_x, end_y, partition_idx=0)
+    """
+
+    def __init__(self, boundary_conditions: 'BoundaryConditions'):
+        """
+        Build KD-tree from boundary conditions.
+
+        Args:
+            boundary_conditions: BoundaryConditions object from SwanInputProvider
+        """
+        from scipy.spatial import KDTree
+
+        self.conditions = boundary_conditions
+        self.n_points = boundary_conditions.n_points
+
+        # Build KD-tree on (x, y) UTM coordinates for fast nearest-neighbor lookup
+        coords = np.column_stack([boundary_conditions.x, boundary_conditions.y])
+        self.kdtree = KDTree(coords)
+
+        # Pre-extract arrays for each partition for fast access
+        self.partition_directions = []
+        self.partition_hs = []
+        self.partition_tp = []
+        self.partition_valid = []
+
+        for p in boundary_conditions.partitions:
+            self.partition_directions.append(p.direction.copy())
+            self.partition_hs.append(p.hs.copy())
+            self.partition_tp.append(p.tp.copy())
+            self.partition_valid.append(p.is_valid.copy())
+
+        self.n_partitions = len(self.partition_directions)
+
+        logger.info(
+            f"BoundaryDirectionLookup initialized: {self.n_points} boundary points, "
+            f"{self.n_partitions} partitions"
+        )
+
+    def get_direction_at(self, x: float, y: float, partition_idx: int = 0) -> float:
+        """
+        Get wave direction at nearest boundary point. O(log n) lookup.
+
+        Args:
+            x: UTM x coordinate of query point
+            y: UTM y coordinate of query point
+            partition_idx: Which partition to query (0=primary, 1=secondary, etc.)
+
+        Returns:
+            Wave direction in degrees (nautical convention)
+        """
+        if partition_idx >= self.n_partitions:
+            return np.nan
+
+        _, idx = self.kdtree.query([x, y])
+        return self.partition_directions[partition_idx][idx]
+
+    def get_partition_data_at(
+        self, x: float, y: float, partition_idx: int = 0
+    ) -> Tuple[float, float, float, bool]:
+        """
+        Get full partition data (direction, Hs, Tp, valid) at nearest boundary point.
+
+        Args:
+            x: UTM x coordinate
+            y: UTM y coordinate
+            partition_idx: Which partition to query
+
+        Returns:
+            (direction, hs, tp, is_valid) tuple
+        """
+        if partition_idx >= self.n_partitions:
+            return (np.nan, np.nan, np.nan, False)
+
+        _, idx = self.kdtree.query([x, y])
+        return (
+            self.partition_directions[partition_idx][idx],
+            self.partition_hs[partition_idx][idx],
+            self.partition_tp[partition_idx][idx],
+            self.partition_valid[partition_idx][idx],
+        )
+
+    def get_all_partitions_at(self, x: float, y: float) -> List[dict]:
+        """
+        Get all valid partition data at nearest boundary point.
+
+        Args:
+            x: UTM x coordinate
+            y: UTM y coordinate
+
+        Returns:
+            List of dicts with 'direction', 'hs', 'tp', 'partition_idx' for valid partitions
+        """
+        _, idx = self.kdtree.query([x, y])
+
+        result = []
+        for i in range(self.n_partitions):
+            if self.partition_valid[i][idx]:
+                result.append({
+                    'partition_idx': i,
+                    'direction': self.partition_directions[i][idx],
+                    'hs': self.partition_hs[i][idx],
+                    'tp': self.partition_tp[i][idx],
+                })
+        return result
+
+    def get_arrays_for_numba(self) -> dict:
+        """
+        Get raw numpy arrays for use in Numba-compiled functions.
+
+        Returns:
+            Dict with 'boundary_x', 'boundary_y', 'directions' arrays
+            for each partition.
+        """
+        return {
+            'boundary_x': np.ascontiguousarray(self.conditions.x),
+            'boundary_y': np.ascontiguousarray(self.conditions.y),
+            'partition_directions': [
+                np.ascontiguousarray(d) for d in self.partition_directions
+            ],
+            'partition_hs': [np.ascontiguousarray(h) for h in self.partition_hs],
+            'partition_tp': [np.ascontiguousarray(t) for t in self.partition_tp],
+            'partition_valid': [np.ascontiguousarray(v) for v in self.partition_valid],
+        }
+
+
+@njit(cache=True)
+def find_nearest_boundary_direction(
+    query_x: float,
+    query_y: float,
+    boundary_x: np.ndarray,
+    boundary_y: np.ndarray,
+    boundary_directions: np.ndarray,
+) -> float:
+    """
+    Find nearest boundary point and return its direction (Numba-compatible).
+
+    Uses simple linear search - efficient for ~1000 boundary points.
+    For larger boundaries, use the KDTree-based BoundaryDirectionLookup class.
+
+    Args:
+        query_x, query_y: Query point in UTM coordinates
+        boundary_x, boundary_y: Boundary point coordinates (N,)
+        boundary_directions: Wave directions at each boundary point (N,)
+
+    Returns:
+        Wave direction at nearest boundary point (degrees, nautical)
+    """
+    min_dist_sq = np.inf
+    best_idx = 0
+
+    for i in range(len(boundary_x)):
+        dx = query_x - boundary_x[i]
+        dy = query_y - boundary_y[i]
+        dist_sq = dx * dx + dy * dy
+        if dist_sq < min_dist_sq:
+            min_dist_sq = dist_sq
+            best_idx = i
+
+    return boundary_directions[best_idx]
+
+
+# =============================================================================
 # Initial Guess Computation
 # =============================================================================
 

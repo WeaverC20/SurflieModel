@@ -38,8 +38,117 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from data.surfzone.runner.backward_ray_tracer import (
     trace_backward_single,
     compute_initial_direction_blended,
+    BoundaryDirectionLookup,
+    find_nearest_boundary_direction,
 )
 from data.surfzone.runner.wave_physics import deep_water_properties
+
+
+# =============================================================================
+# SWAN Boundary Conditions Loading
+# =============================================================================
+
+def load_swan_boundary_lookup(mesh, swan_run_dir=None):
+    """
+    Load BoundaryDirectionLookup from actual SWAN run data.
+
+    Uses the mesh's coast_distance field to find points near the offshore
+    boundary (where rays terminate), then samples SWAN data at those locations.
+
+    Args:
+        mesh: SurfZoneMesh object
+        swan_run_dir: Path to SWAN run directory. If None, uses most recent socal run.
+
+    Returns:
+        BoundaryDirectionLookup object with real SWAN data
+    """
+    from data.surfzone.runner.swan_input_provider import (
+        SwanInputProvider, BoundaryConditions, WavePartition
+    )
+
+    # Default to most recent socal run (same region as debug mesh)
+    if swan_run_dir is None:
+        swan_run_dir = PROJECT_ROOT / "data" / "swan" / "runs" / "socal" / "coarse" / "latest"
+
+    print(f"Loading SWAN data from: {swan_run_dir}")
+
+    # Load SWAN data
+    swan = SwanInputProvider(swan_run_dir)
+
+    # Get boundary points from mesh using coast_distance
+    # These are the points where rays will terminate
+    arrays = mesh.get_numba_arrays()
+    coast_distance = arrays.get('coast_distance', None)
+    offshore_distance_m = arrays.get('offshore_distance_m', 0.0)
+
+    if coast_distance is None or offshore_distance_m <= 0:
+        raise ValueError("Mesh does not have coast_distance data")
+
+    # Find points near the offshore boundary (within 10% of threshold)
+    boundary_threshold = offshore_distance_m * 0.90
+    boundary_mask = coast_distance >= boundary_threshold
+    boundary_indices = np.where(boundary_mask)[0]
+
+    print(f"  Found {len(boundary_indices)} mesh points near offshore boundary")
+
+    # Subsample if too many points (for efficiency)
+    max_points = 2000
+    if len(boundary_indices) > max_points:
+        np.random.seed(42)
+        boundary_indices = np.random.choice(boundary_indices, max_points, replace=False)
+        print(f"  Subsampled to {max_points} points")
+
+    # Get UTM coordinates
+    boundary_x = arrays['points_x'][boundary_indices].copy()
+    boundary_y = arrays['points_y'][boundary_indices].copy()
+
+    # Convert to lon/lat for SWAN sampling
+    lons, lats = mesh.utm_to_lon_lat(boundary_x, boundary_y)
+
+    print(f"  Sampling SWAN data at {len(lons)} boundary points...")
+
+    # Sample SWAN partition data at these points
+    sampled = swan.sample_at_points(lons, lats, use_nearest_fallback=True)
+
+    # Convert to WavePartition objects
+    partitions = []
+    for part_id, data in sampled.items():
+        hs = data['hs']
+        tp = data['tp']
+        direction = data['dir']
+
+        # Determine valid points
+        is_valid = ~np.isnan(hs) & (hs > 0) & ~np.isnan(tp) & (tp > 0)
+
+        partitions.append(WavePartition(
+            hs=hs,
+            tp=tp,
+            direction=direction,
+            partition_id=part_id,
+            is_valid=is_valid,
+        ))
+
+    # Create boundary conditions
+    boundary_conditions = BoundaryConditions(
+        x=boundary_x,
+        y=boundary_y,
+        lon=lons,
+        lat=lats,
+        partitions=partitions,
+    )
+
+    print(f"  Loaded {boundary_conditions.n_points} boundary points")
+    print(f"  Partitions: {boundary_conditions.n_partitions}")
+    for p in boundary_conditions.partitions:
+        n_valid = np.sum(p.is_valid)
+        if n_valid > 0:
+            valid_hs = p.hs[p.is_valid]
+            valid_dir = p.direction[p.is_valid]
+            print(f"    {p.label}: {n_valid} valid, Hs={valid_hs.min():.2f}-{valid_hs.max():.2f}m, "
+                  f"Dir={valid_dir.min():.0f}°-{valid_dir.max():.0f}°")
+
+    # Create and return the lookup
+    return BoundaryDirectionLookup(boundary_conditions)
 
 
 # =============================================================================
@@ -436,6 +545,9 @@ def trace_rays_with_convergence(
     alpha: float = 0.3,
     max_iterations: int = 20,
     tolerance: float = 0.05,  # 5% of directional spread = converged
+    # Boundary lookup for dynamic target direction
+    boundary_lookup: 'BoundaryDirectionLookup' = None,
+    partition_idx: int = 0,  # Which partition to check (0=primary, 1=secondary, etc.)
 ):
     """
     Trace rays with convergence iteration to match partition direction at boundary.
@@ -444,16 +556,21 @@ def trace_rays_with_convergence(
     the ray arrives at the boundary with direction matching the partition direction.
 
     Convergence uses gradient descent:
-        θ_M_new = θ_M - α × (θ_arrival - θ_partition)
+        θ_M_new = θ_M - α × (θ_arrival - θ_target)
 
     Convergence criterion:
-        |θ_arrival - θ_partition| < tolerance × directional_spread
+        |θ_arrival - θ_target| < tolerance × directional_spread
+
+    The target direction can either be:
+    1. Fixed (partition_direction parameter) - same for all rays
+    2. Dynamic (boundary_lookup) - looked up at each ray's arrival point
 
     Args:
         mesh: SurfZoneMesh object
         n_rays: Number of rays to trace
         T: Wave period (s)
-        partition_direction: Target swell direction at boundary (nautical degrees)
+        partition_direction: Fallback target direction (nautical degrees)
+            Used when boundary_lookup is None.
         directional_spread: Directional spread of the partition (degrees)
         boundary_depth: Depth threshold (0 = use coast_distance boundary)
         step_size: Ray marching step size (m)
@@ -464,6 +581,10 @@ def trace_rays_with_convergence(
         alpha: Relaxation factor for gradient descent (0.5-0.7 typical)
         max_iterations: Maximum convergence iterations
         tolerance: Convergence tolerance as fraction of directional_spread
+        boundary_lookup: BoundaryDirectionLookup for dynamic target directions.
+            If provided, target direction is fetched from nearest SWAN boundary
+            point at each ray's arrival location.
+        partition_idx: Which partition to query from boundary_lookup (0=primary)
 
     Returns:
         List of ray data dicts with convergence information
@@ -507,7 +628,13 @@ def trace_rays_with_convergence(
     # Convergence threshold in degrees
     convergence_threshold = tolerance * directional_spread
     print(f"\nConvergence settings:")
-    print(f"  Target direction: {partition_direction}° (nautical)")
+    if boundary_lookup is not None:
+        print(f"  Target direction: DYNAMIC (from SWAN boundary lookup)")
+        print(f"    Boundary points: {boundary_lookup.n_points}")
+        print(f"    Partition index: {partition_idx}")
+        print(f"    Fallback direction: {partition_direction}° (nautical)")
+    else:
+        print(f"  Target direction: {partition_direction}° (nautical) [FIXED]")
     print(f"  Directional spread: {directional_spread}°")
     print(f"  Tolerance: {tolerance*100:.0f}% of spread = {convergence_threshold:.1f}°")
     print(f"  Alpha (relaxation): {alpha}")
@@ -617,14 +744,23 @@ def trace_rays_with_convergence(
 
             consecutive_failures = 0  # Reset on success
 
+            # Get target direction - from boundary lookup if available, else fixed
+            if boundary_lookup is not None:
+                target_direction = boundary_lookup.get_direction_at(
+                    end_x, end_y, partition_idx
+                )
+            else:
+                target_direction = partition_direction
+
             # Compute angle error (handle wrap-around)
-            angle_diff = theta_arrival - partition_direction
+            angle_diff = theta_arrival - target_direction
             while angle_diff > 180:
                 angle_diff -= 360
             while angle_diff < -180:
                 angle_diff += 360
 
             iteration_data['error'] = angle_diff
+            iteration_data['target_direction'] = target_direction  # Track for debugging
             iteration_history.append(iteration_data)
 
             # Track best solution
@@ -773,6 +909,7 @@ def plot_convergence_rays(
     output_path=None,
     zoom_center=None,
     zoom_range_km=15.0,
+    use_dynamic_targeting: bool = False,
 ):
     """
     Plot ray paths with convergence information.
@@ -937,7 +1074,7 @@ def plot_convergence_rays(
         f"  Not converged: {not_converged_count} ({100*not_converged_count/total:.0f}%)",
         f"  Failed to reach: {failed_count} ({100*failed_count/total:.0f}%)",
         f"",
-        f"Target direction: {partition_direction}° (nautical)",
+        f"Target direction: {'Dynamic (SWAN)' if use_dynamic_targeting else f'{partition_direction}°'} (nautical)",
         f"Directional spread: {directional_spread}°",
         f"Convergence threshold: ±{convergence_threshold:.1f}°",
         f"",
@@ -991,6 +1128,7 @@ def plot_detailed_convergence(
     partition_direction: float,
     title="Detailed Convergence: All Iteration Paths",
     output_path=None,
+    use_dynamic_targeting: bool = False,
 ):
     """
     Plot detailed convergence showing ALL attempted paths for each ray.
@@ -1109,8 +1247,17 @@ def plot_detailed_convergence(
         final_err = ray.get('final_error', np.nan)
         err_str = f"{final_err:+.1f}°" if not np.isnan(final_err) else "N/A"
 
+        # Extract the target direction from the last successful iteration
+        target_dir = None
+        for h in reversed(history):
+            if h.get('reached_boundary') and 'target_direction' in h:
+                target_dir = h['target_direction']
+                break
+
+        # Build title with target direction info
+        target_str = f", target: {target_dir:.0f}°" if target_dir is not None else ""
         ax.set_title(
-            f"Ray {idx + 1}: {status}\n"
+            f"Ray {idx + 1}: {status}{target_str}\n"
             f"{n_iters} iters, final err: {err_str}",
             fontsize=10
         )
@@ -1140,7 +1287,11 @@ def plot_detailed_convergence(
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['First', 'Middle', 'Last'])
 
-    plt.suptitle(f"{title}\nTarget direction: {partition_direction}°", fontsize=14, fontweight='bold')
+    if use_dynamic_targeting:
+        suptitle_text = f"{title}\nDynamic SWAN targeting (per-location directions)"
+    else:
+        suptitle_text = f"{title}\nFixed target direction: {partition_direction}°"
+    plt.suptitle(suptitle_text, fontsize=14, fontweight='bold')
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])
 
     if output_path:
@@ -1160,9 +1311,11 @@ def plot_detailed_convergence(
         for h in history:
             err = h.get('error', np.nan)
             alpha_used = h.get('alpha', np.nan)
+            target_dir = h.get('target_direction', None)
             reached = "→boundary" if h['reached_boundary'] else "→FAILED"
             err_str = f"err={err:+6.1f}°" if not np.isnan(err) else "err=  N/A "
-            print(f"    [{h['iteration']:2d}] θ_M={h['theta_M']:6.1f}° {reached}, {err_str}, α={alpha_used:.2f}")
+            target_str = f", target={target_dir:.1f}°" if target_dir is not None else ""
+            print(f"    [{h['iteration']:2d}] θ_M={h['theta_M']:6.1f}° {reached}, {err_str}, α={alpha_used:.2f}{target_str}")
 
     print("\n" + "=" * 50)
     print("INTERACTIVE CONTROLS")
@@ -1218,7 +1371,7 @@ def run_debug(args):
 
     if args.convergence or args.detailed:
         # ===== CONVERGENCE MODE =====
-        n_rays_to_trace = 5 if args.detailed else args.n_rays
+        n_rays_to_trace = args.n_rays if args.n_rays != 50 else (5 if args.detailed else 50)
 
         print("\n" + "=" * 60)
         if args.detailed:
@@ -1227,7 +1380,17 @@ def run_debug(args):
             print("CONVERGENCE MODE")
         print("=" * 60)
         print("\nIteratively adjusting θ_M until θ_arrival matches partition direction.")
-        print(f"Update rule: θ_M_new = θ_M - α × (θ_arrival - θ_partition)")
+        print(f"Update rule: θ_M_new = θ_M - α × (θ_arrival - θ_target)")
+
+        # Create boundary lookup from SWAN data if requested
+        boundary_lookup = None
+        if args.use_swan_boundary:
+            print("\n--- LOADING SWAN BOUNDARY CONDITIONS ---")
+            swan_run_dir = args.swan_run
+            if swan_run_dir:
+                swan_run_dir = Path(swan_run_dir)
+            boundary_lookup = load_swan_boundary_lookup(mesh, swan_run_dir)
+            print("-------------------------------------------\n")
 
         rays_data = trace_rays_with_convergence(
             mesh,
@@ -1243,6 +1406,8 @@ def run_debug(args):
             alpha=args.alpha,
             max_iterations=args.max_iter,
             tolerance=args.tolerance,
+            boundary_lookup=boundary_lookup,
+            partition_idx=args.partition,
         )
 
         if not rays_data:
@@ -1257,6 +1422,7 @@ def run_debug(args):
                 partition_direction=partition_direction,
                 title=f"Detailed Convergence: T={T}s, α={args.alpha}",
                 output_path=output_path,
+                use_dynamic_targeting=(boundary_lookup is not None),
             )
         else:
             # Plot summary convergence results
@@ -1266,10 +1432,11 @@ def run_debug(args):
                 mesh, rays_data,
                 partition_direction=partition_direction,
                 directional_spread=directional_spread,
-                title=f"Ray Convergence: T={T}s, Dir={partition_direction}°, α={args.alpha}",
+                title=f"Ray Convergence: T={T}s, Dir={'SWAN' if boundary_lookup else partition_direction}°, α={args.alpha}",
                 output_path=output_path,
                 zoom_center=zoom_center,
                 zoom_range_km=zoom_range_km,
+                use_dynamic_targeting=(boundary_lookup is not None),
             )
 
     else:
@@ -1395,6 +1562,23 @@ Examples:
         type=float,
         default=0.1,
         help='Convergence tolerance as fraction of directional spread (default: 0.05 = 5%%)'
+    )
+    parser.add_argument(
+        '--use-swan-boundary',
+        action='store_true',
+        help='Use actual SWAN boundary conditions (loads from most recent SWAN run)'
+    )
+    parser.add_argument(
+        '--swan-run',
+        type=str,
+        default=None,
+        help='Path to SWAN run directory (default: data/swan/runs/socal/coarse/latest)'
+    )
+    parser.add_argument(
+        '--partition', '-p',
+        type=int,
+        default=1,
+        help='SWAN partition index: 0=Wind Sea, 1=Primary Swell, 2=Secondary Swell, 3=Tertiary (default: 1)'
     )
 
     # View options
