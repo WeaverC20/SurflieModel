@@ -79,11 +79,13 @@ data/meshes/
 # Surfzone model
 data/surfzone/meshes/
 data/surfzone/runs/
+data/surfzone/output/
 data/surfzone/debug_*.png
 data/surfzone/debug_*.html
 data/surfzone/*.png
 data/surfzone/*.html
 *.npz
+primary_swell.json
 
 # Jupyter
 .ipynb_checkpoints/

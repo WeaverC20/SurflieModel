@@ -358,3 +358,175 @@ def load_breaking_field(npz_path: Path) -> BreakingField:
         beach_slope=data['beach_slope'],
         partition_id=data['partition_id'],
     )
+
+
+# =============================================================================
+# Surfzone Simulation Result Save/Load
+# =============================================================================
+
+def save_surfzone_result(
+    result: 'SurfzoneSimulationResult',
+    output_path: Path,
+    filename: str = "surfzone_result",
+) -> Tuple[Path, Path]:
+    """
+    Save surfzone simulation result to disk.
+
+    Saves two files:
+    - {filename}.npz: Compressed arrays (mesh coords, wave heights, etc.)
+    - {filename}.json: Metadata and summary statistics
+
+    Args:
+        result: SurfzoneSimulationResult to save
+        output_path: Directory to save to
+        filename: Base filename (without extension)
+
+    Returns:
+        Tuple of (npz_path, json_path)
+    """
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    npz_path = output_path / f"{filename}.npz"
+    json_path = output_path / f"{filename}.json"
+
+    # Save arrays as compressed NPZ
+    np.savez_compressed(
+        npz_path,
+        mesh_x=result.mesh_x,
+        mesh_y=result.mesh_y,
+        mesh_depth=result.mesh_depth,
+        H_at_mesh=result.H_at_mesh,
+        converged=result.converged,
+        direction_at_mesh=result.direction_at_mesh,
+        K_shoaling=result.K_shoaling,
+        boundary_Hs=result.boundary_Hs,
+        boundary_Tp=result.boundary_Tp,
+        boundary_direction=result.boundary_direction,
+    )
+
+    logger.info(f"Saved arrays: {npz_path}")
+
+    # Compute statistics for converged points
+    converged_mask = result.converged
+    stats = {}
+
+    if result.n_converged > 0:
+        H_conv = result.H_at_mesh[converged_mask]
+        K_conv = result.K_shoaling[converged_mask]
+        depth_conv = result.mesh_depth[converged_mask]
+
+        stats = {
+            "wave_height": {
+                "min": float(np.nanmin(H_conv)),
+                "max": float(np.nanmax(H_conv)),
+                "mean": float(np.nanmean(H_conv)),
+                "std": float(np.nanstd(H_conv)),
+            },
+            "shoaling_coefficient": {
+                "min": float(np.nanmin(K_conv)),
+                "max": float(np.nanmax(K_conv)),
+                "mean": float(np.nanmean(K_conv)),
+            },
+            "depth": {
+                "min": float(np.nanmin(depth_conv)),
+                "max": float(np.nanmax(depth_conv)),
+                "mean": float(np.nanmean(depth_conv)),
+            },
+        }
+
+    # Save metadata as JSON
+    metadata = {
+        "region_name": result.region_name,
+        "timestamp": result.timestamp,
+        "depth_range": list(result.depth_range),
+        "partition_id": result.partition_id,
+        "n_points": result.n_points,
+        "n_converged": result.n_converged,
+        "convergence_rate": result.convergence_rate,
+        "statistics": stats,
+        "bounds": {
+            "x_min": float(result.mesh_x.min()) if len(result.mesh_x) > 0 else None,
+            "x_max": float(result.mesh_x.max()) if len(result.mesh_x) > 0 else None,
+            "y_min": float(result.mesh_y.min()) if len(result.mesh_y) > 0 else None,
+            "y_max": float(result.mesh_y.max()) if len(result.mesh_y) > 0 else None,
+        },
+    }
+
+    with open(json_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    logger.info(f"Saved metadata: {json_path}")
+
+    return npz_path, json_path
+
+
+def load_surfzone_result(npz_path: Path) -> 'SurfzoneSimulationResult':
+    """
+    Load surfzone simulation result from disk.
+
+    Args:
+        npz_path: Path to .npz file
+
+    Returns:
+        SurfzoneSimulationResult object
+
+    Note:
+        The point_results list will be empty when loading from disk,
+        as only the aggregate arrays are stored.
+    """
+    from .surfzone_result import SurfzoneSimulationResult
+
+    npz_path = Path(npz_path)
+    json_path = npz_path.with_suffix('.json')
+
+    # Load arrays
+    data = np.load(npz_path)
+
+    mesh_x = data['mesh_x']
+    mesh_y = data['mesh_y']
+    mesh_depth = data['mesh_depth']
+    H_at_mesh = data['H_at_mesh']
+    converged = data['converged']
+    direction_at_mesh = data['direction_at_mesh']
+    K_shoaling = data['K_shoaling']
+    boundary_Hs = data['boundary_Hs']
+    boundary_Tp = data['boundary_Tp']
+    boundary_direction = data['boundary_direction']
+
+    # Load metadata
+    if json_path.exists():
+        with open(json_path) as f:
+            metadata = json.load(f)
+        region_name = metadata.get('region_name', 'Unknown')
+        timestamp = metadata.get('timestamp', datetime.now().isoformat())
+        depth_range = tuple(metadata.get('depth_range', [0.0, 10.0]))
+        partition_id = metadata.get('partition_id', 1)
+    else:
+        region_name = 'Unknown'
+        timestamp = datetime.now().isoformat()
+        depth_range = (0.0, 10.0)
+        partition_id = 1
+
+    n_points = len(mesh_x)
+    n_converged = int(np.sum(converged))
+
+    return SurfzoneSimulationResult(
+        region_name=region_name,
+        timestamp=timestamp,
+        depth_range=depth_range,
+        partition_id=partition_id,
+        n_points=n_points,
+        n_converged=n_converged,
+        point_results=[],  # Not stored in file
+        mesh_x=mesh_x,
+        mesh_y=mesh_y,
+        mesh_depth=mesh_depth,
+        H_at_mesh=H_at_mesh,
+        converged=converged,
+        direction_at_mesh=direction_at_mesh,
+        K_shoaling=K_shoaling,
+        boundary_Hs=boundary_Hs,
+        boundary_Tp=boundary_Tp,
+        boundary_direction=boundary_direction,
+    )

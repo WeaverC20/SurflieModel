@@ -1519,3 +1519,90 @@ class BackwardRayTracer:
             ])
 
         return '\n'.join(lines)
+
+    def get_mesh_arrays(self) -> dict:
+        """
+        Get dictionary of mesh arrays for use with forward propagation.
+
+        Returns:
+            Dictionary containing all Numba-compatible arrays needed for
+            depth interpolation and forward propagation.
+        """
+        return {
+            'points_x': self.points_x,
+            'points_y': self.points_y,
+            'depth': self.depth,
+            'triangles': self.triangles,
+            'grid_x_min': self.grid_x_min,
+            'grid_y_min': self.grid_y_min,
+            'grid_cell_size': self.grid_cell_size,
+            'grid_n_cells_x': self.grid_n_cells_x,
+            'grid_n_cells_y': self.grid_n_cells_y,
+            'grid_cell_starts': self.grid_cell_starts,
+            'grid_cell_counts': self.grid_cell_counts,
+            'grid_triangles': self.grid_triangles,
+        }
+
+    def trace_single_partition(
+        self,
+        mesh_x: float,
+        mesh_y: float,
+        partition: BoundaryPartition,
+        store_path: bool = True,
+    ) -> PartitionContribution:
+        """
+        Trace a single partition for a mesh point.
+
+        This is useful when you want to trace just the primary swell partition
+        without tracing all partitions.
+
+        Args:
+            mesh_x, mesh_y: Mesh point coordinates (UTM)
+            partition: Single wave partition to trace
+            store_path: Whether to store ray path (default True for forward propagation)
+
+        Returns:
+            PartitionContribution with tracing results and optional path
+        """
+        if not partition.is_valid:
+            return PartitionContribution(
+                partition_id=partition.partition_id,
+                H=np.nan,
+                T=partition.Tp,
+                direction=np.nan,
+                K_shoaling=np.nan,
+                converged=False,
+                n_iterations=0,
+                path_x=None,
+                path_y=None,
+            )
+
+        return backward_trace_with_convergence(
+            mesh_x, mesh_y, partition,
+            self.points_x, self.points_y, self.depth, self.triangles,
+            self.grid_x_min, self.grid_y_min, self.grid_cell_size,
+            self.grid_n_cells_x, self.grid_n_cells_y,
+            self.grid_cell_starts, self.grid_cell_counts, self.grid_triangles,
+            self.boundary_depth_threshold,
+            self.coast_distance, self.offshore_distance_m,
+            self.alpha, self.max_iterations, self.convergence_tolerance,
+            self.step_size, self.max_steps, store_path,
+        )
+
+    def get_depth_at_point(self, x: float, y: float) -> float:
+        """
+        Get depth at a specific point.
+
+        Args:
+            x, y: UTM coordinates
+
+        Returns:
+            Water depth (m, positive) or NaN if outside domain
+        """
+        return interpolate_depth_indexed(
+            x, y,
+            self.points_x, self.points_y, self.depth, self.triangles,
+            self.grid_x_min, self.grid_y_min, self.grid_cell_size,
+            self.grid_n_cells_x, self.grid_n_cells_y,
+            self.grid_cell_starts, self.grid_cell_counts, self.grid_triangles,
+        )
