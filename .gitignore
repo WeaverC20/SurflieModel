@@ -80,6 +80,7 @@ data/meshes/
 data/surfzone/meshes/
 data/surfzone/runs/
 data/surfzone/output/
+data/surfzone/detailed_plots/
 data/surfzone/debug_*.png
 data/surfzone/debug_*.html
 data/surfzone/*.png

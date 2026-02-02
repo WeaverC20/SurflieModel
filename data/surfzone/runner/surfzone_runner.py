@@ -12,6 +12,7 @@ Orchestrates the complete surfzone simulation:
 Focus: Primary swell only (partition_id=1), 0-10m depth range.
 """
 
+import gc
 import logging
 import time
 from dataclasses import dataclass, field
@@ -355,6 +356,11 @@ class SurfzoneRunner:
         n_converged = 0
         processed = 0
 
+        # Timing diagnostics for batches
+        batch_start = time.perf_counter()
+        batch_converged = 0
+        batch_size = 500
+
         for i in range(n_total):
             if not sampled_mask[i]:
                 continue
@@ -364,17 +370,29 @@ class SurfzoneRunner:
 
             if result.converged:
                 n_converged += 1
+                batch_converged += 1
 
             processed += 1
 
-            # Progress logging
-            if processed % 500 == 0 or processed == n_to_run:
+            # Progress logging with per-batch rate
+            if processed % batch_size == 0 or processed == n_to_run:
                 elapsed = time.perf_counter() - t_start
-                rate = processed / elapsed if elapsed > 0 else 0
+                batch_elapsed = time.perf_counter() - batch_start
+                overall_rate = processed / elapsed if elapsed > 0 else 0
+                batch_rate = batch_size / batch_elapsed if batch_elapsed > 0 else 0
+                batch_conv_pct = 100 * batch_converged / batch_size if processed % batch_size == 0 else 100 * batch_converged / (processed % batch_size)
                 logger.info(
                     f"  Progress: {processed}/{n_to_run} ({100*processed/n_to_run:.1f}%), "
-                    f"converged: {n_converged}, rate: {rate:.1f} pts/sec"
+                    f"converged: {n_converged}, overall: {overall_rate:.1f} pts/sec, "
+                    f"batch: {batch_rate:.1f} pts/sec ({batch_conv_pct:.0f}% conv)"
                 )
+                # Reset batch stats
+                batch_start = time.perf_counter()
+                batch_converged = 0
+
+                # Force garbage collection periodically to prevent memory pressure
+                if processed % 2000 == 0:
+                    gc.collect()
 
         # Create result
         elapsed = time.perf_counter() - t_start

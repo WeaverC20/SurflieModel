@@ -801,11 +801,13 @@ def _trace_single_partition_converge(
     - 80% direction toward deeper water (from depth gradient)
     - 20% partition direction from boundary
 
+    If the initial direction hits land, fallback directions ±20° are tried.
+
     Returns:
         H_mesh, T, direction, K_shoaling, converged, n_iterations
     """
     # Compute initial guess: blend of depth gradient (80%) and partition (20%)
-    theta_M = compute_initial_direction_blended(
+    theta_M_initial = compute_initial_direction_blended(
         mesh_x, mesh_y, theta_partition,
         points_x, points_y, depth, triangles,
         grid_x_min, grid_y_min, grid_cell_size,
@@ -814,8 +816,13 @@ def _trace_single_partition_converge(
         deep_weight=0.8,
     )
 
-    for iteration in range(max_iterations):
-        # Trace backward
+    # Try initial direction, then fallbacks if it hits land on first attempt
+    fallback_offsets = np.array([0.0, 20.0, -20.0])  # Primary, then ±20 degrees
+
+    for offset_idx in range(len(fallback_offsets)):
+        theta_M = (theta_M_initial + fallback_offsets[offset_idx]) % 360.0
+
+        # First trace to check if this direction works
         (
             end_x, end_y, theta_arrival, Cg_start, Cg_end, reached,
             path_x, path_y,
@@ -831,37 +838,62 @@ def _trace_single_partition_converge(
         )
 
         if not reached:
-            return np.nan, T, np.nan, np.nan, False, iteration + 1
+            # This direction hit land - try next fallback
+            continue
 
-        # Check convergence
-        angle_diff = theta_arrival - theta_partition
-        while angle_diff > 180:
-            angle_diff -= 360
-        while angle_diff < -180:
-            angle_diff += 360
+        # Direction reached boundary - now run convergence iterations from here
+        for iteration in range(max_iterations):
+            # Check convergence (first iteration uses the trace we already did)
+            if iteration > 0:
+                (
+                    end_x, end_y, theta_arrival, Cg_start, Cg_end, reached,
+                    path_x, path_y,
+                ) = trace_backward_single(
+                    mesh_x, mesh_y, T, theta_M,
+                    points_x, points_y, depth, triangles,
+                    grid_x_min, grid_y_min, grid_cell_size,
+                    grid_n_cells_x, grid_n_cells_y,
+                    grid_cell_starts, grid_cell_counts, grid_triangles,
+                    boundary_depth_threshold,
+                    coast_distance, offshore_distance_m,
+                    step_size, max_steps,
+                )
 
-        error = abs(angle_diff) / delta_theta if delta_theta > 0 else abs(angle_diff)
+                if not reached:
+                    # Gradient descent led to hitting land - give up on this starting point
+                    break
 
-        if error < tolerance:
-            # Converged
-            if Cg_start > 0:
-                K_s = np.sqrt(Cg_end / Cg_start)
-            else:
-                K_s = 1.0
+            # Check convergence
+            angle_diff = theta_arrival - theta_partition
+            while angle_diff > 180:
+                angle_diff -= 360
+            while angle_diff < -180:
+                angle_diff += 360
+
+            error = abs(angle_diff) / delta_theta if delta_theta > 0 else abs(angle_diff)
+
+            if error < tolerance:
+                # Converged
+                if Cg_start > 0:
+                    K_s = np.sqrt(Cg_end / Cg_start)
+                else:
+                    K_s = 1.0
+                H_mesh = H_partition * K_s
+                return H_mesh, T, theta_M, K_s, True, iteration + 1
+
+            # Gradient descent update
+            theta_M = theta_M - alpha * angle_diff
+            theta_M = theta_M % 360
+
+        # If we get here with a valid Cg_start, we exhausted iterations but didn't converge
+        # However, we at least found a direction that reaches the boundary
+        if Cg_start > 0 and not np.isnan(Cg_start):
+            K_s = np.sqrt(Cg_end / Cg_start)
             H_mesh = H_partition * K_s
-            return H_mesh, T, theta_M, K_s, True, iteration + 1
+            return H_mesh, T, theta_M, K_s, False, max_iterations
 
-        # Gradient descent update
-        theta_M = theta_M - alpha * angle_diff
-        theta_M = theta_M % 360
-
-    # Failed to converge - return best guess
-    if Cg_start > 0:
-        K_s = np.sqrt(Cg_end / Cg_start)
-    else:
-        K_s = 1.0
-    H_mesh = H_partition * K_s
-    return H_mesh, T, theta_M, K_s, False, max_iterations
+    # All fallback directions hit land - return failure
+    return np.nan, T, np.nan, np.nan, False, 1
 
 
 @njit(parallel=True, cache=True)
@@ -970,6 +1002,38 @@ def trace_all_parallel(
 # Convergence Iteration
 # =============================================================================
 
+@dataclass
+class ConvergenceResult:
+    """
+    Result from backward ray trace with convergence iteration.
+
+    Contains both the final result and optional debugging information.
+    This is used internally - the public API returns PartitionContribution.
+    """
+    # Final result
+    converged: bool
+    failed_to_reach: bool
+    theta_M: float  # Final direction at mesh point
+    theta_arrival: float  # Final arrival direction at boundary
+    n_iterations: int
+    path_x: Optional[np.ndarray] = None
+    path_y: Optional[np.ndarray] = None
+    Cg_start: float = np.nan  # Group velocity at mesh point
+    Cg_end: float = np.nan  # Group velocity at boundary
+    end_x: float = np.nan  # Boundary landing position
+    end_y: float = np.nan
+
+    # Boundary values at landing position
+    H_boundary: float = np.nan
+    T_boundary: float = np.nan
+    theta_target: float = np.nan
+
+    # Debug info (only populated if store_iteration_history=True)
+    iteration_history: Optional[List[dict]] = None
+    initial_direction: float = np.nan
+    best_error: float = np.nan
+
+
 def backward_trace_with_convergence(
     mesh_x: float,
     mesh_y: float,
@@ -1003,17 +1067,22 @@ def backward_trace_with_convergence(
     step_size: float = DEFAULT_STEP_SIZE,
     max_steps: int = DEFAULT_MAX_STEPS,
     store_path: bool = False,
+    store_iteration_history: bool = False,
 ) -> PartitionContribution:
     """
     Trace backward from mesh point with iteration to converge on correct direction.
 
-    The goal is to find theta_M (direction at mesh point) such that when we
-    trace backward to the boundary, the ray arrives with direction matching
-    the SWAN direction at the LANDING POSITION (within tolerance of directional spread).
+    Uses an adaptive gradient descent algorithm with bisection fallback for robustness.
 
-    IMPORTANT: Convergence is checked against the SWAN direction at where the ray
-    actually lands on the boundary, not a fixed target direction. This ensures
-    physical accuracy when SWAN directions vary along the boundary.
+    ALGORITHM FEATURES:
+    1. Initial direction fallback: Tries ±20° if initial direction hits land
+    2. Adaptive alpha: Reduces step size when error increases
+    3. Bisection fallback: Switches to bisection after detecting oscillation
+    4. Best solution tracking: Uses best solution found if max iterations reached
+    5. Backtracking: Reverts to best direction when ray hits land during iteration
+
+    The target direction is queried from SWAN at the ray's LANDING POSITION,
+    ensuring physical accuracy when SWAN directions vary along the boundary.
 
     Args:
         mesh_x, mesh_y: Mesh point coordinates
@@ -1022,23 +1091,116 @@ def backward_trace_with_convergence(
         boundary_depth_threshold: Depth threshold for boundary
         boundary_lookup: BoundaryDirectionLookup for querying SWAN at landing position
         partition_idx: Which partition to query (0=primary swell, etc.)
-        alpha: Gradient descent relaxation factor (0.5-0.7)
+        alpha: Initial gradient descent relaxation factor (0.3-0.5 recommended)
         max_iterations: Maximum convergence iterations
         tolerance: Convergence tolerance (fraction of directional spread)
         step_size: Ray marching step size
         max_steps: Maximum steps per trace
         store_path: Whether to store ray path in result
+        store_iteration_history: Whether to store detailed iteration history (for debugging)
 
     Returns:
         PartitionContribution with wave parameters at mesh point
     """
+    # Call the core implementation
+    result = _trace_with_convergence_core(
+        mesh_x, mesh_y, partition,
+        points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size,
+        grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles,
+        boundary_depth_threshold,
+        coast_distance, offshore_distance_m,
+        boundary_lookup, partition_idx,
+        alpha, max_iterations, tolerance,
+        step_size, max_steps,
+        store_path, store_iteration_history,
+    )
+
+    # Convert to PartitionContribution
+    if result.converged or (not result.failed_to_reach and result.Cg_start > 0):
+        # Compute wave height
+        if result.Cg_start > 0:
+            K_s = np.sqrt(result.Cg_end / result.Cg_start)
+        else:
+            K_s = 1.0
+        H_mesh = result.H_boundary * K_s
+
+        return PartitionContribution(
+            partition_id=partition.partition_id,
+            H=H_mesh,
+            T=result.T_boundary,
+            direction=result.theta_M,
+            K_shoaling=K_s,
+            converged=result.converged,
+            n_iterations=result.n_iterations,
+            path_x=result.path_x if store_path else None,
+            path_y=result.path_y if store_path else None,
+        )
+    else:
+        # Failed to reach boundary
+        return PartitionContribution(
+            partition_id=partition.partition_id,
+            H=np.nan,
+            T=partition.Tp,
+            direction=np.nan,
+            K_shoaling=np.nan,
+            converged=False,
+            n_iterations=result.n_iterations,
+            path_x=None,
+            path_y=None,
+        )
+
+
+def _trace_with_convergence_core(
+    mesh_x: float,
+    mesh_y: float,
+    partition: BoundaryPartition,
+    # Mesh arrays
+    points_x: np.ndarray,
+    points_y: np.ndarray,
+    depth: np.ndarray,
+    triangles: np.ndarray,
+    # Spatial index
+    grid_x_min: float,
+    grid_y_min: float,
+    grid_cell_size: float,
+    grid_n_cells_x: int,
+    grid_n_cells_y: int,
+    grid_cell_starts: np.ndarray,
+    grid_cell_counts: np.ndarray,
+    grid_triangles: np.ndarray,
+    # Boundary
+    boundary_depth_threshold: float,
+    coast_distance: np.ndarray,
+    offshore_distance_m: float,
+    # Boundary lookup
+    boundary_lookup: Optional['BoundaryDirectionLookup'],
+    partition_idx: int,
+    # Configuration
+    alpha: float,
+    max_iterations: int,
+    tolerance: float,
+    step_size: float,
+    max_steps: int,
+    store_path: bool,
+    store_iteration_history: bool,
+) -> ConvergenceResult:
+    """
+    Core convergence algorithm with adaptive gradient descent and bisection fallback.
+
+    This is the shared implementation used by both production code and debug tools.
+    """
     T = partition.Tp
-    theta_partition = partition.direction  # Initial guess target direction
+    theta_partition = partition.direction
     delta_theta = partition.directional_spread
     H_partition = partition.Hs
 
+    # Convergence threshold in degrees
+    convergence_threshold = tolerance * delta_theta
+
     # Initial guess: blend of depth gradient (80%) and partition (20%)
-    theta_M = compute_initial_direction_blended(
+    theta_M_initial = compute_initial_direction_blended(
         mesh_x, mesh_y, theta_partition,
         points_x, points_y, depth, triangles,
         grid_x_min, grid_y_min, grid_cell_size,
@@ -1047,18 +1209,95 @@ def backward_trace_with_convergence(
         deep_weight=0.8,
     )
 
-    path_x_final = None
-    path_y_final = None
+    # Track iteration history if requested
+    iteration_history = [] if store_iteration_history else None
 
-    # Track actual boundary values at landing position (updated each iteration)
+    # Track best solution found
+    best_error = float('inf')
+    best_theta_M = theta_M_initial
+    best_path_x = None
+    best_path_y = None
+    best_Cg_start = np.nan
+    best_Cg_end = np.nan
+    best_end_x = np.nan
+    best_end_y = np.nan
+
+    # Track actual boundary values at landing position
     actual_H_boundary = H_partition
     actual_T_boundary = T
+    actual_theta_target = theta_partition
+
+    # Try initial direction, then fallbacks (±20°) if it hits land on first attempt
+    fallback_offsets = [0.0, 20.0, -20.0]
+    theta_M = None
+
+    for offset in fallback_offsets:
+        test_theta = (theta_M_initial + offset) % 360.0
+
+        # Test trace to see if this direction reaches boundary
+        (
+            test_end_x, test_end_y, test_theta_arrival, test_Cg_start, test_Cg_end, test_reached,
+            test_path_x, test_path_y
+        ) = trace_backward_single(
+            mesh_x, mesh_y, T, test_theta,
+            points_x, points_y, depth, triangles,
+            grid_x_min, grid_y_min, grid_cell_size,
+            grid_n_cells_x, grid_n_cells_y,
+            grid_cell_starts, grid_cell_counts, grid_triangles,
+            boundary_depth_threshold,
+            coast_distance, offshore_distance_m,
+            step_size, max_steps,
+        )
+
+        if test_reached:
+            # Found a direction that works
+            theta_M = test_theta
+            break
+
+    if theta_M is None:
+        # All fallback directions hit land
+        return ConvergenceResult(
+            converged=False,
+            failed_to_reach=True,
+            theta_M=np.nan,
+            theta_arrival=np.nan,
+            n_iterations=0,
+            iteration_history=iteration_history,
+            initial_direction=theta_M_initial,
+        )
+
+    # Adaptive alpha for gradient descent
+    current_alpha = alpha
+    prev_error = None
+    consecutive_failures = 0
+
+    # Bounds tracking for bisection fallback
+    lower_bound = None  # theta_M that gave negative error
+    upper_bound = None  # theta_M that gave positive error
+    lower_error = None
+    upper_error = None
+
+    # Oscillation detection
+    sign_changes = 0
+    prev_sign = None
+    using_bisection = False
+
+    # Final values
+    final_path_x = None
+    final_path_y = None
+    final_theta_arrival = np.nan
+    final_Cg_start = np.nan
+    final_Cg_end = np.nan
+    final_end_x = np.nan
+    final_end_y = np.nan
+    converged = False
+    failed_to_reach = False
 
     for iteration in range(max_iterations):
-        # Trace backward
+        # Trace ray backward
         (
-            end_x, end_y, theta_arrival, Cg_start, Cg_end, reached,
-            path_x, path_y,
+            end_x, end_y, theta_arrival, Cg_start, Cg_end, reached_boundary,
+            path_x, path_y
         ) = trace_backward_single(
             mesh_x, mesh_y, T, theta_M,
             points_x, points_y, depth, triangles,
@@ -1070,96 +1309,162 @@ def backward_trace_with_convergence(
             step_size, max_steps,
         )
 
-        if not reached:
-            # Ray didn't reach boundary - return with path data for debugging
-            return PartitionContribution(
-                partition_id=partition.partition_id,
-                H=np.nan,
-                T=T,
-                direction=np.nan,
-                K_shoaling=np.nan,
-                converged=False,
-                n_iterations=iteration + 1,
-                path_x=path_x if store_path else None,
-                path_y=path_y if store_path else None,
-            )
+        # Record iteration data if requested
+        if store_iteration_history:
+            iteration_data = {
+                'iteration': iteration,
+                'theta_M': theta_M,
+                'theta_arrival': theta_arrival,
+                'reached_boundary': reached_boundary,
+                'alpha': current_alpha,
+                'path_x': path_x.copy(),
+                'path_y': path_y.copy(),
+                'method': 'bisection' if using_bisection else 'gradient',
+            }
 
-        # Store path from last iteration
-        if store_path:
-            path_x_final = path_x
-            path_y_final = path_y
+        if not reached_boundary:
+            # Ray didn't reach boundary (hit land or max steps)
+            if store_iteration_history:
+                iteration_data['error'] = np.nan
+                iteration_history.append(iteration_data)
 
-        # Query SWAN direction at ACTUAL LANDING POSITION (not starting position)
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                # Too many failures, give up
+                failed_to_reach = True
+                break
+
+            # Backtrack: revert toward best known direction with smaller step
+            current_alpha *= 0.5
+            if best_theta_M is not None:
+                theta_M = best_theta_M
+            continue
+
+        consecutive_failures = 0  # Reset on success
+
+        # Get target direction from boundary lookup if available
         if boundary_lookup is not None:
-            theta_target, actual_H_boundary, actual_T_boundary, is_valid = \
+            target_direction, actual_H_boundary, actual_T_boundary, is_valid = \
                 boundary_lookup.get_partition_data_at(end_x, end_y, partition_idx)
-            if not is_valid or np.isnan(theta_target):
-                # Fall back to partition direction if query fails
-                theta_target = theta_partition
+            if not is_valid or np.isnan(target_direction):
+                target_direction = theta_partition
                 actual_H_boundary = H_partition
                 actual_T_boundary = T
         else:
-            # No boundary lookup - use partition direction (legacy behavior)
-            theta_target = theta_partition
+            target_direction = theta_partition
 
-        # Check convergence against SWAN direction at landing position
-        # Normalize angle difference to [-180, 180]
-        angle_diff = theta_arrival - theta_target
+        actual_theta_target = target_direction
+
+        # Compute angle error (handle wrap-around)
+        angle_diff = theta_arrival - target_direction
         while angle_diff > 180:
             angle_diff -= 360
         while angle_diff < -180:
             angle_diff += 360
 
-        error = abs(angle_diff) / delta_theta if delta_theta > 0 else abs(angle_diff)
+        if store_iteration_history:
+            iteration_data['error'] = angle_diff
+            iteration_data['target_direction'] = target_direction
+            iteration_history.append(iteration_data)
 
-        if error < tolerance:
-            # Converged - compute final wave height using boundary values at landing position
-            # K_s = sqrt(Cg_boundary / Cg_mesh)
-            if Cg_start > 0:
-                K_s = np.sqrt(Cg_end / Cg_start)
-            else:
-                K_s = 1.0
+        # Track best solution
+        if abs(angle_diff) < best_error:
+            best_error = abs(angle_diff)
+            best_theta_M = theta_M
+            best_path_x = path_x.copy()
+            best_path_y = path_y.copy()
+            best_Cg_start = Cg_start
+            best_Cg_end = Cg_end
+            best_end_x = end_x
+            best_end_y = end_y
 
-            H_mesh = actual_H_boundary * K_s
+        # Store current as final
+        final_path_x = path_x
+        final_path_y = path_y
+        final_theta_arrival = theta_arrival
+        final_Cg_start = Cg_start
+        final_Cg_end = Cg_end
+        final_end_x = end_x
+        final_end_y = end_y
 
-            return PartitionContribution(
-                partition_id=partition.partition_id,
-                H=H_mesh,
-                T=actual_T_boundary,
-                direction=theta_M,
-                K_shoaling=K_s,
-                converged=True,
-                n_iterations=iteration + 1,
-                path_x=path_x_final,
-                path_y=path_y_final,
-            )
+        # Check convergence
+        if abs(angle_diff) < convergence_threshold:
+            converged = True
+            break
 
-        # Gradient descent update
-        # Move theta_M in the direction that would make theta_arrival closer to theta_target
-        theta_M = theta_M - alpha * angle_diff
+        # Update bounds for bisection
+        if angle_diff > 0:
+            if upper_bound is None or abs(angle_diff) < abs(upper_error):
+                upper_bound = theta_M
+                upper_error = angle_diff
+        else:
+            if lower_bound is None or abs(angle_diff) < abs(lower_error):
+                lower_bound = theta_M
+                lower_error = angle_diff
+
+        # Detect oscillation (sign changes)
+        current_sign = 1 if angle_diff > 0 else -1
+        if prev_sign is not None and current_sign != prev_sign:
+            sign_changes += 1
+        prev_sign = current_sign
+
+        # Switch to bisection after detecting oscillation
+        have_valid_bounds = (lower_bound is not None and upper_bound is not None)
+        if not using_bisection and have_valid_bounds and sign_changes >= 2:
+            using_bisection = True
+
+        # Choose update method
+        if using_bisection and have_valid_bounds:
+            # Bisection: take midpoint between bounds
+            diff = upper_bound - lower_bound
+            while diff > 180:
+                diff -= 360
+            while diff < -180:
+                diff += 360
+            theta_M = lower_bound + diff / 2
+        else:
+            # Adaptive gradient descent
+            if prev_error is not None and abs(angle_diff) > abs(prev_error) * 1.1:
+                current_alpha *= 0.7
+                current_alpha = max(current_alpha, 0.05)
+
+            prev_error = angle_diff
+            theta_M = theta_M - current_alpha * angle_diff
 
         # Keep in valid range
-        theta_M = theta_M % 360
+        while theta_M > 360:
+            theta_M -= 360
+        while theta_M < 0:
+            theta_M += 360
 
-    # Failed to converge after max iterations
-    # Return best guess anyway using boundary values at last landing position
-    if Cg_start > 0:
-        K_s = np.sqrt(Cg_end / Cg_start)
-    else:
-        K_s = 1.0
+    # Use best solution if not converged
+    if not converged and not failed_to_reach and best_path_x is not None:
+        final_path_x = best_path_x
+        final_path_y = best_path_y
+        final_Cg_start = best_Cg_start
+        final_Cg_end = best_Cg_end
+        final_end_x = best_end_x
+        final_end_y = best_end_y
+        theta_M = best_theta_M
 
-    H_mesh = actual_H_boundary * K_s
-
-    return PartitionContribution(
-        partition_id=partition.partition_id,
-        H=H_mesh,
-        T=actual_T_boundary,
-        direction=theta_M,
-        K_shoaling=K_s,
-        converged=False,
-        n_iterations=max_iterations,
-        path_x=path_x_final if store_path else None,
-        path_y=path_y_final if store_path else None,
+    return ConvergenceResult(
+        converged=converged,
+        failed_to_reach=failed_to_reach,
+        theta_M=theta_M if not failed_to_reach else np.nan,
+        theta_arrival=final_theta_arrival,
+        n_iterations=iteration + 1 if not failed_to_reach else 0,
+        path_x=final_path_x if store_path else None,
+        path_y=final_path_y if store_path else None,
+        Cg_start=final_Cg_start,
+        Cg_end=final_Cg_end,
+        end_x=final_end_x,
+        end_y=final_end_y,
+        H_boundary=actual_H_boundary,
+        T_boundary=actual_T_boundary,
+        theta_target=actual_theta_target,
+        iteration_history=iteration_history,
+        initial_direction=theta_M_initial,
+        best_error=best_error,
     )
 
 

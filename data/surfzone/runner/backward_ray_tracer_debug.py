@@ -39,7 +39,9 @@ from data.surfzone.runner.backward_ray_tracer import (
     trace_backward_single,
     compute_initial_direction_blended,
     BoundaryDirectionLookup,
+    BoundaryPartition,
     find_nearest_boundary_direction,
+    _trace_with_convergence_core,
 )
 from data.surfzone.runner.wave_physics import deep_water_properties
 
@@ -552,6 +554,9 @@ def trace_rays_with_convergence(
     """
     Trace rays with convergence iteration to match partition direction at boundary.
 
+    This function uses the SHARED convergence algorithm from backward_ray_tracer.py
+    (_trace_with_convergence_core) to ensure consistency between debug and production code.
+
     For each mesh point, iteratively adjusts θ_M (direction at mesh point) until
     the ray arrives at the boundary with direction matching the partition direction.
 
@@ -587,7 +592,7 @@ def trace_rays_with_convergence(
         partition_idx: Which partition to query from boundary_lookup (0=primary)
 
     Returns:
-        List of ray data dicts with convergence information
+        List of ray data dicts with convergence information including iteration_history
     """
     from data.surfzone.runner.ray_tracer import interpolate_depth_indexed
 
@@ -655,192 +660,44 @@ def trace_rays_with_convergence(
         start_y = points_y[idx]
         start_depth = depth[idx]
 
-        # Initial guess: blend of depth gradient and partition direction
-        theta_M = compute_initial_direction_blended(
-            start_x, start_y, partition_direction,
+        # Create a BoundaryPartition for the shared convergence function
+        partition = BoundaryPartition(
+            partition_id=partition_idx,
+            Hs=1.0,  # Dummy value - we only care about direction for debugging
+            Tp=T,
+            direction=partition_direction,
+            directional_spread=directional_spread,
+        )
+
+        # Call the SHARED convergence algorithm from backward_ray_tracer.py
+        result = _trace_with_convergence_core(
+            start_x, start_y, partition,
             points_x, points_y, depth, triangles,
             grid_x_min, grid_y_min, grid_cell_size,
             grid_n_cells_x, grid_n_cells_y,
             grid_cell_starts, grid_cell_counts, grid_triangles,
-            deep_weight=deep_weight,
+            boundary_depth,
+            coast_distance, offshore_distance_m,
+            boundary_lookup, partition_idx,
+            alpha, max_iterations, tolerance,
+            step_size, max_steps,
+            store_path=True,
+            store_iteration_history=True,
         )
 
-        # Track iteration history
-        iteration_history = []
-        final_path_x = None
-        final_path_y = None
-        final_path_depth = None
-        converged = False
-        failed_to_reach = False
-
-        # Track best solution found
-        best_error = float('inf')
-        best_theta_M = theta_M
-        best_path_x = None
-        best_path_y = None
-
-        # Adaptive alpha for gradient descent phase
-        current_alpha = alpha
-        prev_error = None
-        consecutive_failures = 0
-
-        # Bounds tracking for bisection fallback
-        # Track theta_M values that gave positive vs negative errors
-        lower_bound = None  # theta_M that gave negative error (need to increase theta_M)
-        upper_bound = None  # theta_M that gave positive error (need to decrease theta_M)
-        lower_error = None
-        upper_error = None
-
-        # Oscillation detection
-        sign_changes = 0
-        prev_sign = None
-        using_bisection = False
-
-        for iteration in range(max_iterations):
-            # Trace ray backward
-            (
-                end_x, end_y, theta_arrival, Cg_start, Cg_end, reached_boundary,
-                path_x, path_y
-            ) = trace_backward_single(
-                start_x, start_y, T, theta_M,
-                points_x, points_y, depth, triangles,
-                grid_x_min, grid_y_min, grid_cell_size,
-                grid_n_cells_x, grid_n_cells_y,
-                grid_cell_starts, grid_cell_counts, grid_triangles,
-                boundary_depth,
-                coast_distance, offshore_distance_m,
-                step_size, max_steps,
-            )
-
-            # Record iteration data
-            iteration_data = {
-                'iteration': iteration,
-                'theta_M': theta_M,
-                'theta_arrival': theta_arrival,
-                'reached_boundary': reached_boundary,
-                'alpha': current_alpha,
-                'path_x': path_x.copy(),
-                'path_y': path_y.copy(),
-                'method': 'bisection' if using_bisection else 'gradient',
-            }
-
-            if not reached_boundary:
-                # Ray didn't reach boundary (hit land or max steps)
-                iteration_data['error'] = np.nan
-                iteration_history.append(iteration_data)
-
-                consecutive_failures += 1
-                if consecutive_failures >= 3:
-                    # Too many failures, give up
-                    failed_to_reach = True
-                    break
-
-                # Backtrack: revert toward best known direction with smaller step
-                current_alpha *= 0.5
-                if best_theta_M is not None:
-                    # Move back toward best direction
-                    theta_M = best_theta_M
-                continue
-
-            consecutive_failures = 0  # Reset on success
-
-            # Get target direction - from boundary lookup if available, else fixed
-            if boundary_lookup is not None:
-                target_direction = boundary_lookup.get_direction_at(
-                    end_x, end_y, partition_idx
-                )
-            else:
-                target_direction = partition_direction
-
-            # Compute angle error (handle wrap-around)
-            angle_diff = theta_arrival - target_direction
-            while angle_diff > 180:
-                angle_diff -= 360
-            while angle_diff < -180:
-                angle_diff += 360
-
-            iteration_data['error'] = angle_diff
-            iteration_data['target_direction'] = target_direction  # Track for debugging
-            iteration_history.append(iteration_data)
-
-            # Track best solution
-            if abs(angle_diff) < best_error:
-                best_error = abs(angle_diff)
-                best_theta_M = theta_M
-                best_path_x = path_x.copy()
-                best_path_y = path_y.copy()
-
-            # Store current path
-            final_path_x = path_x
-            final_path_y = path_y
-
-            # Check convergence
-            if abs(angle_diff) < convergence_threshold:
-                converged = True
-                break
-
-            # Update bounds for bisection
-            # Positive error means theta_arrival > target, so we need to adjust theta_M
-            # The relationship depends on local geometry, so we track bounds empirically
-            if angle_diff > 0:
-                # This theta_M gave too-positive arrival angle
-                if upper_bound is None or abs(angle_diff) < abs(upper_error):
-                    upper_bound = theta_M
-                    upper_error = angle_diff
-            else:
-                # This theta_M gave too-negative arrival angle
-                if lower_bound is None or abs(angle_diff) < abs(lower_error):
-                    lower_bound = theta_M
-                    lower_error = angle_diff
-
-            # Detect oscillation (sign changes)
-            current_sign = 1 if angle_diff > 0 else -1
-            if prev_sign is not None and current_sign != prev_sign:
-                sign_changes += 1
-            prev_sign = current_sign
-
-            # Switch to bisection after detecting oscillation (2+ sign changes)
-            # OR if we have valid bounds and gradient descent is struggling
-            have_valid_bounds = (lower_bound is not None and upper_bound is not None)
-
-            if not using_bisection and have_valid_bounds and sign_changes >= 2:
-                using_bisection = True
-
-            # Choose update method
-            if using_bisection and have_valid_bounds:
-                # Bisection: take midpoint between bounds
-                # Handle angle wraparound carefully
-                diff = upper_bound - lower_bound
-                while diff > 180:
-                    diff -= 360
-                while diff < -180:
-                    diff += 360
-                theta_M = lower_bound + diff / 2
-            else:
-                # Gradient descent with adaptive alpha
-                # Reduce alpha if error increased
-                if prev_error is not None and abs(angle_diff) > abs(prev_error) * 1.1:
-                    current_alpha *= 0.7
-                    current_alpha = max(current_alpha, 0.05)
-
-                prev_error = angle_diff
-
-                # Standard gradient descent update
-                theta_M = theta_M - current_alpha * angle_diff
-
-            # Keep in valid range
-            while theta_M > 360:
-                theta_M -= 360
-            while theta_M < 0:
-                theta_M += 360
-
-        # If not converged but we have a good solution, use it
-        if not converged and not failed_to_reach and best_path_x is not None:
-            final_path_x = best_path_x
-            final_path_y = best_path_y
+        # Print fallback message if used (check iteration history)
+        if result.iteration_history and len(result.iteration_history) > 0:
+            first_theta = result.iteration_history[0]['theta_M']
+            if abs(first_theta - result.initial_direction) > 1.0:  # Fallback was used
+                offset = first_theta - result.initial_direction
+                while offset > 180:
+                    offset -= 360
+                while offset < -180:
+                    offset += 360
+                print(f"    Ray {i+1}: Initial direction hit land, using fallback offset {offset:+.0f}°")
 
         # Get depths along final path
-        if final_path_x is not None and len(final_path_x) > 0:
+        if result.path_x is not None and len(result.path_x) > 0:
             final_path_depth = np.array([
                 interpolate_depth_indexed(
                     px, py, points_x, points_y, depth, triangles,
@@ -848,39 +705,40 @@ def trace_rays_with_convergence(
                     grid_n_cells_x, grid_n_cells_y,
                     grid_cell_starts, grid_cell_counts, grid_triangles
                 )
-                for px, py in zip(final_path_x, final_path_y)
+                for px, py in zip(result.path_x, result.path_y)
             ])
         else:
             final_path_depth = np.array([])
 
         # Update stats
-        if failed_to_reach:
+        if result.failed_to_reach:
             convergence_stats['failed_to_reach'] += 1
-        elif converged:
+        elif result.converged:
             convergence_stats['converged'] += 1
-            convergence_stats['iterations'].append(len(iteration_history))
+            convergence_stats['iterations'].append(result.n_iterations)
         else:
             convergence_stats['not_converged'] += 1
             convergence_stats['iterations'].append(max_iterations)
 
-        # Store ray data
+        # Convert ConvergenceResult to dict format expected by plotting functions
+        iteration_history = result.iteration_history if result.iteration_history else []
         rays_data.append({
             'start_x': start_x,
             'start_y': start_y,
             'start_depth': start_depth,
-            'path_x': final_path_x if final_path_x is not None else np.array([]),
-            'path_y': final_path_y if final_path_y is not None else np.array([]),
+            'path_x': result.path_x if result.path_x is not None else np.array([]),
+            'path_y': result.path_y if result.path_y is not None else np.array([]),
             'path_depth': final_path_depth,
-            'converged': converged,
-            'failed_to_reach': failed_to_reach,
-            'n_iterations': len(iteration_history),
+            'converged': result.converged,
+            'failed_to_reach': result.failed_to_reach,
+            'n_iterations': result.n_iterations,
             'iteration_history': iteration_history,
-            'initial_direction': iteration_history[0]['theta_M'] if iteration_history else np.nan,
-            'final_direction': iteration_history[-1]['theta_M'] if iteration_history else np.nan,
-            'final_arrival': iteration_history[-1]['theta_arrival'] if iteration_history else np.nan,
+            'initial_direction': result.initial_direction,
+            'final_direction': result.theta_M if not np.isnan(result.theta_M) else np.nan,
+            'final_arrival': result.theta_arrival,
             'final_error': iteration_history[-1].get('error', np.nan) if iteration_history else np.nan,
-            'Cg_start': Cg_start if 'Cg_start' in dir() else np.nan,
-            'Cg_end': Cg_end if 'Cg_end' in dir() else np.nan,
+            'Cg_start': result.Cg_start,
+            'Cg_end': result.Cg_end,
         })
 
         if (i + 1) % 10 == 0:
@@ -1329,6 +1187,288 @@ def plot_detailed_convergence(
     plt.show(block=True)
 
 
+def plot_detailed_convergence_html(
+    mesh,
+    rays_data,
+    partition_direction: float,
+    title="Detailed Convergence: All Iteration Paths",
+    output_dir=None,
+    use_dynamic_targeting: bool = False,
+):
+    """
+    Plot detailed convergence as individual images and generate an HTML page.
+
+    Creates one PNG per ray at full size (700x600 pixels) and generates an
+    HTML file that displays all images in a scrollable grid layout.
+
+    This is much better than the grid subplot approach when you have many rays,
+    as each plot remains at full size and the page is scrollable.
+
+    Args:
+        mesh: SurfZoneMesh object
+        rays_data: List of ray data dicts from trace_rays_with_convergence
+        partition_direction: Partition direction in degrees
+        title: Overall title for the visualization
+        output_dir: Directory to save images and HTML (defaults to data/surfzone/)
+        use_dynamic_targeting: Whether SWAN dynamic targeting was used
+    """
+    import webbrowser
+    from datetime import datetime
+
+    n_rays = len(rays_data)
+    if n_rays == 0:
+        print("No rays to plot!")
+        return
+
+    if output_dir is None:
+        output_dir = PROJECT_ROOT / "data" / "surfzone" / "detailed_plots"
+    else:
+        output_dir = Path(output_dir)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get coastlines
+    coastlines = mesh.coastlines if hasattr(mesh, 'coastlines') and mesh.coastlines else []
+
+    # Color map for iterations
+    cmap = plt.cm.plasma
+
+    image_files = []
+
+    print(f"\nGenerating {n_rays} individual ray plots...")
+
+    for idx, ray in enumerate(rays_data):
+        # Create individual figure for this ray
+        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+
+        # Get iteration history
+        history = ray.get('iteration_history', [])
+        n_iters = len(history)
+
+        if n_iters == 0:
+            ax.text(0.5, 0.5, 'No iterations', transform=ax.transAxes,
+                   ha='center', va='center', fontsize=12)
+            ax.set_title(f"Ray {idx + 1}: No data")
+        else:
+            # Collect all path coordinates for zoom calculation
+            all_x = []
+            all_y = []
+            for h in history:
+                if len(h['path_x']) > 0:
+                    all_x.extend(h['path_x'])
+                    all_y.extend(h['path_y'])
+
+            if not all_x:
+                ax.text(0.5, 0.5, 'No paths', transform=ax.transAxes,
+                       ha='center', va='center', fontsize=12)
+                ax.set_title(f"Ray {idx + 1}: No paths")
+            else:
+                # Calculate zoom bounds (with padding)
+                x_min, x_max = min(all_x), max(all_x)
+                y_min, y_max = min(all_y), max(all_y)
+                x_range = max(x_max - x_min, 500)  # Minimum 500m range
+                y_range = max(y_max - y_min, 500)
+                padding = 0.2
+                x_center = (x_min + x_max) / 2
+                y_center = (y_min + y_max) / 2
+                half_range = max(x_range, y_range) / 2 * (1 + padding)
+
+                ax.set_xlim(x_center - half_range, x_center + half_range)
+                ax.set_ylim(y_center - half_range, y_center + half_range)
+
+                # Plot coastlines (clipped to view)
+                for coastline in coastlines:
+                    ax.plot(coastline[:, 0], coastline[:, 1], 'k-', linewidth=1.5, alpha=0.7)
+
+                # Plot all iteration paths
+                for i, h in enumerate(history):
+                    px, py = h['path_x'], h['path_y']
+                    if len(px) == 0:
+                        continue
+
+                    # Normalize iteration for color
+                    color_val = i / max(n_iters - 1, 1)
+                    color = cmap(color_val)
+
+                    # Earlier iterations thinner, later iterations thicker
+                    linewidth = 0.5 + 1.5 * color_val
+
+                    ax.plot(px, py, '-', color=color, linewidth=linewidth, alpha=0.7)
+
+                    # Mark end point
+                    if h['reached_boundary']:
+                        ax.plot(px[-1], py[-1], 'o', color=color, markersize=4, alpha=0.7)
+
+                # Mark start point (larger, green)
+                ax.plot(ray['start_x'], ray['start_y'], 'go', markersize=10,
+                       markeredgecolor='black', markeredgewidth=1, zorder=10)
+
+                # If converged, highlight final path
+                if ray['converged'] and n_iters > 0:
+                    final = history[-1]
+                    ax.plot(final['path_x'], final['path_y'], '-',
+                           color='lime', linewidth=3, alpha=0.8, zorder=5)
+
+                # Build title with status
+                status = "✓ CONVERGED" if ray['converged'] else ("✗ FAILED (land)" if ray['failed_to_reach'] else "✗ NOT CONVERGED")
+                final_err = history[-1].get('error', np.nan) if history else np.nan
+                err_str = f", err={final_err:+.1f}°" if not np.isnan(final_err) else ""
+                ray_title = f"Ray {idx + 1}: {status} ({n_iters} iter{err_str})"
+                ax.set_title(ray_title, fontsize=12, fontweight='bold')
+
+                ax.set_xlabel('UTM X (m)')
+                ax.set_ylabel('UTM Y (m)')
+                ax.set_aspect('equal')
+                ax.grid(True, alpha=0.3)
+
+                # Add iteration color legend text
+                ax.text(0.02, 0.98, f"Iter 0→{n_iters-1}",
+                       transform=ax.transAxes, fontsize=10,
+                       verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+
+        # Save individual image
+        img_filename = f"ray_{idx + 1:03d}.png"
+        img_path = output_dir / img_filename
+        plt.savefig(img_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        image_files.append(img_filename)
+
+        if (idx + 1) % 10 == 0 or idx == n_rays - 1:
+            print(f"  Generated {idx + 1}/{n_rays} plots...")
+
+    # Generate HTML file
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    targeting_note = "Dynamic SWAN targeting (per-location directions)" if use_dynamic_targeting else f"Fixed target direction: {partition_direction}°"
+
+    # Statistics
+    n_converged = sum(1 for r in rays_data if r['converged'])
+    n_failed = sum(1 for r in rays_data if r['failed_to_reach'])
+    n_not_converged = n_rays - n_converged - n_failed
+
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Detailed Ray Convergence</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+        }}
+        h1 {{
+            text-align: center;
+            color: #333;
+            margin-bottom: 5px;
+        }}
+        .subtitle {{
+            text-align: center;
+            color: #666;
+            margin-bottom: 20px;
+        }}
+        .stats {{
+            text-align: center;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .stats span {{
+            margin: 0 15px;
+            padding: 5px 12px;
+            border-radius: 15px;
+        }}
+        .stat-converged {{ background: #d4edda; color: #155724; }}
+        .stat-failed {{ background: #f8d7da; color: #721c24; }}
+        .stat-not-converged {{ background: #fff3cd; color: #856404; }}
+        .grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(500px, 1fr));
+            gap: 20px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }}
+        .ray-card {{
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .ray-card img {{
+            width: 100%;
+            height: auto;
+            display: block;
+        }}
+        .ray-card:hover {{
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            transform: translateY(-2px);
+            transition: all 0.2s ease;
+        }}
+        .footer {{
+            text-align: center;
+            margin-top: 30px;
+            color: #999;
+            font-size: 12px;
+        }}
+    </style>
+</head>
+<body>
+    <h1>{title}</h1>
+    <div class="subtitle">{targeting_note}<br>Generated: {timestamp}</div>
+    <div class="stats">
+        <span class="stat-converged">✓ Converged: {n_converged}</span>
+        <span class="stat-failed">✗ Hit Land: {n_failed}</span>
+        <span class="stat-not-converged">⚠ Max Iterations: {n_not_converged}</span>
+        <span>Total: {n_rays}</span>
+    </div>
+    <div class="grid">
+"""
+
+    for img_file in image_files:
+        html_content += f'        <div class="ray-card"><img src="{img_file}" loading="lazy"></div>\n'
+
+    html_content += """    </div>
+    <div class="footer">
+        Backward Ray Tracer Debug Visualization<br>
+        Scroll to see all rays • Click images to view full size
+    </div>
+</body>
+</html>
+"""
+
+    html_path = output_dir / "index.html"
+    with open(html_path, 'w') as f:
+        f.write(html_content)
+
+    print(f"\nSaved {n_rays} images to: {output_dir}/")
+    print(f"HTML viewer: {html_path}")
+
+    # Open in browser
+    webbrowser.open(f"file://{html_path.absolute()}")
+
+    # Print iteration details to console as well
+    print("\n" + "=" * 70)
+    print("DETAILED ITERATION HISTORY")
+    print("=" * 70)
+    for idx, ray in enumerate(rays_data):
+        history = ray.get('iteration_history', [])
+        status = "CONVERGED" if ray['converged'] else ("FAILED" if ray['failed_to_reach'] else "NOT CONVERGED")
+        print(f"\nRay {idx + 1} [{status}] - {len(history)} iterations:")
+        print(f"  Start: ({ray['start_x']:.0f}, {ray['start_y']:.0f}), depth={ray['start_depth']:.1f}m")
+        if history:
+            print(f"  Iteration progression:")
+            for h in history:
+                err = h.get('error', np.nan)
+                alpha_used = h.get('alpha', np.nan)
+                target_dir = h.get('target_direction', None)
+                reached = "→boundary" if h['reached_boundary'] else "→FAILED"
+                err_str = f"err={err:+6.1f}°" if not np.isnan(err) else "err=  N/A "
+                target_str = f", target={target_dir:.1f}°" if target_dir is not None else ""
+                print(f"    [{h['iteration']:2d}] θ_M={h['theta_M']:6.1f}° {reached}, {err_str}, α={alpha_used:.2f}{target_str}")
+
+
 def run_debug(args):
     """Run the backward ray tracing debug visualization."""
     from data.surfzone.mesh import SurfZoneMesh
@@ -1415,15 +1555,28 @@ def run_debug(args):
 
         if args.detailed:
             # Plot detailed view showing all iteration paths
-            print("\nGenerating detailed iteration visualization...")
-            output_path = PROJECT_ROOT / "data" / "surfzone" / "debug_detailed_convergence.png"
-            plot_detailed_convergence(
-                mesh, rays_data,
-                partition_direction=partition_direction,
-                title=f"Detailed Convergence: T={T}s, α={args.alpha}",
-                output_path=output_path,
-                use_dynamic_targeting=(boundary_lookup is not None),
-            )
+            if args.html:
+                # HTML output - individual images with scrollable page
+                print("\nGenerating HTML visualization (one image per ray)...")
+                output_dir = PROJECT_ROOT / "data" / "surfzone" / "detailed_plots"
+                plot_detailed_convergence_html(
+                    mesh, rays_data,
+                    partition_direction=partition_direction,
+                    title=f"Detailed Convergence: T={T}s, α={args.alpha}",
+                    output_dir=output_dir,
+                    use_dynamic_targeting=(boundary_lookup is not None),
+                )
+            else:
+                # Traditional grid of subplots
+                print("\nGenerating detailed iteration visualization...")
+                output_path = PROJECT_ROOT / "data" / "surfzone" / "debug_detailed_convergence.png"
+                plot_detailed_convergence(
+                    mesh, rays_data,
+                    partition_direction=partition_direction,
+                    title=f"Detailed Convergence: T={T}s, α={args.alpha}",
+                    output_path=output_path,
+                    use_dynamic_targeting=(boundary_lookup is not None),
+                )
         else:
             # Plot summary convergence results
             print("\nGenerating convergence visualization...")
@@ -1501,6 +1654,12 @@ Examples:
 
   # Detailed view: 5 rays showing ALL iteration attempts
   python backward_ray_tracer_debug.py --detailed
+
+  # Detailed view as scrollable HTML (better for many rays)
+  python backward_ray_tracer_debug.py --detailed --html -n 20
+
+  # Detailed HTML with SWAN boundary conditions
+  python backward_ray_tracer_debug.py --detailed --html -n 30 --use-swan-boundary
         """
     )
 
@@ -1514,6 +1673,11 @@ Examples:
         '--detailed', '-d',
         action='store_true',
         help='Detailed view: trace 5 rays and show ALL iteration paths for each'
+    )
+    parser.add_argument(
+        '--html',
+        action='store_true',
+        help='Output detailed view as scrollable HTML page (one image per ray, opens in browser)'
     )
 
     # Wave conditions
