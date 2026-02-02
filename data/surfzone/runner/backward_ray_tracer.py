@@ -993,6 +993,9 @@ def backward_trace_with_convergence(
     # Coast distance boundary
     coast_distance: np.ndarray,
     offshore_distance_m: float,
+    # Boundary direction lookup (for querying SWAN direction at landing position)
+    boundary_lookup: Optional['BoundaryDirectionLookup'] = None,
+    partition_idx: int = 0,
     # Configuration
     alpha: float = DEFAULT_ALPHA,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -1006,13 +1009,19 @@ def backward_trace_with_convergence(
 
     The goal is to find theta_M (direction at mesh point) such that when we
     trace backward to the boundary, the ray arrives with direction matching
-    the partition's direction (within tolerance of directional spread).
+    the SWAN direction at the LANDING POSITION (within tolerance of directional spread).
+
+    IMPORTANT: Convergence is checked against the SWAN direction at where the ray
+    actually lands on the boundary, not a fixed target direction. This ensures
+    physical accuracy when SWAN directions vary along the boundary.
 
     Args:
         mesh_x, mesh_y: Mesh point coordinates
-        partition: Wave partition from boundary
+        partition: Wave partition from boundary (used for initial guess and wave parameters)
         *_arrays: Mesh and spatial index arrays
-        boundary_depth_threshold: Y coordinate of boundary
+        boundary_depth_threshold: Depth threshold for boundary
+        boundary_lookup: BoundaryDirectionLookup for querying SWAN at landing position
+        partition_idx: Which partition to query (0=primary swell, etc.)
         alpha: Gradient descent relaxation factor (0.5-0.7)
         max_iterations: Maximum convergence iterations
         tolerance: Convergence tolerance (fraction of directional spread)
@@ -1024,7 +1033,7 @@ def backward_trace_with_convergence(
         PartitionContribution with wave parameters at mesh point
     """
     T = partition.Tp
-    theta_partition = partition.direction  # Target direction at boundary
+    theta_partition = partition.direction  # Initial guess target direction
     delta_theta = partition.directional_spread
     H_partition = partition.Hs
 
@@ -1040,6 +1049,10 @@ def backward_trace_with_convergence(
 
     path_x_final = None
     path_y_final = None
+
+    # Track actual boundary values at landing position (updated each iteration)
+    actual_H_boundary = H_partition
+    actual_T_boundary = T
 
     for iteration in range(max_iterations):
         # Trace backward
@@ -1076,9 +1089,22 @@ def backward_trace_with_convergence(
             path_x_final = path_x
             path_y_final = path_y
 
-        # Check convergence
+        # Query SWAN direction at ACTUAL LANDING POSITION (not starting position)
+        if boundary_lookup is not None:
+            theta_target, actual_H_boundary, actual_T_boundary, is_valid = \
+                boundary_lookup.get_partition_data_at(end_x, end_y, partition_idx)
+            if not is_valid or np.isnan(theta_target):
+                # Fall back to partition direction if query fails
+                theta_target = theta_partition
+                actual_H_boundary = H_partition
+                actual_T_boundary = T
+        else:
+            # No boundary lookup - use partition direction (legacy behavior)
+            theta_target = theta_partition
+
+        # Check convergence against SWAN direction at landing position
         # Normalize angle difference to [-180, 180]
-        angle_diff = theta_arrival - theta_partition
+        angle_diff = theta_arrival - theta_target
         while angle_diff > 180:
             angle_diff -= 360
         while angle_diff < -180:
@@ -1087,19 +1113,19 @@ def backward_trace_with_convergence(
         error = abs(angle_diff) / delta_theta if delta_theta > 0 else abs(angle_diff)
 
         if error < tolerance:
-            # Converged - compute final wave height
+            # Converged - compute final wave height using boundary values at landing position
             # K_s = sqrt(Cg_boundary / Cg_mesh)
             if Cg_start > 0:
                 K_s = np.sqrt(Cg_end / Cg_start)
             else:
                 K_s = 1.0
 
-            H_mesh = H_partition * K_s
+            H_mesh = actual_H_boundary * K_s
 
             return PartitionContribution(
                 partition_id=partition.partition_id,
                 H=H_mesh,
-                T=T,
+                T=actual_T_boundary,
                 direction=theta_M,
                 K_shoaling=K_s,
                 converged=True,
@@ -1109,25 +1135,25 @@ def backward_trace_with_convergence(
             )
 
         # Gradient descent update
-        # Move theta_M in the direction that would make theta_arrival closer to theta_partition
+        # Move theta_M in the direction that would make theta_arrival closer to theta_target
         theta_M = theta_M - alpha * angle_diff
 
         # Keep in valid range
         theta_M = theta_M % 360
 
     # Failed to converge after max iterations
-    # Return best guess anyway
+    # Return best guess anyway using boundary values at last landing position
     if Cg_start > 0:
         K_s = np.sqrt(Cg_end / Cg_start)
     else:
         K_s = 1.0
 
-    H_mesh = H_partition * K_s
+    H_mesh = actual_H_boundary * K_s
 
     return PartitionContribution(
         partition_id=partition.partition_id,
         H=H_mesh,
-        T=T,
+        T=actual_T_boundary,
         direction=theta_M,
         K_shoaling=K_s,
         converged=False,
@@ -1165,6 +1191,7 @@ class BackwardRayTracer:
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         convergence_tolerance: float = DEFAULT_CONVERGENCE_TOLERANCE,
         alpha: float = DEFAULT_ALPHA,
+        boundary_lookup: Optional['BoundaryDirectionLookup'] = None,
     ):
         """
         Initialize backward ray tracer.
@@ -1179,6 +1206,7 @@ class BackwardRayTracer:
             max_iterations: Maximum convergence iterations
             convergence_tolerance: Convergence criterion (fraction of spread)
             alpha: Gradient descent relaxation factor
+            boundary_lookup: BoundaryDirectionLookup for querying SWAN at landing position
         """
         self.mesh = mesh
         self.boundary_depth_threshold = boundary_depth_threshold
@@ -1187,6 +1215,7 @@ class BackwardRayTracer:
         self.max_iterations = max_iterations
         self.convergence_tolerance = convergence_tolerance
         self.alpha = alpha
+        self.boundary_lookup = boundary_lookup
 
         # Get Numba-compatible arrays from mesh
         arrays = mesh.get_numba_arrays()
@@ -1247,7 +1276,7 @@ class BackwardRayTracer:
         """
         contributions = []
 
-        for partition in partitions:
+        for partition_idx, partition in enumerate(partitions):
             if not partition.is_valid:
                 continue
 
@@ -1259,8 +1288,14 @@ class BackwardRayTracer:
                 self.grid_cell_starts, self.grid_cell_counts, self.grid_triangles,
                 self.boundary_depth_threshold,
                 self.coast_distance, self.offshore_distance_m,
-                self.alpha, self.max_iterations, self.convergence_tolerance,
-                self.step_size, self.max_steps, store_paths,
+                boundary_lookup=self.boundary_lookup,
+                partition_idx=partition_idx,
+                alpha=self.alpha,
+                max_iterations=self.max_iterations,
+                tolerance=self.convergence_tolerance,
+                step_size=self.step_size,
+                max_steps=self.max_steps,
+                store_path=store_paths,
             )
 
             contributions.append(result)
@@ -1549,6 +1584,7 @@ class BackwardRayTracer:
         mesh_y: float,
         partition: BoundaryPartition,
         store_path: bool = True,
+        partition_idx: int = 0,
     ) -> PartitionContribution:
         """
         Trace a single partition for a mesh point.
@@ -1560,6 +1596,7 @@ class BackwardRayTracer:
             mesh_x, mesh_y: Mesh point coordinates (UTM)
             partition: Single wave partition to trace
             store_path: Whether to store ray path (default True for forward propagation)
+            partition_idx: Which partition index in boundary_lookup (for SWAN queries)
 
         Returns:
             PartitionContribution with tracing results and optional path
@@ -1585,8 +1622,14 @@ class BackwardRayTracer:
             self.grid_cell_starts, self.grid_cell_counts, self.grid_triangles,
             self.boundary_depth_threshold,
             self.coast_distance, self.offshore_distance_m,
-            self.alpha, self.max_iterations, self.convergence_tolerance,
-            self.step_size, self.max_steps, store_path,
+            boundary_lookup=self.boundary_lookup,
+            partition_idx=partition_idx,
+            alpha=self.alpha,
+            max_iterations=self.max_iterations,
+            tolerance=self.convergence_tolerance,
+            step_size=self.step_size,
+            max_steps=self.max_steps,
+            store_path=store_path,
         )
 
     def get_depth_at_point(self, x: float, y: float) -> float:

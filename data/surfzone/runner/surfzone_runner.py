@@ -97,7 +97,10 @@ class SurfzoneRunner:
         self.boundary_conditions = boundary_conditions
         self.config = config or SurfzoneRunnerConfig()
 
-        # Initialize backward ray tracer
+        # Build boundary lookup for fast queries (must be created before tracer)
+        self.boundary_lookup = BoundaryDirectionLookup(boundary_conditions)
+
+        # Initialize backward ray tracer with boundary lookup for SWAN queries at landing position
         self.tracer = BackwardRayTracer(
             mesh,
             boundary_depth_threshold=self.config.boundary_depth_threshold,
@@ -106,10 +109,8 @@ class SurfzoneRunner:
             max_iterations=self.config.max_iterations,
             convergence_tolerance=self.config.convergence_tolerance,
             alpha=self.config.alpha,
+            boundary_lookup=self.boundary_lookup,
         )
-
-        # Build boundary lookup for fast queries
-        self.boundary_lookup = BoundaryDirectionLookup(boundary_conditions)
 
         # Get mesh arrays for forward propagation
         self.mesh_arrays = self.tracer.get_mesh_arrays()
@@ -239,8 +240,10 @@ class SurfzoneRunner:
         partition, boundary_x, boundary_y = result
 
         # Backward trace with path storage
+        # Pass partition_idx so SWAN data is queried at landing position
         contribution = self.tracer.trace_single_partition(
-            mesh_x, mesh_y, partition, store_path=True
+            mesh_x, mesh_y, partition, store_path=True,
+            partition_idx=self.config.partition_id,
         )
 
         if not contribution.converged or contribution.path_x is None:
