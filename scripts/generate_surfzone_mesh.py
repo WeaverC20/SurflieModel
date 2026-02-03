@@ -52,10 +52,15 @@ def generate_mesh(
     coastline_sample_res: float = 50.0,
     output_dir: Path = None,
     crm_file: Path = None,
+    bathy_source: str = "auto",
 ):
-    """Generate a surf zone mesh for a region."""
+    """Generate a surf zone mesh for a region.
+
+    Args:
+        bathy_source: Bathymetry source - "usace", "noaa", or "auto"
+                      Auto selects USACE for socal, NOAA for central/norcal
+    """
     from data.regions.region import get_region, REGIONS
-    from data.bathymetry.usace_lidar import USACELidar
     from data.surfzone.mesh import SurfZoneMesh, SurfZoneMeshConfig
 
     # Validate region
@@ -88,20 +93,51 @@ def generate_mesh(
     print(f"  Onshore distance:           {config.onshore_distance_m}m")
     print()
 
-    # Load USACE Lidar data (primary source)
-    print("Loading USACE Lidar data (primary source)...")
-    lidar = USACELidar()
+    # Auto-select bathymetry source based on region coverage
+    # USACE Lidar: lat 32.5-36.7 (socal only)
+    # NOAA Topobathy: lat 32.5-42.0 (all California)
+    if bathy_source == "auto":
+        if region_name == "socal":
+            bathy_source = "usace"
+        else:
+            bathy_source = "noaa"
+        print(f"Auto-selected bathymetry source: {bathy_source}")
 
-    # Check coverage overlap
-    tiles = lidar.find_tiles(region.lon_range, region.lat_range)
-    if not tiles:
-        print(f"Error: No USACE Lidar tiles cover region '{region_name}'")
-        print(f"  Region bounds: Lon {region.lon_range}, Lat {region.lat_range}")
-        print(f"  Lidar bounds:  Lon [{lidar.bounds['lon_min']:.4f}, {lidar.bounds['lon_max']:.4f}]")
-        print(f"                 Lat [{lidar.bounds['lat_min']:.4f}, {lidar.bounds['lat_max']:.4f}]")
+    # Load bathymetry data based on source
+    bathymetry = None
+    if bathy_source == "usace":
+        from data.bathymetry.usace_lidar import USACELidar
+        print("Loading USACE Lidar data (primary source)...")
+        bathymetry = USACELidar()
+
+        # Check coverage overlap
+        tiles = bathymetry.find_tiles(region.lon_range, region.lat_range)
+        if not tiles:
+            print(f"Error: No USACE Lidar tiles cover region '{region_name}'")
+            print(f"  Region bounds: Lon {region.lon_range}, Lat {region.lat_range}")
+            print(f"  Lidar bounds:  Lon [{bathymetry.bounds['lon_min']:.4f}, {bathymetry.bounds['lon_max']:.4f}]")
+            print(f"                 Lat [{bathymetry.bounds['lat_min']:.4f}, {bathymetry.bounds['lat_max']:.4f}]")
+            print("\nTry using --bathy-source noaa for this region")
+            sys.exit(1)
+        print(f"Found {len(tiles)} Lidar tiles covering region")
+
+    elif bathy_source == "noaa":
+        from data.bathymetry.noaa_topobathy import NOAATopobathy
+        print("Loading NOAA Topobathy DEM (primary source)...")
+        bathymetry = NOAATopobathy()
+
+        # Check coverage overlap
+        tiles = bathymetry.find_tiles(region.lon_range, region.lat_range)
+        if not tiles:
+            print(f"Error: No NOAA Topobathy coverage for region '{region_name}'")
+            sys.exit(1)
+        print("NOAA Topobathy coverage confirmed")
+
+    else:
+        print(f"Error: Unknown bathymetry source '{bathy_source}'")
+        print("Available: usace, noaa, auto")
         sys.exit(1)
 
-    print(f"Found {len(tiles)} Lidar tiles covering region")
     print()
 
     # Load NCEI CRM data (fallback source, if provided)
@@ -117,7 +153,7 @@ def generate_mesh(
             print("Continuing without fallback bathymetry...\n")
 
     # Generate mesh
-    mesh = SurfZoneMesh.from_region(region, lidar, config, fallback_bathy=fallback_bathy)
+    mesh = SurfZoneMesh.from_region(region, bathymetry, config, fallback_bathy=fallback_bathy)
 
     print()
     print(mesh.summary())
@@ -130,7 +166,7 @@ def generate_mesh(
     mesh.save(output_dir)
 
     # Cleanup
-    lidar.close()
+    bathymetry.close()
     if fallback_bathy:
         fallback_bathy.close()
 
@@ -209,6 +245,14 @@ def main():
         help="Path to NCEI CRM NetCDF file for fallback bathymetry (fills gaps in Lidar coverage)"
     )
 
+    parser.add_argument(
+        '--bathy-source',
+        type=str,
+        default="auto",
+        choices=["auto", "usace", "noaa"],
+        help="Bathymetry source: 'usace' (USACE Lidar), 'noaa' (NOAA Topobathy), or 'auto' (default: auto selects based on region)"
+    )
+
     args = parser.parse_args()
 
     if args.list_regions:
@@ -229,6 +273,7 @@ def main():
         coastline_sample_res=args.coastline_sample_res,
         output_dir=args.output_dir,
         crm_file=args.crm_file,
+        bathy_source=args.bathy_source,
     )
 
 

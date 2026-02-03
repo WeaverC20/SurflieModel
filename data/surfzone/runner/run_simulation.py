@@ -176,7 +176,26 @@ Examples:
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for reproducible sampling')
 
+    # Performance options
+    parser.add_argument('--clear-cache', action='store_true',
+                        help='Clear Numba JIT cache before running (fixes slowdown from stale cache)')
+
     args = parser.parse_args()
+
+    # Clear Numba cache if requested
+    if args.clear_cache:
+        cache_dir = Path(__file__).parent / "__pycache__"
+        if cache_dir.exists():
+            nbc_files = list(cache_dir.glob("*.nb*"))
+            if nbc_files:
+                print(f"Clearing {len(nbc_files)} Numba cache files from {cache_dir}...")
+                for f in nbc_files:
+                    f.unlink()
+                print("Cache cleared. Functions will be recompiled on first use.")
+            else:
+                print("No Numba cache files found.")
+        else:
+            print(f"Cache directory not found: {cache_dir}")
 
     # Handle --list-regions
     if args.list_regions:

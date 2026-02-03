@@ -375,6 +375,7 @@ def view_result(
         tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
         active_tools=['wheel_zoom', 'pan'],
         bgcolor='#1a1a2e',
+        data_aspect=1,  # Equal scaling on X and Y axes (important for UTM)
     )
 
     # Create colorbars
