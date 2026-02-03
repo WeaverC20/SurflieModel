@@ -1230,8 +1230,11 @@ def _trace_with_convergence_core(
     # Try initial direction, then fallbacks (±20°) if it hits land on first attempt
     fallback_offsets = [0.0, 20.0, -20.0]
     theta_M = None
+    last_failed_path_x = None
+    last_failed_path_y = None
+    last_failed_theta = None
 
-    for offset in fallback_offsets:
+    for fallback_idx, offset in enumerate(fallback_offsets):
         test_theta = (theta_M_initial + offset) % 360.0
 
         # Test trace to see if this direction reaches boundary
@@ -1253,17 +1256,39 @@ def _trace_with_convergence_core(
             # Found a direction that works
             theta_M = test_theta
             break
+        else:
+            # Store failed attempt for debugging
+            last_failed_path_x = test_path_x.copy()
+            last_failed_path_y = test_path_y.copy()
+            last_failed_theta = test_theta
+
+            # Record in iteration history if requested
+            if store_iteration_history:
+                iteration_history.append({
+                    'iteration': -1,  # Negative to indicate fallback attempt
+                    'fallback_idx': fallback_idx,
+                    'theta_M': test_theta,
+                    'theta_arrival': np.nan,
+                    'reached_boundary': False,
+                    'alpha': 0.0,
+                    'path_x': test_path_x.copy(),
+                    'path_y': test_path_y.copy(),
+                    'method': 'fallback',
+                    'error': np.nan,
+                })
 
     if theta_M is None:
-        # All fallback directions hit land
+        # All fallback directions hit land - return with last attempted path
         return ConvergenceResult(
             converged=False,
             failed_to_reach=True,
-            theta_M=np.nan,
+            theta_M=last_failed_theta if last_failed_theta is not None else np.nan,
             theta_arrival=np.nan,
             n_iterations=0,
             iteration_history=iteration_history,
             initial_direction=theta_M_initial,
+            path_x=last_failed_path_x,
+            path_y=last_failed_path_y,
         )
 
     # Adaptive alpha for gradient descent
