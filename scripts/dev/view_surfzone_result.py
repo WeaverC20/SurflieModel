@@ -6,9 +6,10 @@ View surfzone wave propagation results overlaid on the mesh.
 Shows wave heights, convergence status, and depth filtering.
 
 Usage:
-    python scripts/dev/view_surfzone_result.py
-    python scripts/dev/view_surfzone_result.py --result-file path/to/result.npz
-    python scripts/dev/view_surfzone_result.py --lonlat
+    python scripts/dev/view_surfzone_result.py --region socal
+    python scripts/dev/view_surfzone_result.py --region norcal --result-file path/to/result.npz
+    python scripts/dev/view_surfzone_result.py --list-regions
+    python scripts/dev/view_surfzone_result.py --region socal --lonlat
 """
 
 import argparse
@@ -16,6 +17,7 @@ import sys
 from pathlib import Path
 import io
 import base64
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -32,6 +34,94 @@ pn.extension()
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
+
+from data.regions.region import REGIONS
+
+
+def list_regions_with_results():
+    """List regions with their simulation results status."""
+    print("\nRegions with simulation results:")
+    print("-" * 70)
+
+    for name in ['socal', 'central', 'norcal']:
+        region = REGIONS[name]
+
+        # Check for surfzone mesh
+        mesh_dir = project_root / "data" / "surfzone" / "meshes" / name
+        mesh_exists = mesh_dir.exists() and any(mesh_dir.glob("*.npz"))
+
+        # Check for results in region directory
+        result_dir = project_root / "data" / "surfzone" / "output" / name
+        results = []
+        if result_dir.exists():
+            results = sorted(result_dir.glob("*.npz"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+        # Also check legacy location for socal
+        legacy_result = None
+        if name == "socal":
+            legacy_path = project_root / "data" / "surfzone" / "output" / "primary_swell.npz"
+            if legacy_path.exists() and legacy_path.parent == project_root / "data" / "surfzone" / "output":
+                legacy_result = legacy_path
+
+        print(f"  {name:12} - {region.display_name}")
+        print(f"               Mesh: {'Yes' if mesh_exists else 'No'}")
+
+        if results:
+            print(f"               Results:")
+            for r in results[:3]:  # Show first 3
+                print(f"                 - {r.name}")
+            if len(results) > 3:
+                print(f"                 ... and {len(results) - 3} more")
+        elif legacy_result:
+            print(f"               Results: {legacy_result.name} (legacy location)")
+        else:
+            print(f"               Results: None")
+        print()
+
+
+def find_result_file(region_name: str, result_file: Optional[Path] = None) -> Path:
+    """
+    Find result file for a region.
+
+    Args:
+        region_name: Region identifier (socal, norcal, central)
+        result_file: Explicit path (if provided, used directly)
+
+    Returns:
+        Path to result .npz file
+
+    Raises:
+        FileNotFoundError: If no results found
+    """
+    if result_file is not None:
+        if not result_file.exists():
+            raise FileNotFoundError(f"Result file not found: {result_file}")
+        return result_file
+
+    # Try region-specific directory first
+    region_dir = project_root / "data" / "surfzone" / "output" / region_name
+    if region_dir.exists():
+        # Default filename first
+        default_result = region_dir / "primary_swell.npz"
+        if default_result.exists():
+            return default_result
+
+        # Fall back to most recent .npz in directory
+        npz_files = sorted(region_dir.glob("*.npz"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+        if npz_files:
+            return npz_files[0]
+
+    # Legacy location (for backward compatibility with socal)
+    if region_name == "socal":
+        legacy = project_root / "data" / "surfzone" / "output" / "primary_swell.npz"
+        if legacy.exists():
+            return legacy
+
+    raise FileNotFoundError(
+        f"No results found for region '{region_name}'. "
+        f"Run simulation first: python data/surfzone/runner/run_simulation.py --region {region_name}"
+    )
 
 
 def load_mesh(region_name: str = "socal"):
@@ -367,21 +457,42 @@ def main():
     parser = argparse.ArgumentParser(
         description="Interactive surfzone simulation result viewer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        epilog="""
+Examples:
+    python scripts/dev/view_surfzone_result.py --region socal
+    python scripts/dev/view_surfzone_result.py --region norcal --lonlat
+    python scripts/dev/view_surfzone_result.py --list-regions
+    python scripts/dev/view_surfzone_result.py --region socal --result-file path/to/result.npz
+        """,
+    )
+
+    # Region selection
+    parser.add_argument(
+        '--region',
+        type=str,
+        default=None,
+        help="Region name (socal, norcal, central). Auto-detects mesh and results."
+    )
+
+    parser.add_argument(
+        '--list-regions',
+        action='store_true',
+        help="List regions with available results and exit"
+    )
+
+    # Legacy --mesh argument for backward compatibility
+    parser.add_argument(
+        '--mesh',
+        type=str,
+        default=None,
+        help="Mesh region name (deprecated, use --region instead)"
     )
 
     parser.add_argument(
         '--result-file',
         type=Path,
         default=None,
-        help="Path to result .npz file (default: data/surfzone/output/primary_swell.npz)"
-    )
-
-    parser.add_argument(
-        '--mesh',
-        type=str,
-        default="socal",
-        help="Mesh region name (default: socal)"
+        help="Path to result .npz file (default: auto-detect for region)"
     )
 
     parser.add_argument(
@@ -399,9 +510,28 @@ def main():
 
     args = parser.parse_args()
 
+    # Handle --list-regions
+    if args.list_regions:
+        list_regions_with_results()
+        return
+
+    # Determine region (--region takes precedence over --mesh)
+    region_name = args.region or args.mesh
+    if region_name is None:
+        region_name = "socal"  # Default for backward compatibility
+        print(f"Note: Using default region '{region_name}'. Use --region to specify.")
+
+    # Find result file
+    try:
+        result_path = find_result_file(region_name, args.result_file)
+        print(f"Using result file: {result_path}")
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
     view_result(
-        result_path=args.result_file,
-        mesh_region=args.mesh,
+        result_path=result_path,
+        mesh_region=region_name,
         use_lonlat=args.lonlat,
         h_max=args.h_max,
     )

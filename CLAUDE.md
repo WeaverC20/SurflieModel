@@ -33,16 +33,41 @@ SurflieModel/
 │   ├── bathymetry/           # Bathymetry processing (OOP)
 │   │   └── gebco.py          # GEBCOBathymetry class
 │   │
+│   ├── regions/              # Geographic region definitions
+│   │   └── region.py         # Region class (SOCAL, NORCAL, CENTRAL_CAL)
+│   │
+│   ├── meshes/               # SWAN computational meshes (by region)
+│   │   ├── socal/            # coarse, medium, fine, ultrafine
+│   │   ├── central/          # coarse, fine
+│   │   └── norcal/           # coarse, fine
+│   │
+│   ├── swan/                 # SWAN model data
+│   │   ├── runs/             # SWAN run outputs (by region)
+│   │   │   ├── socal/{resolution}/latest/
+│   │   │   ├── central/{resolution}/latest/
+│   │   │   └── norcal/{resolution}/latest/
+│   │   ├── ww3_endpoints/    # WW3 boundary extraction points
+│   │   │   └── {region}/ww3_boundaries.json
+│   │   └── run_swan.py       # SWAN runner script
+│   │
 │   ├── surfzone/             # Surfzone wave modeling
 │   │   ├── mesh.py           # SurfZoneMesh class
 │   │   ├── SURFZONE_MODEL.md # Technical documentation
+│   │   ├── meshes/           # Generated surfzone meshes (by region)
+│   │   │   └── {region}/     # socal/, central/, norcal/
+│   │   ├── output/           # Simulation results (by region)
+│   │   │   └── {region}/     # socal/, central/, norcal/
 │   │   └── runner/           # Ray tracing engine
-│   │       ├── wave_physics.py            # Numba wave physics
-│   │       ├── backward_ray_tracer.py     # Primary backward tracer
+│   │       ├── run_simulation.py      # Main simulation CLI
+│   │       ├── surfzone_runner.py     # SurfzoneRunner orchestration
+│   │       ├── backward_ray_tracer.py # Primary backward tracer
+│   │       ├── forward_propagation.py # Forward wave propagation
+│   │       ├── wave_physics.py        # Numba wave physics
+│   │       ├── swan_input_provider.py # SWAN boundary conditions
+│   │       ├── surfzone_result.py     # Result dataclasses
+│   │       ├── output_writer.py       # Results storage
 │   │       ├── backward_ray_tracer_debug.py # Visualization tool
-│   │       ├── ray_tracer.py              # Legacy forward tracer (unused)
-│   │       ├── swan_input_provider.py     # SWAN boundary conditions
-│   │       └── output_writer.py           # Results storage
+│   │       └── ray_tracer.py          # Legacy forward tracer (unused)
 │   │
 │   ├── pipelines/            # Data fetching pipelines
 │   │   ├── noaa/             # NOAA data (tides, WW3, GFS)
@@ -56,6 +81,9 @@ SurflieModel/
 │
 ├── packages/python/common/    # Shared Python utilities
 ├── scripts/                   # Utility scripts
+│   ├── generate_surfzone_mesh.py  # Generate surfzone mesh for a region
+│   └── dev/
+│       └── view_surfzone_result.py # Interactive result viewer
 └── docs/                      # Documentation
     └── surfzone_wave_simulation_approach.md  # Detailed backward tracing docs
 ```
@@ -79,6 +107,30 @@ view_gebco(lat_range=(32, 42), lon_range=(-126, -117))
 ```
 
 **GEBCO file location**: `data/raw/bathymetry/gebco_2024/gebco_2024_california.nc`
+
+### Regions (`data/regions/`)
+
+California is divided into three modeling regions for SWAN and surfzone simulations:
+
+| Region | Name | Latitude | Longitude | Description |
+|--------|------|----------|-----------|-------------|
+| socal | Southern California | 32.0 - 35.0 | -121.0 to -117.0 | Mexico border to Point Conception |
+| central | Central California | 34.5 - 39.0 | -124.0 to -120.0 | Point Conception to Point Reyes |
+| norcal | Northern California | 38.5 - 42.0 | -126.0 to -122.0 | Point Reyes to Oregon border |
+
+**Usage:**
+```python
+from data.regions.region import get_region, REGIONS
+
+# Get a specific region
+socal = get_region("socal")
+print(f"{socal.display_name}: lat {socal.lat_range}, lon {socal.lon_range}")
+
+# List all regions
+for name in ['socal', 'central', 'norcal']:
+    region = REGIONS[name]
+    print(f"{name}: {region.display_name}")
+```
 
 ### Data Pipelines
 
@@ -105,8 +157,10 @@ The surfzone module uses **backward ray tracing** to propagate waves from near-s
 **Key Components:**
 
 - **SurfZoneMesh** (`mesh.py`): Coastline-following mesh with bathymetry and spatial index
+- **SurfzoneRunner** (`runner/surfzone_runner.py`): Main simulation orchestrator
 - **BackwardRayTracer** (`runner/backward_ray_tracer.py`): Primary wave propagation engine
 - **wave_physics.py**: Numba-accelerated physics (shoaling, refraction, breaking)
+- **SwanInputProvider** (`runner/swan_input_provider.py`): SWAN partition data interpolation
 - **backward_ray_tracer_debug.py**: Visualization tool for ray paths
 
 **Backward Ray Tracing Physics:**
@@ -124,14 +178,24 @@ dθ/ds = -(1/C) · ∂C/∂n
 dx, dy = update_ray_direction(dx, dy, C, -dC_dx, -dC_dy, step_size)
 ```
 
-**Usage:**
+**Running Simulations (Multi-Region):**
 
-```python
-from data.surfzone.runner.backward_ray_tracer import BackwardRayTracer
+```bash
+# List available regions and their status
+python data/surfzone/runner/run_simulation.py --list-regions
 
-tracer = BackwardRayTracer(mesh, boundary_depth_threshold=50.0)  # 50m depth
-result = tracer.trace_mesh_point(x, y, partitions)
-print(f"Total Hs: {result.total_Hs:.2f}m")
+# Run simulation for a region (auto-detects mesh and SWAN)
+python data/surfzone/runner/run_simulation.py --region socal
+
+# Specify SWAN resolution
+python data/surfzone/runner/run_simulation.py --region socal --swan-resolution fine
+
+# Sample subset for fast iteration
+python data/surfzone/runner/run_simulation.py --region socal --sample-fraction 0.1
+
+# View results
+python scripts/dev/view_surfzone_result.py --region socal
+python scripts/dev/view_surfzone_result.py --list-regions
 ```
 
 **Visualization:**
@@ -140,7 +204,7 @@ print(f"Total Hs: {result.total_Hs:.2f}m")
 venv/bin/python data/surfzone/runner/backward_ray_tracer_debug.py
 ```
 
-See `docs/surfzone_wave_simulation_approach.md` for detailed documentation.
+See `data/surfzone/SURFZONE_MODEL.md` for detailed documentation.
 
 ## Development Notes
 
@@ -148,14 +212,19 @@ See `docs/surfzone_wave_simulation_approach.md` for detailed documentation.
 - Complete data fetching infrastructure (NOAA, WW3, GFS, RTOFS, NDBC)
 - Frontend dashboard with 4 working heatmaps
 - GEBCO bathymetry viewing capability
-- Surfzone mesh generation with spatial indexing
+- Region definitions for socal, central, norcal (with overlapping boundaries)
+- SWAN model runs by region with multiple resolutions
+- Surfzone mesh generation with spatial indexing (multi-region support)
 - Backward ray tracing for wave propagation (with correct physics)
 - Wave physics (shoaling, refraction, breaking criteria)
+- Convergence-based ray tracing with SWAN boundary lookup
+- Forward wave propagation along traced paths
+- Interactive result viewer with datashader
 
 ### What Will Be Built
-- Integration with live SWAN boundary conditions
 - Breaking statistics and visualization
 - Surf spot predictions at specific locations
+- Meshes for central and norcal regions
 
 ### Code Style
 - Use object-oriented programming for new modules
@@ -172,8 +241,27 @@ uvicorn app.main:app --reload
 # Frontend (from project root)
 cd apps/web
 npm run dev
+```
 
-# Run backward ray tracer visualization
+### Surfzone Simulation Workflow
+
+```bash
+# 1. Generate surfzone mesh for a region
+python scripts/generate_surfzone_mesh.py socal
+python scripts/generate_surfzone_mesh.py --list-regions
+
+# 2. Run SWAN model (requires WW3 boundary data)
+python data/swan/run_swan.py --region socal --mesh coarse
+
+# 3. Run surfzone simulation
+python data/surfzone/runner/run_simulation.py --region socal
+python data/surfzone/runner/run_simulation.py --list-regions
+
+# 4. View results
+python scripts/dev/view_surfzone_result.py --region socal
+python scripts/dev/view_surfzone_result.py --list-regions
+
+# Debug visualization
 venv/bin/python data/surfzone/runner/backward_ray_tracer_debug.py
 ```
 
@@ -184,11 +272,23 @@ venv/bin/python data/surfzone/runner/backward_ray_tracer_debug.py
 3. **Build incrementally**: Work closely with user to design and implement features
 4. **Data fetching is done**: Don't modify pipelines in `data/pipelines/` unless asked
 5. **Frontend is stable**: The 4 heatmaps work - don't modify unless asked
-6. **Backward ray tracing**: Use `BackwardRayTracer` for wave propagation
+6. **Regions**: Three California regions defined in `data/regions/region.py`:
+   - `socal` (Southern California): 32.0-35.0°N
+   - `central` (Central California): 34.5-39.0°N
+   - `norcal` (Northern California): 38.5-42.0°N
+   - Use `get_region(name)` to access region configuration
+7. **Directory conventions**: All region-specific data follows `{base_path}/{region}/` pattern:
+   - SWAN runs: `data/swan/runs/{region}/{resolution}/latest/`
+   - Surfzone meshes: `data/surfzone/meshes/{region}/`
+   - Surfzone output: `data/surfzone/output/{region}/`
+8. **Backward ray tracing**: Use `BackwardRayTracer` for wave propagation
    - Rays trace from near-shore toward deep water boundary
    - Direction and gradients are NEGATED to make rays bend toward faster C (deeper water)
    - See `data/surfzone/SURFZONE_MODEL.md` for physics details
-7. **Wave physics**: Functions in `wave_physics.py` use standard formulas
-   - `update_ray_direction()` uses forward formula: dθ/ds = -(1/C)·∂C/∂n
-   - For backward tracing, pass NEGATED gradients to get correct behavior
-8. **Legacy code**: `ray_tracer.py` is the old forward tracer - don't use
+9. **Surfzone runner**: Use `run_simulation.py --region {name}` to run simulations
+   - Auto-detects mesh and SWAN paths based on region
+   - Results saved to `data/surfzone/output/{region}/`
+10. **Wave physics**: Functions in `wave_physics.py` use standard formulas
+    - `update_ray_direction()` uses forward formula: dθ/ds = -(1/C)·∂C/∂n
+    - For backward tracing, pass NEGATED gradients to get correct behavior
+11. **Legacy code**: `ray_tracer.py` is the old forward tracer - don't use

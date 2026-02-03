@@ -3,17 +3,21 @@
 Run surfzone forward wave propagation simulation.
 
 Usage:
-    python run_simulation.py [--min-depth 0.0] [--max-depth 10.0] [--output-dir output/]
+    python run_simulation.py --region socal
+    python run_simulation.py --region socal --swan-resolution fine
+    python run_simulation.py --list-regions
 
 Example:
-    python run_simulation.py
-    python run_simulation.py --min-depth 0 --max-depth 5
+    python run_simulation.py --region socal
+    python run_simulation.py --region socal --min-depth 0 --max-depth 5
+    python run_simulation.py --region norcal --sample-fraction 0.1
 """
 
 import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -21,6 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 
+from data.regions.region import get_region, REGIONS
 from data.surfzone.mesh import SurfZoneMesh
 from data.surfzone.runner.swan_input_provider import SwanInputProvider, BoundaryConditions, WavePartition
 from data.surfzone.runner.surfzone_runner import SurfzoneRunner, SurfzoneRunnerConfig
@@ -34,64 +39,177 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def list_regions():
+    """List available regions with mesh and SWAN status."""
+    print("\nAvailable regions:")
+    print("-" * 70)
+
+    for name in ['socal', 'central', 'norcal']:
+        region = REGIONS[name]
+
+        # Check for surfzone mesh
+        mesh_dir = PROJECT_ROOT / "data" / "surfzone" / "meshes" / name
+        mesh_exists = mesh_dir.exists() and any(mesh_dir.glob("*.npz"))
+
+        # Check for SWAN runs
+        swan_dir = PROJECT_ROOT / "data" / "swan" / "runs" / name
+        swan_resolutions = []
+        if swan_dir.exists():
+            for d in sorted(swan_dir.iterdir()):
+                if d.is_dir() and (d / "latest").exists():
+                    swan_resolutions.append(d.name)
+
+        # Check for existing results
+        output_dir = PROJECT_ROOT / "data" / "surfzone" / "output" / name
+        has_results = output_dir.exists() and any(output_dir.glob("*.npz"))
+
+        print(f"  {name:12} - {region.display_name}")
+        print(f"               Lat: [{region.lat_range[0]:.1f}, {region.lat_range[1]:.1f}]")
+        print(f"               Lon: [{region.lon_range[0]:.1f}, {region.lon_range[1]:.1f}]")
+        print(f"               Mesh: {'Yes' if mesh_exists else 'No (run: python scripts/generate_surfzone_mesh.py ' + name + ')'}")
+        print(f"               SWAN: {', '.join(swan_resolutions) if swan_resolutions else 'None'}")
+        print(f"               Results: {'Yes' if has_results else 'No'}")
+        print()
+
+
+def get_region_paths(region_name: str, swan_resolution: Optional[str] = None) -> dict:
+    """
+    Get mesh and SWAN paths for a region with auto-detection.
+
+    Args:
+        region_name: Region identifier (socal, norcal, central)
+        swan_resolution: Optional SWAN resolution (coarse, fine, etc.)
+                        If None, uses first available in preference order.
+
+    Returns:
+        dict with keys: 'mesh_dir', 'swan_dir', 'output_dir', 'region_display_name'
+
+    Raises:
+        FileNotFoundError: If mesh or SWAN data not found
+    """
+    region = get_region(region_name)
+
+    # Mesh directory
+    mesh_dir = PROJECT_ROOT / "data" / "surfzone" / "meshes" / region_name
+    if not mesh_dir.exists() or not any(mesh_dir.glob("*.npz")):
+        raise FileNotFoundError(
+            f"No surfzone mesh found for region '{region_name}'. "
+            f"Generate one with: python scripts/generate_surfzone_mesh.py {region_name}"
+        )
+
+    # SWAN directory with resolution preference
+    swan_base = PROJECT_ROOT / "data" / "swan" / "runs" / region_name
+    resolution_preference = ['coarse', 'medium', 'fine', 'ultrafine']
+
+    if swan_resolution:
+        swan_dir = swan_base / swan_resolution / "latest"
+        if not swan_dir.exists():
+            raise FileNotFoundError(
+                f"SWAN run not found at: {swan_dir}"
+            )
+    else:
+        # Auto-detect first available resolution
+        swan_dir = None
+        for res in resolution_preference:
+            candidate = swan_base / res / "latest"
+            if candidate.exists():
+                swan_dir = candidate
+                logger.info(f"Auto-detected SWAN resolution: {res}")
+                break
+        if swan_dir is None:
+            raise FileNotFoundError(
+                f"No SWAN runs found for region '{region_name}' in {swan_base}. "
+                f"Run SWAN first: python data/swan/run_swan.py --region {region_name}"
+            )
+
+    # Output directory (region-separated)
+    output_dir = PROJECT_ROOT / "data" / "surfzone" / "output" / region_name
+
+    return {
+        'mesh_dir': mesh_dir,
+        'swan_dir': swan_dir,
+        'output_dir': output_dir,
+        'region_display_name': region.display_name,
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Run surfzone wave propagation simulation')
+    parser = argparse.ArgumentParser(
+        description='Run surfzone wave propagation simulation',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python run_simulation.py --region socal
+    python run_simulation.py --region socal --swan-resolution fine
+    python run_simulation.py --region norcal --sample-fraction 0.1
+    python run_simulation.py --list-regions
+        """
+    )
+
+    # Region selection
+    parser.add_argument('--region', type=str, default=None,
+                        help="Region name (socal, norcal, central). Required unless using --list-regions.")
+    parser.add_argument('--list-regions', action='store_true',
+                        help='List available regions with mesh/SWAN status and exit')
+    parser.add_argument('--swan-resolution', type=str, default=None,
+                        help='SWAN resolution (coarse, fine, etc.). Default: auto-detect')
+
+    # Depth filtering
     parser.add_argument('--min-depth', type=float, default=0.0,
                         help='Minimum depth filter (m, default: 0.0)')
     parser.add_argument('--max-depth', type=float, default=10.0,
                         help='Maximum depth filter (m, default: 10.0)')
+
+    # Path overrides (optional, for advanced use)
     parser.add_argument('--output-dir', type=str, default=None,
-                        help='Output directory (default: data/surfzone/output/)')
+                        help='Output directory override (default: data/surfzone/output/{region}/)')
     parser.add_argument('--mesh-dir', type=str, default=None,
-                        help='Mesh directory (default: auto-detect socal mesh)')
+                        help='Mesh directory override (default: data/surfzone/meshes/{region}/)')
     parser.add_argument('--swan-dir', type=str, default=None,
-                        help='SWAN run directory (default: data/swan/runs/socal/coarse/latest)')
+                        help='SWAN run directory override (default: auto-detect)')
+
+    # Sampling options
     parser.add_argument('--sample-fraction', type=float, default=None,
                         help='Fraction of points to sample (e.g., 0.1 for 10%%)')
     parser.add_argument('--sample-count', type=int, default=None,
                         help='Exact number of points to sample')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for reproducible sampling')
+
     args = parser.parse_args()
 
-    # Default paths
-    if args.output_dir is None:
-        args.output_dir = PROJECT_ROOT / "data" / "surfzone" / "output"
-    else:
-        args.output_dir = Path(args.output_dir)
+    # Handle --list-regions
+    if args.list_regions:
+        list_regions()
+        return
 
-    if args.swan_dir is None:
-        args.swan_dir = PROJECT_ROOT / "data" / "swan" / "runs" / "socal" / "coarse" / "latest"
-    else:
-        args.swan_dir = Path(args.swan_dir)
+    # Require --region
+    if not args.region:
+        parser.print_help()
+        print("\nError: --region is required. Use --list-regions to see available regions.")
+        sys.exit(1)
 
-    # Find mesh directory
-    if args.mesh_dir is None:
-        # Look for socal mesh
-        mesh_base = PROJECT_ROOT / "data" / "surfzone" / "meshes"
-        # Try socal/socal_surfzone.npz first
-        socal_mesh = mesh_base / "socal"
-        if socal_mesh.exists():
-            args.mesh_dir = socal_mesh
-        else:
-            # Fallback: look for socal_* directories
-            socal_meshes = list(mesh_base.glob("socal*"))
-            if socal_meshes:
-                args.mesh_dir = sorted(socal_meshes)[-1]
-            else:
-                logger.error(f"No socal mesh found in {mesh_base}")
-                logger.error("Please specify --mesh-dir")
-                sys.exit(1)
-    else:
-        args.mesh_dir = Path(args.mesh_dir)
+    # Get region-based paths (auto-detect or use overrides)
+    try:
+        paths = get_region_paths(args.region, args.swan_resolution)
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        sys.exit(1)
+
+    # Use explicit paths if provided, otherwise use auto-detected
+    mesh_dir = Path(args.mesh_dir) if args.mesh_dir else paths['mesh_dir']
+    swan_dir = Path(args.swan_dir) if args.swan_dir else paths['swan_dir']
+    output_dir = Path(args.output_dir) if args.output_dir else paths['output_dir']
+    region_display_name = paths['region_display_name']
 
     logger.info("=" * 60)
     logger.info("Surfzone Wave Propagation Simulation")
     logger.info("=" * 60)
-    logger.info(f"Mesh: {args.mesh_dir}")
-    logger.info(f"SWAN: {args.swan_dir}")
+    logger.info(f"Region: {region_display_name} ({args.region})")
+    logger.info(f"Mesh: {mesh_dir}")
+    logger.info(f"SWAN: {swan_dir}")
     logger.info(f"Depth range: {args.min_depth} - {args.max_depth} m")
-    logger.info(f"Output: {args.output_dir}")
+    logger.info(f"Output: {output_dir}")
     if args.sample_fraction is not None:
         logger.info(f"Sampling: {args.sample_fraction * 100:.1f}% of points")
     elif args.sample_count is not None:
@@ -102,12 +220,12 @@ def main():
 
     # Load mesh
     logger.info("Loading mesh...")
-    mesh = SurfZoneMesh.load(args.mesh_dir)
+    mesh = SurfZoneMesh.load(mesh_dir)
     logger.info(f"  Loaded {len(mesh.points_x)} mesh points")
 
     # Load SWAN data
     logger.info("Loading SWAN data...")
-    swan = SwanInputProvider(args.swan_dir)
+    swan = SwanInputProvider(swan_dir)
 
     # Get boundary conditions by sampling mesh boundary points
     logger.info("Finding boundary points from mesh...")
@@ -189,7 +307,7 @@ def main():
     # Run simulation
     logger.info("Running simulation...")
     runner = SurfzoneRunner(mesh, boundary_conditions, config)
-    result = runner.run(region_name="Southern California")
+    result = runner.run(region_name=region_display_name)
 
     # Print summary
     logger.info("=" * 60)
@@ -199,8 +317,8 @@ def main():
 
     # Save results
     logger.info("Saving results...")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    npz_path, json_path = save_surfzone_result(result, args.output_dir, "primary_swell")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    npz_path, json_path = save_surfzone_result(result, output_dir, "primary_swell")
     logger.info(f"  Saved: {npz_path}")
     logger.info(f"  Saved: {json_path}")
 

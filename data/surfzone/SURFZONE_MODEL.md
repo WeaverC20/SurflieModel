@@ -18,14 +18,32 @@ The surfzone model uses **backward ray tracing** to determine wave conditions at
 data/surfzone/
 ├── SURFZONE_MODEL.md              # This documentation
 ├── mesh.py                        # SurfZoneMesh class (bathymetry + spatial index)
-├── run_surfzone.py                # Main runner (WIP)
+│
+├── meshes/                        # Generated surfzone meshes (by region)
+│   ├── socal/
+│   │   ├── socal_surfzone.npz     # Mesh data (points, depths, triangulation)
+│   │   └── socal_surfzone.json    # Mesh metadata
+│   ├── central/
+│   └── norcal/
+│
+├── output/                        # Simulation results (by region)
+│   ├── socal/
+│   │   ├── primary_swell.npz      # Wave heights, convergence, etc.
+│   │   └── primary_swell.json     # Result metadata
+│   ├── central/
+│   └── norcal/
+│
 └── runner/
-    ├── wave_physics.py            # Core physics (Numba-accelerated)
+    ├── run_simulation.py          # CLI entry point (--region argument)
+    ├── surfzone_runner.py         # SurfzoneRunner orchestration class
     ├── backward_ray_tracer.py     # Primary ray tracing engine
+    ├── forward_propagation.py     # Forward wave height propagation
+    ├── wave_physics.py            # Core physics (Numba-accelerated)
+    ├── swan_input_provider.py     # SWAN partition data interpolation
+    ├── surfzone_result.py         # Result dataclasses
+    ├── output_writer.py           # Results storage
     ├── backward_ray_tracer_debug.py # Visualization/debug tool
-    ├── ray_tracer.py              # Legacy forward tracer (unused)
-    ├── swan_input_provider.py     # SWAN boundary conditions
-    └── output_writer.py           # Results storage
+    └── ray_tracer.py              # Legacy forward tracer (unused)
 ```
 
 ---
@@ -184,6 +202,98 @@ This traces rays from shallow water points backward to the 50m boundary, showing
 - Left panel: Zoomed coastal view
 - Middle panel: Full ray paths
 - Right panel: Depth vs distance along rays
+
+---
+
+---
+
+## Multi-Region Support
+
+The surfzone model supports three California regions:
+
+| Region | Name | Latitude | Description |
+|--------|------|----------|-------------|
+| socal | Southern California | 32.0 - 35.0 | Mexico border to Point Conception |
+| central | Central California | 34.5 - 39.0 | Point Conception to Point Reyes |
+| norcal | Northern California | 38.5 - 42.0 | Point Reyes to Oregon border |
+
+### Multi-Region Workflow
+
+```bash
+# 1. Generate surfzone mesh for a region
+python scripts/generate_surfzone_mesh.py socal
+python scripts/generate_surfzone_mesh.py central
+python scripts/generate_surfzone_mesh.py norcal
+
+# 2. Run simulation (requires SWAN data in data/swan/runs/{region}/)
+python data/surfzone/runner/run_simulation.py --region socal
+python data/surfzone/runner/run_simulation.py --region central --swan-resolution fine
+
+# 3. View results
+python scripts/dev/view_surfzone_result.py --region socal
+python scripts/dev/view_surfzone_result.py --list-regions
+```
+
+### CLI Arguments
+
+**run_simulation.py:**
+```
+--region REGION        Region name (socal, norcal, central) [required]
+--list-regions         List available regions with status
+--swan-resolution RES  SWAN resolution (coarse, fine, etc.) [auto-detect]
+--min-depth FLOAT      Minimum depth filter (default: 0.0m)
+--max-depth FLOAT      Maximum depth filter (default: 10.0m)
+--sample-fraction F    Fraction of points to sample (e.g., 0.1 for 10%)
+--sample-count N       Exact number of points to sample
+--seed N               Random seed for reproducible sampling
+```
+
+---
+
+## SurfzoneRunner Class
+
+The `SurfzoneRunner` class orchestrates the complete simulation:
+
+```python
+from data.surfzone.mesh import SurfZoneMesh
+from data.surfzone.runner.swan_input_provider import SwanInputProvider
+from data.surfzone.runner.surfzone_runner import SurfzoneRunner, SurfzoneRunnerConfig
+
+# Load mesh and SWAN data
+mesh = SurfZoneMesh.load('data/surfzone/meshes/socal')
+swan = SwanInputProvider('data/swan/runs/socal/coarse/latest')
+boundary_conditions = swan.get_boundary_from_mesh(mesh)
+
+# Configure runner
+config = SurfzoneRunnerConfig(
+    min_depth=0.0,
+    max_depth=10.0,
+    partition_id=1,  # Primary swell
+    sample_fraction=0.1,  # Optional: sample 10% for testing
+)
+
+# Run simulation
+runner = SurfzoneRunner(mesh, boundary_conditions, config)
+result = runner.run(region_name="Southern California")
+
+# Access results
+print(result.summary())
+print(f"Converged: {result.n_converged} / {result.n_sampled}")
+```
+
+### SurfzoneRunnerConfig Options
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `min_depth` | 0.0 | Minimum depth filter (m) |
+| `max_depth` | 10.0 | Maximum depth filter (m) |
+| `partition_id` | 1 | Wave partition (0=wind sea, 1-3=swell) |
+| `boundary_depth_threshold` | 50.0 | Depth threshold for boundary detection (m) |
+| `step_size` | 15.0 | Ray tracing step size (m) |
+| `max_iterations` | 20 | Maximum convergence iterations |
+| `convergence_tolerance` | 0.10 | Convergence tolerance (fraction) |
+| `sample_fraction` | None | Fraction of points to sample |
+| `sample_count` | None | Exact number of points to sample |
 
 ---
 
