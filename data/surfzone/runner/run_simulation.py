@@ -15,9 +15,18 @@ Example:
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
+
+# Pin Numba thread count BEFORE importing numba (via numpy or other deps)
+# This prevents thread oversubscription issues that can cause progressive slowdown
+if 'NUMBA_NUM_THREADS' not in os.environ:
+    # Use half of available CPUs to leave headroom for other processes
+    import multiprocessing
+    n_threads = max(1, multiprocessing.cpu_count() // 2)
+    os.environ['NUMBA_NUM_THREADS'] = str(n_threads)
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -30,6 +39,14 @@ from data.surfzone.mesh import SurfZoneMesh
 from data.surfzone.runner.swan_input_provider import SwanInputProvider, BoundaryConditions, WavePartition
 from data.surfzone.runner.surfzone_runner import SurfzoneRunner, SurfzoneRunnerConfig
 from data.surfzone.runner.output_writer import save_surfzone_result
+
+# Partition definitions: id -> (label, filename)
+PARTITIONS = {
+    0: ("Wind Sea", "wind_sea"),
+    1: ("Primary Swell", "primary_swell"),
+    2: ("Secondary Swell", "secondary_swell"),
+    3: ("Tertiary Swell", "tertiary_swell"),
+}
 
 # Setup logging
 logging.basicConfig(
@@ -313,33 +330,62 @@ Examples:
             valid_hs = p.hs[p.is_valid]
             logger.info(f"    {p.label}: {n_valid} valid, Hs={valid_hs.min():.2f}-{valid_hs.max():.2f}m")
 
-    # Configure runner
-    config = SurfzoneRunnerConfig(
-        min_depth=args.min_depth,
-        max_depth=args.max_depth,
-        partition_id=1,  # Primary swell
-        sample_fraction=args.sample_fraction,
-        sample_count=args.sample_count,
-        random_seed=args.seed,
-    )
+    # Determine which partitions to run
+    # By default, run all partitions that have valid data
+    partitions_to_run = []
+    for p in boundary_conditions.partitions:
+        n_valid = p.is_valid.sum()
+        if n_valid > 0:
+            partitions_to_run.append(p.partition_id)
 
-    # Run simulation
-    logger.info("Running simulation...")
-    runner = SurfzoneRunner(mesh, boundary_conditions, config)
-    result = runner.run(region_name=region_display_name)
+    logger.info(f"Will run {len(partitions_to_run)} partitions: {partitions_to_run}")
 
-    # Print summary
-    logger.info("=" * 60)
-    logger.info("Results Summary")
-    logger.info("=" * 60)
-    print(result.summary())
-
-    # Save results
-    logger.info("Saving results...")
+    # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
-    npz_path, json_path = save_surfzone_result(result, output_dir, "primary_swell")
-    logger.info(f"  Saved: {npz_path}")
-    logger.info(f"  Saved: {json_path}")
+
+    # Run simulation for each partition
+    all_results = []
+    for partition_id in partitions_to_run:
+        partition_label, partition_filename = PARTITIONS.get(partition_id, (f"Partition {partition_id}", f"partition_{partition_id}"))
+
+        logger.info("=" * 60)
+        logger.info(f"Running simulation for partition {partition_id}: {partition_label}")
+        logger.info("=" * 60)
+
+        # Configure runner for this partition
+        config = SurfzoneRunnerConfig(
+            min_depth=args.min_depth,
+            max_depth=args.max_depth,
+            partition_id=partition_id,
+            sample_fraction=args.sample_fraction,
+            sample_count=args.sample_count,
+            random_seed=args.seed,
+        )
+
+        # Run simulation
+        runner = SurfzoneRunner(mesh, boundary_conditions, config)
+        result = runner.run(region_name=region_display_name)
+
+        # Print summary
+        logger.info("-" * 40)
+        logger.info(f"Results for {partition_label}")
+        logger.info("-" * 40)
+        print(result.summary())
+
+        # Save results
+        logger.info("Saving results...")
+        npz_path, json_path = save_surfzone_result(result, output_dir, partition_filename)
+        logger.info(f"  Saved: {npz_path}")
+        logger.info(f"  Saved: {json_path}")
+
+        all_results.append((partition_id, partition_label, result))
+
+    # Final summary
+    logger.info("=" * 60)
+    logger.info("All Partitions Complete")
+    logger.info("=" * 60)
+    for partition_id, partition_label, result in all_results:
+        logger.info(f"  {partition_label}: {result.n_converged}/{result.n_sampled} converged ({result.convergence_rate:.1f}%)")
 
     logger.info("Done!")
 

@@ -213,16 +213,17 @@ class BoundaryDirectionLookup:
         self.kdtree = KDTree(coords)
 
         # Pre-extract arrays for each partition for fast access
+        # Ensure contiguous arrays with consistent dtypes to prevent Numba recompilation
         self.partition_directions = []
         self.partition_hs = []
         self.partition_tp = []
         self.partition_valid = []
 
         for p in boundary_conditions.partitions:
-            self.partition_directions.append(p.direction.copy())
-            self.partition_hs.append(p.hs.copy())
-            self.partition_tp.append(p.tp.copy())
-            self.partition_valid.append(p.is_valid.copy())
+            self.partition_directions.append(np.ascontiguousarray(p.direction, dtype=np.float64))
+            self.partition_hs.append(np.ascontiguousarray(p.hs, dtype=np.float64))
+            self.partition_tp.append(np.ascontiguousarray(p.tp, dtype=np.float64))
+            self.partition_valid.append(np.ascontiguousarray(p.is_valid, dtype=np.bool_))
 
         self.n_partitions = len(self.partition_directions)
 
@@ -306,15 +307,14 @@ class BoundaryDirectionLookup:
             Dict with 'boundary_x', 'boundary_y', 'directions' arrays
             for each partition.
         """
+        # Arrays are already contiguous from __init__, just return them
         return {
-            'boundary_x': np.ascontiguousarray(self.conditions.x),
-            'boundary_y': np.ascontiguousarray(self.conditions.y),
-            'partition_directions': [
-                np.ascontiguousarray(d) for d in self.partition_directions
-            ],
-            'partition_hs': [np.ascontiguousarray(h) for h in self.partition_hs],
-            'partition_tp': [np.ascontiguousarray(t) for t in self.partition_tp],
-            'partition_valid': [np.ascontiguousarray(v) for v in self.partition_valid],
+            'boundary_x': np.ascontiguousarray(self.conditions.x, dtype=np.float64),
+            'boundary_y': np.ascontiguousarray(self.conditions.y, dtype=np.float64),
+            'partition_directions': self.partition_directions,  # Already contiguous
+            'partition_hs': self.partition_hs,  # Already contiguous
+            'partition_tp': self.partition_tp,  # Already contiguous
+            'partition_valid': self.partition_valid,  # Already contiguous
         }
 
 
@@ -483,7 +483,7 @@ def compute_initial_direction_blended(
 # Core Backward Tracing (Numba-accelerated)
 # =============================================================================
 
-@njit(cache=False)  # TEMP: force recompile
+@njit(cache=True)
 def trace_backward_single(
     # Start point (surfzone mesh point)
     start_x: float,
@@ -1548,22 +1548,24 @@ class BackwardRayTracer:
         self.boundary_lookup = boundary_lookup
 
         # Get Numba-compatible arrays from mesh
+        # Ensure all arrays are contiguous and have consistent dtypes to prevent recompilation
         arrays = mesh.get_numba_arrays()
-        self.points_x = arrays['points_x']
-        self.points_y = arrays['points_y']
-        self.depth = arrays['depth']
-        self.triangles = arrays['triangles']
+        self.points_x = np.ascontiguousarray(arrays['points_x'], dtype=np.float64)
+        self.points_y = np.ascontiguousarray(arrays['points_y'], dtype=np.float64)
+        self.depth = np.ascontiguousarray(arrays['depth'], dtype=np.float64)
+        self.triangles = np.ascontiguousarray(arrays['triangles'], dtype=np.int32)
 
         # Spatial index (should be included from mesh)
+        # Ensure consistent types to prevent Numba recompilation
         if 'grid_x_min' in arrays:
-            self.grid_x_min = arrays['grid_x_min']
-            self.grid_y_min = arrays['grid_y_min']
-            self.grid_cell_size = arrays['grid_cell_size']
-            self.grid_n_cells_x = arrays['grid_n_cells_x']
-            self.grid_n_cells_y = arrays['grid_n_cells_y']
-            self.grid_cell_starts = arrays['grid_cell_starts']
-            self.grid_cell_counts = arrays['grid_cell_counts']
-            self.grid_triangles = arrays['grid_triangles']
+            self.grid_x_min = np.float64(arrays['grid_x_min'])
+            self.grid_y_min = np.float64(arrays['grid_y_min'])
+            self.grid_cell_size = np.float64(arrays['grid_cell_size'])
+            self.grid_n_cells_x = np.int32(arrays['grid_n_cells_x'])
+            self.grid_n_cells_y = np.int32(arrays['grid_n_cells_y'])
+            self.grid_cell_starts = np.ascontiguousarray(arrays['grid_cell_starts'], dtype=np.int32)
+            self.grid_cell_counts = np.ascontiguousarray(arrays['grid_cell_counts'], dtype=np.int32)
+            self.grid_triangles = np.ascontiguousarray(arrays['grid_triangles'], dtype=np.int32)
         else:
             raise ValueError(
                 "Mesh does not have pre-built spatial index. "
@@ -1571,13 +1573,14 @@ class BackwardRayTracer:
             )
 
         # Coast distance boundary (primary boundary method if available)
+        # Ensure consistent types to prevent Numba recompilation
         if 'coast_distance' in arrays:
-            self.coast_distance = arrays['coast_distance']
-            self.offshore_distance_m = arrays.get('offshore_distance_m', 0.0)
+            self.coast_distance = np.ascontiguousarray(arrays['coast_distance'], dtype=np.float64)
+            self.offshore_distance_m = np.float64(arrays.get('offshore_distance_m', 0.0))
         else:
             # Fallback: no coast_distance available
             self.coast_distance = np.array([], dtype=np.float64)
-            self.offshore_distance_m = 0.0
+            self.offshore_distance_m = np.float64(0.0)
 
         logger.info(
             f"BackwardRayTracer initialized: {len(self.points_x)} mesh points, "
