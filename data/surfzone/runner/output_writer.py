@@ -542,3 +542,165 @@ def load_surfzone_result(npz_path: Path) -> 'SurfzoneSimulationResult':
         boundary_Tp=boundary_Tp,
         boundary_direction=boundary_direction,
     )
+
+
+# =============================================================================
+# Forward Tracing Result Save/Load
+# =============================================================================
+
+def save_forward_result(
+    result: 'ForwardTracingResult',
+    output_path: Path,
+    filename: str = "forward_result",
+) -> Tuple[Path, Path]:
+    """
+    Save forward ray tracing result to disk.
+
+    Saves two files:
+    - {filename}.npz: Compressed arrays (mesh coords, energy, wave heights)
+    - {filename}.json: Metadata and summary statistics
+
+    Args:
+        result: ForwardTracingResult to save
+        output_path: Directory to save to
+        filename: Base filename (without extension)
+
+    Returns:
+        Tuple of (npz_path, json_path)
+    """
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    npz_path = output_path / f"{filename}.npz"
+    json_path = output_path / f"{filename}.json"
+
+    # Save arrays as compressed NPZ
+    np.savez_compressed(
+        npz_path,
+        mesh_x=result.mesh_x,
+        mesh_y=result.mesh_y,
+        mesh_depth=result.mesh_depth,
+        H_at_mesh=result.H_at_mesh,
+        energy=result.energy,
+        ray_count=result.ray_count,
+    )
+
+    logger.info(f"Saved arrays: {npz_path}")
+
+    # Compute statistics for covered points
+    covered_mask = result.ray_count > 0
+    stats = {}
+
+    if result.n_covered > 0:
+        H_cov = result.H_at_mesh[covered_mask]
+        energy_cov = result.energy[covered_mask]
+        ray_cov = result.ray_count[covered_mask]
+        depth_cov = result.mesh_depth[covered_mask]
+
+        stats = {
+            "wave_height": {
+                "min": float(np.nanmin(H_cov)),
+                "max": float(np.nanmax(H_cov)),
+                "mean": float(np.nanmean(H_cov)),
+                "std": float(np.nanstd(H_cov)),
+            },
+            "energy": {
+                "min": float(np.nanmin(energy_cov)),
+                "max": float(np.nanmax(energy_cov)),
+                "mean": float(np.nanmean(energy_cov)),
+                "total": float(np.nansum(energy_cov)),
+            },
+            "rays_per_point": {
+                "min": int(ray_cov.min()),
+                "max": int(ray_cov.max()),
+                "mean": float(ray_cov.mean()),
+            },
+            "depth": {
+                "min": float(np.nanmin(depth_cov)),
+                "max": float(np.nanmax(depth_cov)),
+                "mean": float(np.nanmean(depth_cov)),
+            },
+        }
+
+    # Save metadata as JSON
+    metadata = {
+        "region_name": result.region_name,
+        "timestamp": result.timestamp,
+        "n_partitions": result.n_partitions,
+        "n_points": result.n_points,
+        "n_covered": result.n_covered,
+        "n_rays_total": result.n_rays_total,
+        "coverage_rate": result.coverage_rate,
+        "statistics": stats,
+        "bounds": {
+            "x_min": float(result.mesh_x.min()) if len(result.mesh_x) > 0 else None,
+            "x_max": float(result.mesh_x.max()) if len(result.mesh_x) > 0 else None,
+            "y_min": float(result.mesh_y.min()) if len(result.mesh_y) > 0 else None,
+            "y_max": float(result.mesh_y.max()) if len(result.mesh_y) > 0 else None,
+        },
+    }
+
+    with open(json_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    logger.info(f"Saved metadata: {json_path}")
+
+    return npz_path, json_path
+
+
+def load_forward_result(npz_path: Path) -> 'ForwardTracingResult':
+    """
+    Load forward tracing result from disk.
+
+    Args:
+        npz_path: Path to .npz file
+
+    Returns:
+        ForwardTracingResult object
+    """
+    from .surfzone_result import ForwardTracingResult
+
+    npz_path = Path(npz_path)
+    json_path = npz_path.with_suffix('.json')
+
+    # Load arrays
+    data = np.load(npz_path)
+
+    mesh_x = data['mesh_x']
+    mesh_y = data['mesh_y']
+    mesh_depth = data['mesh_depth']
+    H_at_mesh = data['H_at_mesh']
+    energy = data['energy']
+    ray_count = data['ray_count']
+
+    # Load metadata
+    if json_path.exists():
+        with open(json_path) as f:
+            metadata = json.load(f)
+        region_name = metadata.get('region_name', 'Unknown')
+        timestamp = metadata.get('timestamp', datetime.now().isoformat())
+        n_partitions = metadata.get('n_partitions', 4)
+        n_rays_total = metadata.get('n_rays_total', 0)
+    else:
+        region_name = 'Unknown'
+        timestamp = datetime.now().isoformat()
+        n_partitions = 4
+        n_rays_total = 0
+
+    n_points = len(mesh_x)
+    n_covered = int(np.sum(ray_count > 0))
+
+    return ForwardTracingResult(
+        region_name=region_name,
+        timestamp=timestamp,
+        n_partitions=n_partitions,
+        n_points=n_points,
+        n_covered=n_covered,
+        n_rays_total=n_rays_total,
+        mesh_x=mesh_x,
+        mesh_y=mesh_y,
+        mesh_depth=mesh_depth,
+        H_at_mesh=H_at_mesh,
+        energy=energy,
+        ray_count=ray_count,
+    )

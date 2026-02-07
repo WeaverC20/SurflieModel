@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 """
-Run surfzone forward wave propagation simulation.
+Run surfzone wave propagation simulation.
+
+Supports two modes:
+- backward (default): Backward ray tracing from mesh points to boundary
+- forward: Forward ray tracing from boundary with energy deposition
 
 Usage:
     python run_simulation.py --region socal
+    python run_simulation.py --region socal --mode forward
     python run_simulation.py --region socal --swan-resolution fine
     python run_simulation.py --list-regions
 
-Example:
+Examples:
+    # Backward tracing (legacy, per-partition)
     python run_simulation.py --region socal
     python run_simulation.py --region socal --min-depth 0 --max-depth 5
     python run_simulation.py --region norcal --sample-fraction 0.1
+
+    # Forward tracing (with energy deposition, all partitions at once)
+    python run_simulation.py --region socal --mode forward
+    python run_simulation.py --region socal --mode forward --boundary-spacing 100
 """
 
 import argparse
@@ -37,8 +47,9 @@ import numpy as np
 from data.regions.region import get_region, REGIONS
 from data.surfzone.mesh import SurfZoneMesh
 from data.surfzone.runner.swan_input_provider import SwanInputProvider, BoundaryConditions, WavePartition
-from data.surfzone.runner.surfzone_runner import SurfzoneRunner, SurfzoneRunnerConfig
-from data.surfzone.runner.output_writer import save_surfzone_result
+from data.surfzone.runner.surfzone_runner import SurfzoneRunner, SurfzoneRunnerConfig, ForwardSurfzoneRunner
+from data.surfzone.runner.forward_ray_tracer import ForwardTracerConfig
+from data.surfzone.runner.output_writer import save_surfzone_result, save_forward_result
 
 # Partition definitions: id -> (label, filename)
 PARTITIONS = {
@@ -193,6 +204,16 @@ Examples:
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for reproducible sampling')
 
+    # Mode selection
+    parser.add_argument('--mode', type=str, default='backward', choices=['backward', 'forward'],
+                        help='Tracing mode: backward (per-point) or forward (energy deposition). Default: backward')
+
+    # Forward tracing options
+    parser.add_argument('--boundary-spacing', type=float, default=50.0,
+                        help='[Forward mode] Spacing between boundary sample points (m, default: 50)')
+    parser.add_argument('--kernel-sigma', type=float, default=25.0,
+                        help='[Forward mode] Gaussian kernel width for energy deposition (m, default: 25)')
+
     # Performance options
     parser.add_argument('--clear-cache', action='store_true',
                         help='Clear Numba JIT cache before running (fixes slowdown from stale cache)')
@@ -342,6 +363,45 @@ Examples:
 
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ==================================================
+    # Forward Ray Tracing Mode
+    # ==================================================
+    if args.mode == 'forward':
+        logger.info("=" * 60)
+        logger.info("Running FORWARD ray tracing (energy deposition)")
+        logger.info(f"  Boundary spacing: {args.boundary_spacing} m")
+        logger.info(f"  Kernel sigma: {args.kernel_sigma} m")
+        logger.info("=" * 60)
+
+        # Configure forward tracer
+        forward_config = ForwardTracerConfig(
+            boundary_spacing_m=args.boundary_spacing,
+            kernel_sigma_m=args.kernel_sigma,
+        )
+
+        # Run forward simulation
+        forward_runner = ForwardSurfzoneRunner(mesh, boundary_conditions, forward_config)
+        result = forward_runner.run(region_name=region_display_name)
+
+        # Print summary
+        logger.info("-" * 40)
+        logger.info("Forward Tracing Results")
+        logger.info("-" * 40)
+        print(result.summary())
+
+        # Save results
+        logger.info("Saving results...")
+        npz_path, json_path = save_forward_result(result, output_dir, "forward_energy")
+        logger.info(f"  Saved: {npz_path}")
+        logger.info(f"  Saved: {json_path}")
+
+        logger.info("Done!")
+        return
+
+    # ==================================================
+    # Backward Ray Tracing Mode (Legacy)
+    # ==================================================
 
     # Run simulation for each partition
     all_results = []
