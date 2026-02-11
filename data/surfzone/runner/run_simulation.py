@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """
-Run surfzone wave propagation simulation.
+Run surfzone wave propagation simulation using forward ray tracing.
 
-Supports two modes:
-- backward (default): Backward ray tracing from mesh points to boundary
-- forward: Forward ray tracing from boundary with energy deposition
+Forward ray tracing shoots rays from the SWAN boundary into the surfzone,
+depositing energy as they propagate. This naturally captures wave focusing
+effects from bathymetry.
 
 Usage:
     python run_simulation.py --region socal
-    python run_simulation.py --region socal --mode forward
-    python run_simulation.py --region socal --swan-resolution fine
+    python run_simulation.py --region socal --boundary-spacing 100
     python run_simulation.py --list-regions
 
 Examples:
-    # Backward tracing (legacy, per-partition)
+    # Basic run with default settings
     python run_simulation.py --region socal
-    python run_simulation.py --region socal --min-depth 0 --max-depth 5
-    python run_simulation.py --region norcal --sample-fraction 0.1
 
-    # Forward tracing (with energy deposition, all partitions at once)
-    python run_simulation.py --region socal --mode forward
-    python run_simulation.py --region socal --mode forward --boundary-spacing 100
+    # Higher density rays for better coverage
+    python run_simulation.py --region socal --boundary-spacing 25
+
+    # Wider energy deposition kernel
+    python run_simulation.py --region socal --kernel-sigma 50
 """
 
 import argparse
@@ -47,17 +46,9 @@ import numpy as np
 from data.regions.region import get_region, REGIONS
 from data.surfzone.mesh import SurfZoneMesh
 from data.surfzone.runner.swan_input_provider import SwanInputProvider, BoundaryConditions, WavePartition
-from data.surfzone.runner.surfzone_runner import SurfzoneRunner, SurfzoneRunnerConfig, ForwardSurfzoneRunner
+from data.surfzone.runner.surfzone_runner import ForwardSurfzoneRunner
 from data.surfzone.runner.forward_ray_tracer import ForwardTracerConfig
-from data.surfzone.runner.output_writer import save_surfzone_result, save_forward_result
-
-# Partition definitions: id -> (label, filename)
-PARTITIONS = {
-    0: ("Wind Sea", "wind_sea"),
-    1: ("Primary Swell", "primary_swell"),
-    2: ("Secondary Swell", "secondary_swell"),
-    3: ("Tertiary Swell", "tertiary_swell"),
-}
+from data.surfzone.runner.output_writer import save_forward_result
 
 # Setup logging
 logging.basicConfig(
@@ -163,13 +154,13 @@ def get_region_paths(region_name: str, swan_resolution: Optional[str] = None) ->
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run surfzone wave propagation simulation',
+        description='Run surfzone wave propagation simulation (forward ray tracing)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
     python run_simulation.py --region socal
     python run_simulation.py --region socal --swan-resolution fine
-    python run_simulation.py --region norcal --sample-fraction 0.1
+    python run_simulation.py --region socal --boundary-spacing 25
     python run_simulation.py --list-regions
         """
     )
@@ -182,12 +173,6 @@ Examples:
     parser.add_argument('--swan-resolution', type=str, default=None,
                         help='SWAN resolution (coarse, fine, etc.). Default: auto-detect')
 
-    # Depth filtering
-    parser.add_argument('--min-depth', type=float, default=0.0,
-                        help='Minimum depth filter (m, default: 0.0)')
-    parser.add_argument('--max-depth', type=float, default=10.0,
-                        help='Maximum depth filter (m, default: 10.0)')
-
     # Path overrides (optional, for advanced use)
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Output directory override (default: data/surfzone/output/{region}/)')
@@ -196,23 +181,11 @@ Examples:
     parser.add_argument('--swan-dir', type=str, default=None,
                         help='SWAN run directory override (default: auto-detect)')
 
-    # Sampling options
-    parser.add_argument('--sample-fraction', type=float, default=None,
-                        help='Fraction of points to sample (e.g., 0.1 for 10%%)')
-    parser.add_argument('--sample-count', type=int, default=None,
-                        help='Exact number of points to sample')
-    parser.add_argument('--seed', type=int, default=None,
-                        help='Random seed for reproducible sampling')
-
-    # Mode selection
-    parser.add_argument('--mode', type=str, default='backward', choices=['backward', 'forward'],
-                        help='Tracing mode: backward (per-point) or forward (energy deposition). Default: backward')
-
     # Forward tracing options
     parser.add_argument('--boundary-spacing', type=float, default=50.0,
-                        help='[Forward mode] Spacing between boundary sample points (m, default: 50)')
+                        help='Spacing between boundary sample points (m, default: 50)')
     parser.add_argument('--kernel-sigma', type=float, default=25.0,
-                        help='[Forward mode] Gaussian kernel width for energy deposition (m, default: 25)')
+                        help='Gaussian kernel width for energy deposition (m, default: 25)')
 
     # Performance options
     parser.add_argument('--clear-cache', action='store_true',
@@ -260,19 +233,14 @@ Examples:
     region_display_name = paths['region_display_name']
 
     logger.info("=" * 60)
-    logger.info("Surfzone Wave Propagation Simulation")
+    logger.info("Surfzone Wave Propagation Simulation (Forward Ray Tracing)")
     logger.info("=" * 60)
     logger.info(f"Region: {region_display_name} ({args.region})")
     logger.info(f"Mesh: {mesh_dir}")
     logger.info(f"SWAN: {swan_dir}")
-    logger.info(f"Depth range: {args.min_depth} - {args.max_depth} m")
+    logger.info(f"Boundary spacing: {args.boundary_spacing} m")
+    logger.info(f"Kernel sigma: {args.kernel_sigma} m")
     logger.info(f"Output: {output_dir}")
-    if args.sample_fraction is not None:
-        logger.info(f"Sampling: {args.sample_fraction * 100:.1f}% of points")
-    elif args.sample_count is not None:
-        logger.info(f"Sampling: {args.sample_count} points")
-    if args.seed is not None:
-        logger.info(f"Random seed: {args.seed}")
     logger.info("=" * 60)
 
     # Load mesh
@@ -351,101 +319,30 @@ Examples:
             valid_hs = p.hs[p.is_valid]
             logger.info(f"    {p.label}: {n_valid} valid, Hs={valid_hs.min():.2f}-{valid_hs.max():.2f}m")
 
-    # Determine which partitions to run
-    # By default, run all partitions that have valid data
-    partitions_to_run = []
-    for p in boundary_conditions.partitions:
-        n_valid = p.is_valid.sum()
-        if n_valid > 0:
-            partitions_to_run.append(p.partition_id)
-
-    logger.info(f"Will run {len(partitions_to_run)} partitions: {partitions_to_run}")
-
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ==================================================
-    # Forward Ray Tracing Mode
-    # ==================================================
-    if args.mode == 'forward':
-        logger.info("=" * 60)
-        logger.info("Running FORWARD ray tracing (energy deposition)")
-        logger.info(f"  Boundary spacing: {args.boundary_spacing} m")
-        logger.info(f"  Kernel sigma: {args.kernel_sigma} m")
-        logger.info("=" * 60)
+    # Configure forward tracer
+    forward_config = ForwardTracerConfig(
+        boundary_spacing_m=args.boundary_spacing,
+        kernel_sigma_m=args.kernel_sigma,
+    )
 
-        # Configure forward tracer
-        forward_config = ForwardTracerConfig(
-            boundary_spacing_m=args.boundary_spacing,
-            kernel_sigma_m=args.kernel_sigma,
-        )
+    # Run forward simulation
+    forward_runner = ForwardSurfzoneRunner(mesh, boundary_conditions, forward_config)
+    result = forward_runner.run(region_name=region_display_name)
 
-        # Run forward simulation
-        forward_runner = ForwardSurfzoneRunner(mesh, boundary_conditions, forward_config)
-        result = forward_runner.run(region_name=region_display_name)
+    # Print summary
+    logger.info("-" * 40)
+    logger.info("Forward Tracing Results")
+    logger.info("-" * 40)
+    print(result.summary())
 
-        # Print summary
-        logger.info("-" * 40)
-        logger.info("Forward Tracing Results")
-        logger.info("-" * 40)
-        print(result.summary())
-
-        # Save results
-        logger.info("Saving results...")
-        npz_path, json_path = save_forward_result(result, output_dir, "forward_energy")
-        logger.info(f"  Saved: {npz_path}")
-        logger.info(f"  Saved: {json_path}")
-
-        logger.info("Done!")
-        return
-
-    # ==================================================
-    # Backward Ray Tracing Mode (Legacy)
-    # ==================================================
-
-    # Run simulation for each partition
-    all_results = []
-    for partition_id in partitions_to_run:
-        partition_label, partition_filename = PARTITIONS.get(partition_id, (f"Partition {partition_id}", f"partition_{partition_id}"))
-
-        logger.info("=" * 60)
-        logger.info(f"Running simulation for partition {partition_id}: {partition_label}")
-        logger.info("=" * 60)
-
-        # Configure runner for this partition
-        config = SurfzoneRunnerConfig(
-            min_depth=args.min_depth,
-            max_depth=args.max_depth,
-            partition_id=partition_id,
-            sample_fraction=args.sample_fraction,
-            sample_count=args.sample_count,
-            random_seed=args.seed,
-        )
-
-        # Run simulation
-        runner = SurfzoneRunner(mesh, boundary_conditions, config)
-        result = runner.run(region_name=region_display_name)
-
-        # Print summary
-        logger.info("-" * 40)
-        logger.info(f"Results for {partition_label}")
-        logger.info("-" * 40)
-        print(result.summary())
-
-        # Save results
-        logger.info("Saving results...")
-        npz_path, json_path = save_surfzone_result(result, output_dir, partition_filename)
-        logger.info(f"  Saved: {npz_path}")
-        logger.info(f"  Saved: {json_path}")
-
-        all_results.append((partition_id, partition_label, result))
-
-    # Final summary
-    logger.info("=" * 60)
-    logger.info("All Partitions Complete")
-    logger.info("=" * 60)
-    for partition_id, partition_label, result in all_results:
-        logger.info(f"  {partition_label}: {result.n_converged}/{result.n_sampled} converged ({result.convergence_rate:.1f}%)")
+    # Save results
+    logger.info("Saving results...")
+    npz_path, json_path = save_forward_result(result, output_dir, "forward_energy")
+    logger.info(f"  Saved: {npz_path}")
+    logger.info(f"  Saved: {json_path}")
 
     logger.info("Done!")
 

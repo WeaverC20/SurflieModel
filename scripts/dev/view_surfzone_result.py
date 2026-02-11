@@ -2,8 +2,8 @@
 """
 Interactive Surfzone Simulation Result Viewer (Datashader)
 
-View surfzone wave propagation results overlaid on the mesh.
-Shows wave heights, convergence status, and depth filtering.
+View forward ray tracing results overlaid on the mesh.
+Shows wave heights, coverage, and energy statistics.
 
 Usage:
     python scripts/dev/view_surfzone_result.py --region socal
@@ -56,13 +56,6 @@ def list_regions_with_results():
         if result_dir.exists():
             results = sorted(result_dir.glob("*.npz"), key=lambda p: p.stat().st_mtime, reverse=True)
 
-        # Also check legacy location for socal
-        legacy_result = None
-        if name == "socal":
-            legacy_path = project_root / "data" / "surfzone" / "output" / "primary_swell.npz"
-            if legacy_path.exists() and legacy_path.parent == project_root / "data" / "surfzone" / "output":
-                legacy_result = legacy_path
-
         print(f"  {name:12} - {region.display_name}")
         print(f"               Mesh: {'Yes' if mesh_exists else 'No'}")
 
@@ -72,8 +65,6 @@ def list_regions_with_results():
                 print(f"                 - {r.name}")
             if len(results) > 3:
                 print(f"                 ... and {len(results) - 3} more")
-        elif legacy_result:
-            print(f"               Results: {legacy_result.name} (legacy location)")
         else:
             print(f"               Results: None")
         print()
@@ -98,11 +89,11 @@ def find_result_file(region_name: str, result_file: Optional[Path] = None) -> Pa
             raise FileNotFoundError(f"Result file not found: {result_file}")
         return result_file
 
-    # Try region-specific directory first
+    # Try region-specific directory
     region_dir = project_root / "data" / "surfzone" / "output" / region_name
     if region_dir.exists():
-        # Default filename first
-        default_result = region_dir / "primary_swell.npz"
+        # Default filename for forward results
+        default_result = region_dir / "forward_energy.npz"
         if default_result.exists():
             return default_result
 
@@ -111,12 +102,6 @@ def find_result_file(region_name: str, result_file: Optional[Path] = None) -> Pa
                           key=lambda p: p.stat().st_mtime, reverse=True)
         if npz_files:
             return npz_files[0]
-
-    # Legacy location (for backward compatibility with socal)
-    if region_name == "socal":
-        legacy = project_root / "data" / "surfzone" / "output" / "primary_swell.npz"
-        if legacy.exists():
-            return legacy
 
     raise FileNotFoundError(
         f"No results found for region '{region_name}'. "
@@ -136,20 +121,16 @@ def load_mesh(region_name: str = "socal"):
     return SurfZoneMesh.load(mesh_dir)
 
 
-def load_result(result_path: Path = None):
-    """Load surfzone simulation result."""
-    from data.surfzone.runner.output_writer import load_surfzone_result
-
-    if result_path is None:
-        # Default to latest result
-        result_path = project_root / "data" / "surfzone" / "output" / "primary_swell.npz"
+def load_result(result_path: Path):
+    """Load forward ray tracing result."""
+    from data.surfzone.runner.output_writer import load_forward_result
 
     if not result_path.exists():
         print(f"Error: Result not found at {result_path}")
-        print("Run the simulation first: python data/surfzone/runner/run_simulation.py")
+        print("Run the simulation first: python data/surfzone/runner/run_simulation.py --region <region>")
         sys.exit(1)
 
-    return load_surfzone_result(result_path)
+    return load_forward_result(result_path)
 
 
 def create_matplotlib_colorbar(vmin, vmax, label, cmap_colors, height=400):
@@ -207,40 +188,34 @@ def view_result(
     print(result.summary())
     print()
 
-    # Get mesh data
-    mesh_x_all = mesh.points_x.copy()
-    mesh_y_all = mesh.points_y.copy()
-    elevation = mesh.elevation.copy()
-    depth_all = np.where(elevation < 0, -elevation, 0)  # Positive depth for water
+    # Get coordinates
+    result_x = result.mesh_x.copy()
+    result_y = result.mesh_y.copy()
 
-    n_mesh = len(mesh_x_all)
-    print(f"Mesh points: {n_mesh:,}")
+    n_points = result.n_points
+    print(f"Result points: {n_points:,}")
 
-    # Identify depth ranges
-    depth_range = result.depth_range
-    in_range_mask = (depth_all >= depth_range[0]) & (depth_all <= depth_range[1])
-    n_in_range = np.sum(in_range_mask)
-    print(f"Points in depth range [{depth_range[0]}-{depth_range[1]}m]: {n_in_range:,}")
-    print(f"Total filtered points: {result.n_points}")
-    print(f"Sampled: {result.n_sampled} ({100*result.sample_rate:.1f}%)")
-    print(f"Converged: {result.n_converged} ({100*result.convergence_rate:.1f}% of sampled)")
+    # Coverage mask
+    covered_mask = result.ray_count > 0
+    not_covered_mask = ~covered_mask
+    n_covered = result.n_covered
+
+    print(f"Covered: {n_covered:,} ({100*result.coverage_rate:.1f}%)")
+    print(f"Not covered: {np.sum(not_covered_mask):,}")
 
     # Convert coordinates if needed
     if use_lonlat:
-        mesh_x_all, mesh_y_all = mesh.utm_to_lon_lat(mesh_x_all, mesh_y_all)
-        result_x, result_y = mesh.utm_to_lon_lat(result.mesh_x.copy(), result.mesh_y.copy())
+        result_x, result_y = mesh.utm_to_lon_lat(result_x, result_y)
         x_label = "Longitude"
         y_label = "Latitude"
     else:
-        result_x = result.mesh_x.copy()
-        result_y = result.mesh_y.copy()
         x_label = "UTM Easting (m)"
         y_label = "UTM Northing (m)"
 
     # Auto-determine wave height max
     if h_max is None:
-        if result.n_converged > 0:
-            h_max = float(np.nanpercentile(result.H_at_mesh[result.converged], 98))
+        if n_covered > 0:
+            h_max = float(np.nanpercentile(result.H_at_mesh[covered_mask], 98))
             h_max = max(h_max, 0.5)  # At least 0.5m
         else:
             h_max = 2.0
@@ -249,82 +224,33 @@ def view_result(
 
     # === Create layers ===
 
-    # Layer 1: Background - all mesh points not in computation range (dark gray)
-    out_of_range_mask = ~in_range_mask
-    bg_df = pd.DataFrame({
-        'x': mesh_x_all[out_of_range_mask],
-        'y': mesh_y_all[out_of_range_mask],
-        'val': np.ones(np.sum(out_of_range_mask)),  # Dummy value
-    })
-    bg_points = hv.Points(bg_df, kdims=['x', 'y'], vdims=['val'])
-    bg_cmap = ['#333344', '#333344']  # Dark gray
-
-    # Layer 2: Not sampled points (light gray - in depth range but not processed)
-    not_sampled_mask = ~result.sampled
-    n_not_sampled = np.sum(not_sampled_mask)
-    if n_not_sampled > 0:
-        ns_df = pd.DataFrame({
-            'x': result_x[not_sampled_mask],
-            'y': result_y[not_sampled_mask],
-            'val': np.ones(n_not_sampled),
-        })
-        ns_points = hv.Points(ns_df, kdims=['x', 'y'], vdims=['val'])
-        ns_cmap = ['#666677', '#666677']  # Light gray
-    else:
-        ns_points = None
-
-    # Layer 3: Non-converged points (orange/amber - sampled but didn't converge)
-    non_converged_mask = result.sampled & ~result.converged
-    n_non_converged = np.sum(non_converged_mask)
-    if n_non_converged > 0:
+    # Layer 1: Not covered points (dark gray)
+    if np.sum(not_covered_mask) > 0:
         nc_df = pd.DataFrame({
-            'x': result_x[non_converged_mask],
-            'y': result_y[non_converged_mask],
-            'val': np.ones(n_non_converged),
+            'x': result_x[not_covered_mask],
+            'y': result_y[not_covered_mask],
+            'val': np.ones(np.sum(not_covered_mask)),
         })
         nc_points = hv.Points(nc_df, kdims=['x', 'y'], vdims=['val'])
-        nc_cmap = ['#ff8800', '#ff8800']  # Orange/amber
+        nc_cmap = ['#444455', '#444455']  # Dark gray
     else:
         nc_points = None
 
-    # Layer 4: Converged points - colored by wave height
-    # Using blue-cyan-green colormap (avoids orange/red used for non-converged)
-    converged_mask = result.converged
-    if result.n_converged > 0:
-        conv_df = pd.DataFrame({
-            'x': result_x[converged_mask],
-            'y': result_y[converged_mask],
-            'H': np.clip(result.H_at_mesh[converged_mask], 0, h_max),
+    # Layer 2: Covered points - colored by wave height
+    wave_cmap = ['#0044aa', '#0066cc', '#0088ee', '#00aaff', '#00cccc',
+                 '#00ee88', '#44ff44', '#aaff00', '#ffff00']
+    if n_covered > 0:
+        cov_df = pd.DataFrame({
+            'x': result_x[covered_mask],
+            'y': result_y[covered_mask],
+            'H': np.clip(result.H_at_mesh[covered_mask], 0, h_max),
         })
-        conv_points = hv.Points(conv_df, kdims=['x', 'y'], vdims=['H'])
-        # Wave height colormap: dark blue (low) -> cyan -> green -> yellow (high)
-        wave_cmap = ['#0044aa', '#0066cc', '#0088ee', '#00aaff', '#00cccc', '#00ee88', '#44ff44', '#aaff00', '#ffff00']
+        cov_points = hv.Points(cov_df, kdims=['x', 'y'], vdims=['H'])
     else:
-        conv_points = None
+        cov_points = None
 
     # Create datashaded plots
-    bg_shaded = spread(
-        datashade(
-            bg_points,
-            aggregator=ds.mean('val'),
-            cmap=bg_cmap,
-        ),
-        px=2,
-    )
-
-    # Start combining with * operator (like mesh viewer does)
-    plot = bg_shaded
-
-    if ns_points is not None:
-        ns_shaded = spread(
-            datashade(
-                ns_points,
-                aggregator=ds.mean('val'),
-                cmap=ns_cmap,
-            ),
-            px=2,
-        )
-        plot = plot * ns_shaded
+    plot = None
 
     if nc_points is not None:
         nc_shaded = spread(
@@ -333,21 +259,24 @@ def view_result(
                 aggregator=ds.mean('val'),
                 cmap=nc_cmap,
             ),
-            px=3,
+            px=2,
         )
-        plot = plot * nc_shaded
+        plot = nc_shaded
 
-    if conv_points is not None:
-        conv_shaded = spread(
+    if cov_points is not None:
+        cov_shaded = spread(
             datashade(
-                conv_points,
+                cov_points,
                 aggregator=ds.mean('H'),
                 cmap=wave_cmap,
                 cnorm='linear',
             ),
             px=4,
         )
-        plot = plot * conv_shaded
+        if plot is None:
+            plot = cov_shaded
+        else:
+            plot = plot * cov_shaded
 
     # Coastline overlay
     coastline_paths = []
@@ -364,66 +293,68 @@ def view_result(
             color='#ff00ff',  # Magenta
             line_width=2,
         )
-        plot = plot * coastline_overlay
+        if plot is not None:
+            plot = plot * coastline_overlay
 
-    # Apply final opts (like mesh viewer does)
-    plot = plot.opts(
-        width=1400,
-        height=900,
-        xlabel=x_label,
-        ylabel=y_label,
-        tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
-        active_tools=['wheel_zoom', 'pan'],
-        bgcolor='#1a1a2e',
-        data_aspect=1,  # Equal scaling on X and Y axes (important for UTM)
-    )
+    # Apply final opts
+    if plot is not None:
+        plot = plot.opts(
+            width=1400,
+            height=900,
+            xlabel=x_label,
+            ylabel=y_label,
+            tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
+            active_tools=['wheel_zoom', 'pan'],
+            bgcolor='#1a1a2e',
+            data_aspect=1,  # Equal scaling on X and Y axes
+        )
 
     # Create colorbars
     wave_colorbar_html = create_matplotlib_colorbar(
-        0, h_max, 'Wave Height (m)', wave_cmap if conv_points else ['#888888'], height=300
+        0, h_max, 'Wave Height (m)', wave_cmap, height=300
     )
 
     # Legend HTML
     legend_html = """
     <div style="color: white; font-size: 12px; padding: 10px; background: #1a1a2e;">
         <b>Legend</b><br><br>
-        <span style="color: #333344;">●</span> Outside depth range<br>
-        <span style="color: #666677;">●</span> Not sampled (skipped)<br>
-        <span style="color: #ff8800;">●</span> Did not converge<br>
-        <span style="color: #00cccc;">●</span> Converged (see colorbar)<br>
-        <span style="color: #ff00ff;">—</span> Coastline<br>
+        <span style="color: #444455;">&#9632;</span> Not covered (no rays)<br>
+        <span style="color: #00cccc;">&#9632;</span> Covered (see colorbar)<br>
+        <span style="color: #ff00ff;">&mdash;</span> Coastline<br>
     </div>
     """
 
     # Stats HTML
     stats_html = f"""
     <div style="color: white; font-size: 11px; padding: 10px; background: #2a2a3e; border-radius: 5px;">
-        <b>Statistics</b><br><br>
+        <b>Forward Ray Tracing Statistics</b><br><br>
         Region: {result.region_name}<br>
-        Depth range: {depth_range[0]:.1f} - {depth_range[1]:.1f}m<br>
-        Partition: {result.partition_id} (primary swell)<br><br>
-        Total mesh: {n_mesh:,}<br>
-        In range: {n_in_range:,}<br>
-        Filtered: {result.n_points:,}<br>
-        Sampled: {result.n_sampled:,} ({100*result.sample_rate:.1f}%)<br>
-        Converged: {result.n_converged:,} ({100*result.convergence_rate:.1f}% of sampled)<br><br>
+        Partitions: {result.n_partitions}<br><br>
+        Total points: {result.n_points:,}<br>
+        Covered: {result.n_covered:,} ({100*result.coverage_rate:.1f}%)<br>
+        Rays traced: {result.n_rays_total:,}<br><br>
     """
-    if result.n_converged > 0:
-        H_conv = result.H_at_mesh[result.converged]
-        K_conv = result.K_shoaling[result.converged]
+    if n_covered > 0:
+        H_cov = result.H_at_mesh[covered_mask]
+        energy_cov = result.energy[covered_mask]
+        ray_cov = result.ray_count[covered_mask]
         stats_html += f"""
-        <b>Wave Height (converged)</b><br>
-        Min: {np.nanmin(H_conv):.2f}m<br>
-        Max: {np.nanmax(H_conv):.2f}m<br>
-        Mean: {np.nanmean(H_conv):.2f}m<br><br>
-        <b>Shoaling Coeff</b><br>
-        Min: {np.nanmin(K_conv):.2f}<br>
-        Max: {np.nanmax(K_conv):.2f}<br>
-        Mean: {np.nanmean(K_conv):.2f}<br>
+        <b>Wave Height (covered)</b><br>
+        Min: {np.nanmin(H_cov):.2f}m<br>
+        Max: {np.nanmax(H_cov):.2f}m<br>
+        Mean: {np.nanmean(H_cov):.2f}m<br><br>
+        <b>Energy</b><br>
+        Min: {np.nanmin(energy_cov):.1f} J/m<br>
+        Max: {np.nanmax(energy_cov):.1f} J/m<br>
+        Mean: {np.nanmean(energy_cov):.1f} J/m<br><br>
+        <b>Rays per point</b><br>
+        Min: {ray_cov.min()}<br>
+        Max: {ray_cov.max()}<br>
+        Mean: {ray_cov.mean():.1f}<br>
         """
     stats_html += "</div>"
 
-    # Layout (match mesh viewer pattern)
+    # Layout
     sidebar = pn.Column(
         pn.pane.HTML(legend_html, width=180),
         pn.Spacer(height=20),
@@ -433,7 +364,6 @@ def view_result(
         width=200,
     )
 
-    # Match mesh viewer layout exactly
     title = pn.pane.Markdown(
         f"# Surfzone Simulation Result: {result.region_name}",
         sizing_mode='stretch_width',
@@ -481,14 +411,6 @@ Examples:
         help="List regions with available results and exit"
     )
 
-    # Legacy --mesh argument for backward compatibility
-    parser.add_argument(
-        '--mesh',
-        type=str,
-        default=None,
-        help="Mesh region name (deprecated, use --region instead)"
-    )
-
     parser.add_argument(
         '--result-file',
         type=Path,
@@ -516,10 +438,10 @@ Examples:
         list_regions_with_results()
         return
 
-    # Determine region (--region takes precedence over --mesh)
-    region_name = args.region or args.mesh
+    # Determine region
+    region_name = args.region
     if region_name is None:
-        region_name = "socal"  # Default for backward compatibility
+        region_name = "socal"  # Default
         print(f"Note: Using default region '{region_name}'. Use --region to specify.")
 
     # Find result file

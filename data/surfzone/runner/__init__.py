@@ -1,13 +1,14 @@
 """
 Surfzone Wave Propagation Runner
 
-Ray tracing module for propagating waves from SWAN output (2.5km offshore)
-through the surfzone to the shore.
+Forward ray tracing module for propagating waves from SWAN output
+through the surfzone with energy deposition.
 
 Components:
 - swan_input_provider: Extract wave partitions from SWAN output
 - wave_physics: Numba-accelerated wave physics calculations
-- ray_tracer: Ray tracing engine
+- forward_ray_tracer: Forward ray tracing with energy deposition
+- surfzone_runner: Main simulation orchestrator
 - output_writer: Results storage
 """
 
@@ -20,8 +21,10 @@ from .wave_physics import (
     wind_modification,
     BREAKER_TYPE_LABELS,
 )
-from .ray_tracer import RayTracer, RayResult
-from .output_writer import OutputWriter, BreakingField, load_breaking_field
+from .forward_ray_tracer import ForwardRayTracer, ForwardTracerConfig
+from .surfzone_runner import ForwardSurfzoneRunner
+from .surfzone_result import ForwardTracingResult
+from .output_writer import save_forward_result, load_forward_result, BreakingField, load_breaking_field
 
 __all__ = [
     # Swan input
@@ -35,11 +38,14 @@ __all__ = [
     "refraction_snell",
     "wind_modification",
     "BREAKER_TYPE_LABELS",
-    # Ray tracing
-    "RayTracer",
-    "RayResult",
+    # Forward ray tracing
+    "ForwardRayTracer",
+    "ForwardTracerConfig",
+    "ForwardSurfzoneRunner",
+    "ForwardTracingResult",
     # Output
-    "OutputWriter",
+    "save_forward_result",
+    "load_forward_result",
     "BreakingField",
     "load_breaking_field",
 ]
