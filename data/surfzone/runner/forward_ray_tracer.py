@@ -27,7 +27,6 @@ from .wave_physics import (
     local_wave_properties,
     update_ray_direction,
     nautical_to_math,
-    breaker_index_mcowan,
 )
 from .ray_tracer import (
     interpolate_depth_indexed,
@@ -61,9 +60,6 @@ class ForwardTracerConfig:
 
     # Tube width
     min_tube_width_m: float = 1.0  # Minimum tube width (prevent collapse)
-
-    # Breaking
-    breaker_index: float = 0.78  # McCowan breaker index
 
 
 @dataclass
@@ -481,7 +477,6 @@ def propagate_single_ray(
     max_steps: int,
     kernel_sigma: float,
     min_width: float,
-    breaker_index: float,
 ) -> Tuple[int, bool, float]:
     """
     Propagate a single ray and deposit energy density at each step.
@@ -543,21 +538,14 @@ def propagate_single_ray(
         # Focusing (W smaller) → higher E; Spreading (W larger) → lower E
         E_local = power / (Cg * width)
 
-        # 4. Check breaking using local energy density
-        H = np.sqrt(8.0 * E_local / (1025.0 * 9.81))
-        H_break = breaker_index * h
-        if H > H_break:
-            broke = True
-            return step, True, final_depth
-
-        # 5. Ray direction components
+        # 4. Ray direction components
         dx = np.cos(theta)
         dy = np.sin(theta)
 
-        # 6. Compute tube area for this step
+        # 5. Compute tube area for this step
         area = width * step_size
 
-        # 7. Find nearby points and deposit energy density (O(k) using spatial index)
+        # 6. Find nearby points and deposit energy density (O(k) using spatial index)
         nearby = _find_nearby_points(
             x, y, cutoff,
             mesh_x, mesh_y,
@@ -575,7 +563,7 @@ def propagate_single_ray(
                 kernel_sigma, nearby,
             )
 
-        # 8. Compute refraction (celerity gradients)
+        # 7. Compute refraction (celerity gradients)
         dC_dx, dC_dy = celerity_gradient_indexed(
             x, y, period, L0,
             points_x, points_y, depth, triangles,
@@ -584,17 +572,17 @@ def propagate_single_ray(
             grid_cell_starts, grid_cell_counts, grid_triangles,
         )
 
-        # 9. Update direction (forward refraction - no negation needed)
+        # 8. Update direction (forward refraction - no negation needed)
         if C > 0:
             dC_dn = -dy * dC_dx + dx * dC_dy
             dtheta = -(step_size / C) * dC_dn
             theta += dtheta
 
-            # 10. Update tube width: dW/ds = W × dθ/ds
+            # 9. Update tube width: dW/ds = W × dθ/ds
             width += width * dtheta
             width = max(width, min_width)
 
-        # 11. Move ray forward
+        # 10. Move ray forward
         x += dx * step_size
         y += dy * step_size
 
@@ -635,7 +623,6 @@ def propagate_all_rays(
     max_steps: int,
     kernel_sigma: float,
     min_width: float,
-    breaker_index: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Propagate all rays in parallel and deposit energy.
@@ -676,7 +663,7 @@ def propagate_all_rays(
             grid_cell_starts, grid_cell_counts, grid_triangles,
             point_grid_starts, point_grid_counts, point_grid_indices,
             energy_grid, ray_counts,
-            step_size, max_steps, kernel_sigma, min_width, breaker_index,
+            step_size, max_steps, kernel_sigma, min_width,
         )
         steps_taken[ray_idx] = steps
         broke_flags[ray_idx] = broke
@@ -831,7 +818,6 @@ class ForwardRayTracer:
                 self.config.max_steps,
                 self.config.kernel_sigma_m,
                 self.config.min_tube_width_m,
-                self.config.breaker_index,
             )
 
             # Accumulate results
