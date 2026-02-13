@@ -118,7 +118,7 @@ def get_region_paths(region_name: str, swan_resolution: Optional[str] = None) ->
 
     # SWAN directory with resolution preference
     swan_base = PROJECT_ROOT / "data" / "swan" / "runs" / region_name
-    resolution_preference = ['coarse', 'medium', 'fine', 'ultrafine']
+    resolution_preference = ['fine', 'medium', 'coarse', 'ultrafine']
 
     if swan_resolution:
         swan_dir = swan_base / swan_resolution / "latest"
