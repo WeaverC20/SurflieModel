@@ -7,9 +7,9 @@ depositing energy as they propagate. This naturally captures wave focusing
 effects from bathymetry.
 
 Usage:
-    python run_simulation.py --region socal
-    python run_simulation.py --region socal --boundary-spacing 100
-    python run_simulation.py --list-regions
+    python /data/surfzone/runner/run_simulation.py --region socal
+    python /data/surfzone/runner/run_simulation.py --region socal --boundary-spacing 100
+    python /data/surfzone/runner/run_simulation.py --list-regions
 
 Examples:
     # Basic run with default settings
