@@ -7,9 +7,9 @@ depositing energy as they propagate. This naturally captures wave focusing
 effects from bathymetry.
 
 Usage:
-    python /data/surfzone/runner/run_simulation.py --region socal
-    python /data/surfzone/runner/run_simulation.py --region socal --boundary-spacing 100
-    python /data/surfzone/runner/run_simulation.py --list-regions
+    python data/surfzone/runner/run_simulation.py --region socal
+    python data/surfzone/runner/run_simulation.py --region socal --boundary-spacing 100
+    python data/surfzone/runner/run_simulation.py --list-regions
 
 Examples:
     # Basic run with default settings
@@ -20,6 +20,20 @@ Examples:
 
     # Wider energy deposition kernel
     python run_simulation.py --region socal --kernel-sigma 50
+
+    # With ray path tracking (10% of rays)
+    python run_simulation.py --region socal --track-rays
+
+    # Track 25% of rays
+    python run_simulation.py --region socal --track-rays --sample-rays 0.25
+
+Ray Path Tracking:
+    When --track-rays is specified, the simulation stores sampled ray paths
+    for later visualization. The --sample-rays argument controls what fraction
+    of rays are stored (default: 0.1 = 10%).
+
+    View tracked rays with:
+        python scripts/dev/view_surfzone_result.py --region socal --show-rays 100
 """
 
 import argparse
@@ -187,6 +201,12 @@ Examples:
     parser.add_argument('--kernel-sigma', type=float, default=25.0,
                         help='Gaussian kernel width for energy deposition (m, default: 25)')
 
+    # Ray path tracking options
+    parser.add_argument('--track-rays', action='store_true',
+                        help='Store sampled ray paths for visualization')
+    parser.add_argument('--sample-rays', type=float, default=0.1,
+                        help='Fraction of rays to sample for path tracking (0.0-1.0, default: 0.1)')
+
     # Performance options
     parser.add_argument('--clear-cache', action='store_true',
                         help='Clear Numba JIT cache before running (fixes slowdown from stale cache)')
@@ -240,6 +260,8 @@ Examples:
     logger.info(f"SWAN: {swan_dir}")
     logger.info(f"Boundary spacing: {args.boundary_spacing} m")
     logger.info(f"Kernel sigma: {args.kernel_sigma} m")
+    if args.track_rays:
+        logger.info(f"Ray tracking: {args.sample_rays*100:.0f}% of rays")
     logger.info(f"Output: {output_dir}")
     logger.info("=" * 60)
 
@@ -329,7 +351,11 @@ Examples:
     )
 
     # Run forward simulation
-    forward_runner = ForwardSurfzoneRunner(mesh, boundary_conditions, forward_config)
+    forward_runner = ForwardSurfzoneRunner(
+        mesh, boundary_conditions, forward_config,
+        track_paths=args.track_rays,
+        sample_fraction=args.sample_rays,
+    )
     result = forward_runner.run(region_name=region_display_name)
 
     # Print summary
@@ -340,9 +366,15 @@ Examples:
 
     # Save results
     logger.info("Saving results...")
-    npz_path, json_path = save_forward_result(result, output_dir, "forward_energy")
+    npz_path, json_path = save_forward_result(result, output_dir, "forward_result")
     logger.info(f"  Saved: {npz_path}")
     logger.info(f"  Saved: {json_path}")
+
+    # Report ray paths if saved
+    if result.ray_paths is not None:
+        ray_paths_path = output_dir / "ray_paths.npz"
+        logger.info(f"  Saved: {ray_paths_path}")
+        logger.info(f"    {result.ray_paths.summary()}")
 
     logger.info("Done!")
 

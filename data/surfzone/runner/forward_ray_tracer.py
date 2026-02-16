@@ -390,6 +390,8 @@ def deposit_ray_energy_directional(
     mesh_x: np.ndarray,
     mesh_y: np.ndarray,
     energy_grid: np.ndarray,
+    dir_x_grid: np.ndarray,
+    dir_y_grid: np.ndarray,
     ray_count: np.ndarray,
     sigma: float,
     nearby_indices: np.ndarray,
@@ -400,13 +402,18 @@ def deposit_ray_energy_directional(
     Only deposits in the ray's forward hemisphere (cos(angle) > 0).
     This prevents energy leakage into shielded areas like crevices.
 
+    Also accumulates direction components weighted by energy for computing
+    energy-weighted average direction at each point.
+
     Args:
         ray_x, ray_y: Ray position
-        ray_dx, ray_dy: Ray direction (unit vector)
+        ray_dx, ray_dy: Ray direction (unit vector, math convention)
         E_local: Local energy density P/(Cg×W) (J/m²)
         area: Tube area swept per step W × ds (m²)
         mesh_x, mesh_y: Mesh point coordinates
         energy_grid: Energy density accumulator (modified in place)
+        dir_x_grid: Direction x-component accumulator Σ(energy × cos(θ)) (modified in place)
+        dir_y_grid: Direction y-component accumulator Σ(energy × sin(θ)) (modified in place)
         ray_count: Ray counter per point (modified in place)
         sigma: Gaussian kernel width
         nearby_indices: Indices of nearby mesh points to check
@@ -437,7 +444,13 @@ def deposit_ray_energy_directional(
         normalized_weight = weight * cos_angle / (2.0 * sigma_sq)
 
         # Deposit energy density
-        energy_grid[idx] += E_local * area * normalized_weight
+        energy_contribution = E_local * area * normalized_weight
+        energy_grid[idx] += energy_contribution
+
+        # Accumulate direction weighted by energy (for energy-weighted average)
+        dir_x_grid[idx] += energy_contribution * ray_dx
+        dir_y_grid[idx] += energy_contribution * ray_dy
+
         ray_count[idx] += 1
 
 
@@ -471,6 +484,8 @@ def propagate_single_ray(
     point_grid_indices: np.ndarray,
     # Output
     energy_grid: np.ndarray,
+    dir_x_grid: np.ndarray,
+    dir_y_grid: np.ndarray,
     ray_count: np.ndarray,
     # Config
     step_size: float,
@@ -483,6 +498,9 @@ def propagate_single_ray(
 
     Uses power-based model where P = E × Cg × W is conserved.
     Local energy density E = P / (Cg × W) increases with focusing (smaller W).
+
+    Also accumulates direction components (dir_x_grid, dir_y_grid) weighted by
+    energy for computing energy-weighted average direction at each mesh point.
 
     Returns:
         Tuple of (steps_taken, broke, final_depth)
@@ -559,7 +577,7 @@ def propagate_single_ray(
                 x, y, dx, dy,
                 E_local, area,
                 mesh_x, mesh_y,
-                energy_grid, ray_count,
+                energy_grid, dir_x_grid, dir_y_grid, ray_count,
                 kernel_sigma, nearby,
             )
 
@@ -587,6 +605,155 @@ def propagate_single_ray(
         y += dy * step_size
 
     return max_steps, broke, final_depth
+
+
+@njit(cache=True)
+def propagate_single_ray_with_path(
+    start_x: float,
+    start_y: float,
+    start_theta: float,
+    start_power: float,
+    start_width: float,
+    period: float,
+    # Mesh arrays
+    mesh_x: np.ndarray,
+    mesh_y: np.ndarray,
+    points_x: np.ndarray,
+    points_y: np.ndarray,
+    depth: np.ndarray,
+    triangles: np.ndarray,
+    # Spatial index for depth interpolation
+    grid_x_min: float,
+    grid_y_min: float,
+    grid_cell_size: float,
+    grid_n_cells_x: int,
+    grid_n_cells_y: int,
+    grid_cell_starts: np.ndarray,
+    grid_cell_counts: np.ndarray,
+    grid_triangles: np.ndarray,
+    # Point spatial index for energy deposition (O(k) lookups)
+    point_grid_starts: np.ndarray,
+    point_grid_counts: np.ndarray,
+    point_grid_indices: np.ndarray,
+    # Output
+    energy_grid: np.ndarray,
+    dir_x_grid: np.ndarray,
+    dir_y_grid: np.ndarray,
+    ray_count: np.ndarray,
+    # Path output arrays (pre-allocated, max_steps length)
+    path_x: np.ndarray,
+    path_y: np.ndarray,
+    path_depth: np.ndarray,
+    path_direction: np.ndarray,
+    path_tube_width: np.ndarray,
+    path_Hs_local: np.ndarray,
+    # Config
+    step_size: float,
+    max_steps: int,
+    kernel_sigma: float,
+    min_width: float,
+) -> int:
+    """
+    Propagate a single ray, deposit energy, and record path.
+
+    Same as propagate_single_ray but also fills path arrays.
+
+    Returns:
+        Number of steps taken (length of valid path data)
+    """
+    x = start_x
+    y = start_y
+    theta = start_theta
+    power = start_power
+    width = start_width
+
+    L0 = 9.81 * period * period / (2.0 * 3.141592653589793)
+    cutoff = 3.0 * kernel_sigma
+
+    for step in range(max_steps):
+        # 1. Interpolate depth at current position
+        h = interpolate_depth_indexed(
+            x, y, points_x, points_y, depth, triangles,
+            grid_x_min, grid_y_min, grid_cell_size,
+            grid_n_cells_x, grid_n_cells_y,
+            grid_cell_starts, grid_cell_counts, grid_triangles
+        )
+
+        if np.isnan(h) or h <= 0:
+            return step
+
+        # 2. Compute local wave properties
+        x_fm = (2.0 * 3.141592653589793 * h / L0) ** 0.75
+        L = L0 * (np.tanh(x_fm) ** (2.0 / 3.0))
+        C = L / period
+
+        k = 2.0 * 3.141592653589793 / L
+        kh = k * h
+        if kh > 10.0:
+            n = 0.5
+        elif kh < 0.01:
+            n = 1.0
+        else:
+            n = 0.5 * (1.0 + 2.0 * kh / np.sinh(2.0 * kh))
+        Cg = n * C
+
+        # 3. Compute local energy density and Hs
+        E_local = power / (Cg * width)
+        Hs_local = np.sqrt(8.0 * E_local / (1025.0 * 9.81))
+
+        # 4. Record path data
+        path_x[step] = x
+        path_y[step] = y
+        path_depth[step] = h
+        path_direction[step] = theta
+        path_tube_width[step] = width
+        path_Hs_local[step] = Hs_local
+
+        # 5. Ray direction components
+        dx = np.cos(theta)
+        dy = np.sin(theta)
+
+        # 6. Compute tube area and deposit energy
+        area = width * step_size
+        nearby = _find_nearby_points(
+            x, y, cutoff,
+            mesh_x, mesh_y,
+            grid_x_min, grid_y_min, grid_cell_size,
+            grid_n_cells_x, grid_n_cells_y,
+            point_grid_starts, point_grid_counts, point_grid_indices,
+        )
+
+        if len(nearby) > 0:
+            deposit_ray_energy_directional(
+                x, y, dx, dy,
+                E_local, area,
+                mesh_x, mesh_y,
+                energy_grid, dir_x_grid, dir_y_grid, ray_count,
+                kernel_sigma, nearby,
+            )
+
+        # 7. Compute refraction
+        dC_dx, dC_dy = celerity_gradient_indexed(
+            x, y, period, L0,
+            points_x, points_y, depth, triangles,
+            grid_x_min, grid_y_min, grid_cell_size,
+            grid_n_cells_x, grid_n_cells_y,
+            grid_cell_starts, grid_cell_counts, grid_triangles,
+        )
+
+        # 8. Update direction and width
+        if C > 0:
+            dC_dn = -dy * dC_dx + dx * dC_dy
+            dtheta = -(step_size / C) * dC_dn
+            theta += dtheta
+            width += width * dtheta
+            width = max(width, min_width)
+
+        # 9. Move ray forward
+        x += dx * step_size
+        y += dy * step_size
+
+    return max_steps
 
 
 @njit(parallel=True, cache=True)
@@ -623,7 +790,7 @@ def propagate_all_rays(
     max_steps: int,
     kernel_sigma: float,
     min_width: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Propagate all rays in parallel and deposit energy.
 
@@ -631,7 +798,7 @@ def propagate_all_rays(
     race conditions, then combines them at the end.
 
     Returns:
-        Tuple of (energy_grid, ray_counts, steps_taken, broke_flags)
+        Tuple of (energy_grid, dir_x_grid, dir_y_grid, ray_counts, steps_taken, broke_flags)
     """
     n_rays = len(rays_x)
     n_points = len(mesh_x)
@@ -645,6 +812,8 @@ def propagate_all_rays(
     # For production, consider using atomic operations or thread-local storage.
 
     energy_grid = np.zeros(n_points, dtype=np.float64)
+    dir_x_grid = np.zeros(n_points, dtype=np.float64)
+    dir_y_grid = np.zeros(n_points, dtype=np.float64)
     ray_counts = np.zeros(n_points, dtype=np.int32)
 
     # Sequential for correctness (parallel deposition needs atomic ops)
@@ -662,13 +831,13 @@ def propagate_all_rays(
             grid_n_cells_x, grid_n_cells_y,
             grid_cell_starts, grid_cell_counts, grid_triangles,
             point_grid_starts, point_grid_counts, point_grid_indices,
-            energy_grid, ray_counts,
+            energy_grid, dir_x_grid, dir_y_grid, ray_counts,
             step_size, max_steps, kernel_sigma, min_width,
         )
         steps_taken[ray_idx] = steps
         broke_flags[ray_idx] = broke
 
-    return energy_grid, ray_counts, steps_taken, broke_flags
+    return energy_grid, dir_x_grid, dir_y_grid, ray_counts, steps_taken, broke_flags
 
 
 # =============================================================================
@@ -683,6 +852,11 @@ class ForwardRayTracer:
         tracer = ForwardRayTracer(mesh, boundary_conditions, config)
         energy, ray_counts = tracer.trace_all_partitions()
         Hs = tracer.energy_to_wave_height(energy)
+
+    With path tracking:
+        tracer = ForwardRayTracer(mesh, boundary_conditions, config,
+                                  track_paths=True, sample_fraction=0.1)
+        Hs, energy, ray_counts, per_partition_data, ray_paths = tracer.run()
     """
 
     def __init__(
@@ -690,10 +864,16 @@ class ForwardRayTracer:
         mesh: 'SurfZoneMesh',
         boundary_conditions: 'BoundaryConditions',
         config: Optional[ForwardTracerConfig] = None,
+        track_paths: bool = False,
+        sample_fraction: float = 0.1,
     ):
         self.mesh = mesh
         self.boundary = boundary_conditions
         self.config = config or ForwardTracerConfig()
+
+        # Path tracking options
+        self.track_paths = track_paths
+        self.sample_fraction = np.clip(sample_fraction, 0.0, 1.0)
 
         # Initialize ray generator
         self.initializer = BoundaryRayInitializer(mesh, boundary_conditions, self.config)
@@ -704,6 +884,10 @@ class ForwardRayTracer:
         # Build point spatial index for O(k) lookups (instead of O(N))
         self._point_grid_starts, self._point_grid_counts, self._point_grid_indices = \
             self._build_point_spatial_index()
+
+        # Path collection storage (filled during tracing if track_paths=True)
+        self._collected_paths = []
+        self._total_rays_traced = 0
 
     def _build_point_spatial_index(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -752,16 +936,18 @@ class ForwardRayTracer:
 
         return cell_starts, cell_counts, point_indices
 
-    def trace_partition(self, partition_idx: int, batch_size: int = 500) -> Tuple[np.ndarray, np.ndarray]:
+    def trace_partition(self, partition_idx: int, batch_size: int = 500) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Trace rays for a single partition and accumulate energy.
+        Trace rays for a single partition and accumulate energy and direction.
+
+        If track_paths is enabled, sampled ray paths are collected into self._collected_paths.
 
         Args:
             partition_idx: Index of partition to trace
             batch_size: Number of rays to process per batch (for progress updates)
 
         Returns:
-            Tuple of (energy_grid, ray_counts) arrays
+            Tuple of (energy_grid, dir_x_grid, dir_y_grid, ray_counts) arrays
         """
         import time
         import sys
@@ -771,7 +957,12 @@ class ForwardRayTracer:
 
         if rays.n_rays == 0:
             n_points = len(self._mesh_arrays['points_x'])
-            return np.zeros(n_points), np.zeros(n_points, dtype=np.int32)
+            return (
+                np.zeros(n_points),
+                np.zeros(n_points),
+                np.zeros(n_points),
+                np.zeros(n_points, dtype=np.int32),
+            )
 
         print(f"  Partition {partition_idx}: {rays.n_rays:,} rays")
 
@@ -781,86 +972,179 @@ class ForwardRayTracer:
 
         # Initialize accumulators
         energy_grid = np.zeros(n_points, dtype=np.float64)
+        dir_x_grid = np.zeros(n_points, dtype=np.float64)
+        dir_y_grid = np.zeros(n_points, dtype=np.float64)
         ray_counts = np.zeros(n_points, dtype=np.int32)
         all_steps = []
         all_broke = []
 
-        # Process rays in batches for progress updates
+        # Determine which rays to sample for path tracking
         n_rays = rays.n_rays
-        n_batches = (n_rays + batch_size - 1) // batch_size
+        if self.track_paths and self.sample_fraction > 0:
+            n_sample = max(1, int(n_rays * self.sample_fraction))
+            sample_indices = set(np.random.choice(n_rays, size=n_sample, replace=False))
+        else:
+            sample_indices = set()
+
+        # Pre-allocate path arrays for path-tracked rays
+        max_steps = self.config.max_steps
+        path_x = np.zeros(max_steps, dtype=np.float64)
+        path_y = np.zeros(max_steps, dtype=np.float64)
+        path_depth = np.zeros(max_steps, dtype=np.float64)
+        path_direction = np.zeros(max_steps, dtype=np.float64)
+        path_tube_width = np.zeros(max_steps, dtype=np.float64)
+        path_Hs_local = np.zeros(max_steps, dtype=np.float64)
+
+        # Track rays individually when path tracking is needed
         start_time = time.time()
+        rays_done = 0
 
-        for batch_idx in range(n_batches):
-            batch_start = batch_idx * batch_size
-            batch_end = min(batch_start + batch_size, n_rays)
+        for ray_idx in range(n_rays):
+            original_ray_idx = self._total_rays_traced + ray_idx
 
-            # Get batch slice
-            batch_x = rays.x[batch_start:batch_end]
-            batch_y = rays.y[batch_start:batch_end]
-            batch_theta = rays.theta[batch_start:batch_end]
-            batch_power = rays.power[batch_start:batch_end]
-            batch_width = rays.width[batch_start:batch_end]
-            batch_period = rays.period[batch_start:batch_end]
+            if ray_idx in sample_indices:
+                # Use path-tracking version
+                steps = propagate_single_ray_with_path(
+                    rays.x[ray_idx], rays.y[ray_idx], rays.theta[ray_idx],
+                    rays.power[ray_idx], rays.width[ray_idx], rays.period[ray_idx],
+                    ma['points_x'], ma['points_y'],
+                    ma['points_x'], ma['points_y'],
+                    ma['depth'], ma['triangles'],
+                    float(ma['grid_x_min']), float(ma['grid_y_min']),
+                    float(ma['grid_cell_size']),
+                    int(ma['grid_n_cells_x']), int(ma['grid_n_cells_y']),
+                    ma['grid_cell_starts'], ma['grid_cell_counts'], ma['grid_triangles'],
+                    self._point_grid_starts, self._point_grid_counts, self._point_grid_indices,
+                    energy_grid, dir_x_grid, dir_y_grid, ray_counts,
+                    path_x, path_y, path_depth, path_direction, path_tube_width, path_Hs_local,
+                    self.config.step_size_m, self.config.max_steps,
+                    self.config.kernel_sigma_m, self.config.min_tube_width_m,
+                )
 
-            # Propagate batch
-            batch_energy, batch_counts, batch_steps, batch_broke = propagate_all_rays(
-                batch_x, batch_y, batch_theta,
-                batch_power, batch_width, batch_period,
-                ma['points_x'], ma['points_y'],
-                ma['points_x'], ma['points_y'],
-                ma['depth'], ma['triangles'],
-                float(ma['grid_x_min']), float(ma['grid_y_min']),
-                float(ma['grid_cell_size']),
-                int(ma['grid_n_cells_x']), int(ma['grid_n_cells_y']),
-                ma['grid_cell_starts'], ma['grid_cell_counts'], ma['grid_triangles'],
-                self._point_grid_starts, self._point_grid_counts, self._point_grid_indices,
-                self.config.step_size_m,
-                self.config.max_steps,
-                self.config.kernel_sigma_m,
-                self.config.min_tube_width_m,
-            )
+                # Store the path data (copy the valid portion)
+                if steps > 0:
+                    self._collected_paths.append({
+                        'partition': partition_idx,
+                        'original_idx': original_ray_idx,
+                        'length': steps,
+                        'x': path_x[:steps].copy(),
+                        'y': path_y[:steps].copy(),
+                        'depth': path_depth[:steps].copy(),
+                        'direction': path_direction[:steps].copy(),
+                        'tube_width': path_tube_width[:steps].copy(),
+                        'Hs_local': path_Hs_local[:steps].copy(),
+                    })
 
-            # Accumulate results
-            energy_grid += batch_energy
-            ray_counts += batch_counts
-            all_steps.extend(batch_steps)
-            all_broke.extend(batch_broke)
+                all_steps.append(steps)
+                all_broke.append(False)
+            else:
+                # Use standard version (no path tracking)
+                steps, broke, _ = propagate_single_ray(
+                    rays.x[ray_idx], rays.y[ray_idx], rays.theta[ray_idx],
+                    rays.power[ray_idx], rays.width[ray_idx], rays.period[ray_idx],
+                    ma['points_x'], ma['points_y'],
+                    ma['points_x'], ma['points_y'],
+                    ma['depth'], ma['triangles'],
+                    float(ma['grid_x_min']), float(ma['grid_y_min']),
+                    float(ma['grid_cell_size']),
+                    int(ma['grid_n_cells_x']), int(ma['grid_n_cells_y']),
+                    ma['grid_cell_starts'], ma['grid_cell_counts'], ma['grid_triangles'],
+                    self._point_grid_starts, self._point_grid_counts, self._point_grid_indices,
+                    energy_grid, dir_x_grid, dir_y_grid, ray_counts,
+                    self.config.step_size_m, self.config.max_steps,
+                    self.config.kernel_sigma_m, self.config.min_tube_width_m,
+                )
+                all_steps.append(steps)
+                all_broke.append(broke)
 
-            # Progress update
-            elapsed = time.time() - start_time
-            rays_done = batch_end
-            rays_per_sec = rays_done / elapsed if elapsed > 0 else 0
-            remaining = (n_rays - rays_done) / rays_per_sec if rays_per_sec > 0 else 0
-            pct = 100 * rays_done / n_rays
-            print(f"    Progress: {rays_done:,}/{n_rays:,} rays ({pct:.1f}%) - {rays_per_sec:.0f} rays/s - ETA: {remaining:.1f}s", end='\r')
-            sys.stdout.flush()
+            # Progress update (every batch_size rays)
+            rays_done += 1
+            if rays_done % batch_size == 0 or rays_done == n_rays:
+                elapsed = time.time() - start_time
+                rays_per_sec = rays_done / elapsed if elapsed > 0 else 0
+                remaining = (n_rays - rays_done) / rays_per_sec if rays_per_sec > 0 else 0
+                pct = 100 * rays_done / n_rays
+                print(f"    Progress: {rays_done:,}/{n_rays:,} rays ({pct:.1f}%) - {rays_per_sec:.0f} rays/s - ETA: {remaining:.1f}s", end='\r')
+                sys.stdout.flush()
 
         print()  # New line after progress
+
+        # Update total rays counter
+        self._total_rays_traced += n_rays
 
         # Report statistics
         n_broke = sum(all_broke)
         avg_steps = np.mean(all_steps) if all_steps else 0
-        print(f"    Avg steps: {avg_steps:.1f}, Broke: {n_broke:,} ({100*n_broke/n_rays:.1f}%)")
+        n_sampled = len(sample_indices)
+        if self.track_paths and n_sampled > 0:
+            print(f"    Avg steps: {avg_steps:.1f}, Sampled paths: {n_sampled:,} ({100*n_sampled/n_rays:.1f}%)")
+        else:
+            print(f"    Avg steps: {avg_steps:.1f}")
 
-        return energy_grid, ray_counts
+        return energy_grid, dir_x_grid, dir_y_grid, ray_counts
 
-    def trace_all_partitions(self) -> Tuple[np.ndarray, np.ndarray]:
+    def trace_all_partitions(self) -> Tuple[np.ndarray, np.ndarray, dict]:
         """
-        Trace rays for all partitions and combine energy.
+        Trace rays for all partitions and collect per-partition data.
 
         Returns:
-            Tuple of (total_energy, total_ray_counts) arrays
+            Tuple of (total_energy, total_ray_counts, per_partition_data)
+            where per_partition_data is a dict mapping partition_idx to
+            (energy, dir_x, dir_y, ray_counts) tuples.
         """
+        # Reset path collection for new run
+        self._collected_paths = []
+        self._total_rays_traced = 0
+
         n_points = len(self._mesh_arrays['points_x'])
         total_energy = np.zeros(n_points)
         total_ray_counts = np.zeros(n_points, dtype=np.int32)
+        per_partition_data = {}
 
         for i in range(self.boundary.n_partitions):
-            energy, counts = self.trace_partition(i)
+            energy, dir_x, dir_y, counts = self.trace_partition(i)
+
+            # Store per-partition data
+            per_partition_data[i] = {
+                'energy': energy.copy(),
+                'dir_x': dir_x.copy(),
+                'dir_y': dir_y.copy(),
+                'ray_counts': counts.copy(),
+            }
+
+            # Accumulate totals
             total_energy += energy
             total_ray_counts += counts
 
-        return total_energy, total_ray_counts
+        return total_energy, total_ray_counts, per_partition_data
+
+    def direction_components_to_nautical(self, dir_x: np.ndarray, dir_y: np.ndarray) -> np.ndarray:
+        """
+        Convert accumulated direction components to nautical direction (degrees FROM).
+
+        Args:
+            dir_x: Accumulated x-direction components Σ(energy × cos(θ))
+            dir_y: Accumulated y-direction components Σ(energy × sin(θ))
+
+        Returns:
+            Direction in degrees (nautical FROM convention: 0=N, 90=E, 180=S, 270=W)
+        """
+        # Math angle from accumulated components (radians)
+        # atan2(y, x) gives angle in math convention (0=E, counter-clockwise)
+        theta_math = np.arctan2(dir_y, dir_x)
+
+        # Convert to degrees
+        theta_deg = np.degrees(theta_math)
+
+        # Convert from math convention (travel direction) to nautical FROM convention
+        # Math: 0=E, 90=N, 180=W, 270=S (travel direction, counter-clockwise from E)
+        # Nautical FROM: 0=N, 90=E, 180=S, 270=W (direction waves come FROM)
+        # travel_deg = (90 - theta_deg) % 360  # Convert to nautical travel
+        # from_deg = (travel_deg + 180) % 360  # Convert to FROM
+        # Simplified:
+        direction_nautical = (270.0 - theta_deg) % 360.0
+
+        return direction_nautical
 
     def energy_to_wave_height(self, energy: np.ndarray) -> np.ndarray:
         """
@@ -880,21 +1164,101 @@ class ForwardRayTracer:
         Hs = np.sqrt(8.0 * energy_safe / (RHO * G))
         return Hs
 
-    def run(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _build_ray_path_data(self) -> Optional['RayPathData']:
+        """
+        Build RayPathData from collected paths.
+
+        Returns:
+            RayPathData object, or None if no paths were collected
+        """
+        from .surfzone_result import RayPathData
+
+        if not self._collected_paths:
+            return None
+
+        n_sampled = len(self._collected_paths)
+        total_steps = sum(p['length'] for p in self._collected_paths)
+
+        # Build per-ray metadata arrays
+        ray_partition = np.empty(n_sampled, dtype=np.int32)
+        ray_start_idx = np.empty(n_sampled, dtype=np.int64)
+        ray_length = np.empty(n_sampled, dtype=np.int32)
+        ray_original_idx = np.empty(n_sampled, dtype=np.int32)
+
+        # Build concatenated path arrays
+        path_x = np.empty(total_steps, dtype=np.float32)
+        path_y = np.empty(total_steps, dtype=np.float32)
+        path_depth = np.empty(total_steps, dtype=np.float32)
+        path_direction = np.empty(total_steps, dtype=np.float32)
+        path_tube_width = np.empty(total_steps, dtype=np.float32)
+        path_Hs_local = np.empty(total_steps, dtype=np.float32)
+
+        current_idx = 0
+        for i, path in enumerate(self._collected_paths):
+            length = path['length']
+            ray_partition[i] = path['partition']
+            ray_start_idx[i] = current_idx
+            ray_length[i] = length
+            ray_original_idx[i] = path['original_idx']
+
+            path_x[current_idx:current_idx + length] = path['x']
+            path_y[current_idx:current_idx + length] = path['y']
+            path_depth[current_idx:current_idx + length] = path['depth']
+            path_direction[current_idx:current_idx + length] = path['direction']
+            path_tube_width[current_idx:current_idx + length] = path['tube_width']
+            path_Hs_local[current_idx:current_idx + length] = path['Hs_local']
+
+            current_idx += length
+
+        return RayPathData(
+            ray_partition=ray_partition,
+            ray_start_idx=ray_start_idx,
+            ray_length=ray_length,
+            ray_original_idx=ray_original_idx,
+            path_x=path_x,
+            path_y=path_y,
+            path_depth=path_depth,
+            path_direction=path_direction,
+            path_tube_width=path_tube_width,
+            path_Hs_local=path_Hs_local,
+            n_rays_total=self._total_rays_traced,
+            sample_fraction=self.sample_fraction,
+        )
+
+    def run(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict, Optional['RayPathData']]:
         """
         Run complete forward ray tracing simulation.
 
         Returns:
-            Tuple of (Hs, energy, ray_counts)
+            Tuple of (Hs, energy, ray_counts, per_partition_data, ray_paths)
+            where per_partition_data is a dict mapping partition_idx to
+            dict with keys: 'energy', 'dir_x', 'dir_y', 'ray_counts', 'Hs', 'direction'
+            and ray_paths is RayPathData if track_paths=True, else None
         """
         print(f"Forward ray tracing: {self.boundary.n_partitions} partitions")
+        if self.track_paths:
+            print(f"  Path tracking enabled: sampling {self.sample_fraction*100:.0f}% of rays")
 
-        energy, ray_counts = self.trace_all_partitions()
+        energy, ray_counts, per_partition_data = self.trace_all_partitions()
         Hs = self.energy_to_wave_height(energy)
+
+        # Compute Hs and direction for each partition
+        for part_idx, part_data in per_partition_data.items():
+            part_data['Hs'] = self.energy_to_wave_height(part_data['energy'])
+            part_data['direction'] = self.direction_components_to_nautical(
+                part_data['dir_x'], part_data['dir_y']
+            )
 
         # Report coverage
         n_covered = np.sum(ray_counts > 0)
         n_total = len(ray_counts)
         print(f"Coverage: {n_covered:,} / {n_total:,} points ({100*n_covered/n_total:.1f}%)")
 
-        return Hs, energy, ray_counts
+        # Build ray path data if tracking was enabled
+        ray_paths = None
+        if self.track_paths:
+            ray_paths = self._build_ray_path_data()
+            if ray_paths:
+                print(f"Ray paths: {ray_paths.summary()}")
+
+        return Hs, energy, ray_counts, per_partition_data, ray_paths

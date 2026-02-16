@@ -30,9 +30,10 @@ def save_forward_result(
     """
     Save forward ray tracing result to disk.
 
-    Saves two files:
-    - {filename}.npz: Compressed arrays (mesh coords, energy, wave heights)
+    Saves:
+    - {filename}.npz: Combined arrays (mesh coords, energy, wave heights)
     - {filename}.json: Metadata and summary statistics
+    - Per-partition files: wind_sea.npz, primary_swell.npz, etc. (if partitions available)
 
     Args:
         result: ForwardTracingResult to save
@@ -48,7 +49,7 @@ def save_forward_result(
     npz_path = output_path / f"{filename}.npz"
     json_path = output_path / f"{filename}.json"
 
-    # Save arrays as compressed NPZ
+    # Save combined arrays as compressed NPZ
     np.savez_compressed(
         npz_path,
         mesh_x=result.mesh_x,
@@ -59,7 +60,24 @@ def save_forward_result(
         ray_count=result.ray_count,
     )
 
-    logger.info(f"Saved arrays: {npz_path}")
+    logger.info(f"Saved combined arrays: {npz_path}")
+
+    # Save per-partition files (compatible with statistics runner)
+    if result.partitions:
+        for partition in result.partitions:
+            partition_path = output_path / f"{partition.partition_name}.npz"
+            np.savez_compressed(
+                partition_path,
+                mesh_x=result.mesh_x,
+                mesh_y=result.mesh_y,
+                mesh_depth=result.mesh_depth,
+                # Field names match what statistics/run_statistics.py expects
+                boundary_Hs=partition.H_at_mesh,         # Propagated Hs (shoaled + focused)
+                boundary_Tp=partition.boundary_Tp,       # Period from SWAN (conserved)
+                boundary_direction=partition.direction,  # Refracted direction (from ray tracing)
+                converged=partition.converged,
+            )
+            logger.info(f"Saved partition: {partition_path}")
 
     # Compute statistics for covered points
     covered_mask = result.ray_count > 0
@@ -96,6 +114,19 @@ def save_forward_result(
             },
         }
 
+    # Per-partition statistics
+    partition_stats = {}
+    if result.partitions:
+        for partition in result.partitions:
+            if partition.n_covered > 0:
+                H_cov = partition.H_at_mesh[partition.converged]
+                partition_stats[partition.partition_name] = {
+                    "n_covered": partition.n_covered,
+                    "Hs_min": float(np.nanmin(H_cov)),
+                    "Hs_max": float(np.nanmax(H_cov)),
+                    "Hs_mean": float(np.nanmean(H_cov)),
+                }
+
     # Save metadata as JSON
     metadata = {
         "region_name": result.region_name,
@@ -106,6 +137,7 @@ def save_forward_result(
         "n_rays_total": result.n_rays_total,
         "coverage_rate": result.coverage_rate,
         "statistics": stats,
+        "partition_statistics": partition_stats,
         "bounds": {
             "x_min": float(result.mesh_x.min()) if len(result.mesh_x) > 0 else None,
             "x_max": float(result.mesh_x.max()) if len(result.mesh_x) > 0 else None,
@@ -119,7 +151,87 @@ def save_forward_result(
 
     logger.info(f"Saved metadata: {json_path}")
 
+    # Save ray paths if available
+    if result.ray_paths is not None:
+        ray_paths_path = save_ray_paths(result.ray_paths, output_path)
+        logger.info(f"Saved ray paths: {ray_paths_path}")
+
     return npz_path, json_path
+
+
+def save_ray_paths(
+    ray_paths: 'RayPathData',
+    output_path: Path,
+    filename: str = "ray_paths",
+) -> Path:
+    """
+    Save ray path data to disk.
+
+    Args:
+        ray_paths: RayPathData to save
+        output_path: Directory to save to
+        filename: Base filename (without extension)
+
+    Returns:
+        Path to saved .npz file
+    """
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    npz_path = output_path / f"{filename}.npz"
+
+    np.savez_compressed(
+        npz_path,
+        # Per-ray metadata
+        ray_partition=ray_paths.ray_partition.astype(np.int32),
+        ray_start_idx=ray_paths.ray_start_idx.astype(np.int64),
+        ray_length=ray_paths.ray_length.astype(np.int32),
+        ray_original_idx=ray_paths.ray_original_idx.astype(np.int32),
+        # Path data
+        path_x=ray_paths.path_x.astype(np.float32),
+        path_y=ray_paths.path_y.astype(np.float32),
+        path_depth=ray_paths.path_depth.astype(np.float32),
+        path_direction=ray_paths.path_direction.astype(np.float32),
+        path_tube_width=ray_paths.path_tube_width.astype(np.float32),
+        path_Hs_local=ray_paths.path_Hs_local.astype(np.float32),
+        # Metadata
+        n_rays_total=np.array(ray_paths.n_rays_total),
+        n_rays_sampled=np.array(ray_paths.n_rays_sampled),
+        sample_fraction=np.array(ray_paths.sample_fraction),
+        total_steps=np.array(ray_paths.total_steps),
+    )
+
+    return npz_path
+
+
+def load_ray_paths(npz_path: Path) -> 'RayPathData':
+    """
+    Load ray path data from disk.
+
+    Args:
+        npz_path: Path to ray_paths.npz file
+
+    Returns:
+        RayPathData object
+    """
+    from .surfzone_result import RayPathData
+
+    data = np.load(npz_path)
+
+    return RayPathData(
+        ray_partition=data['ray_partition'],
+        ray_start_idx=data['ray_start_idx'],
+        ray_length=data['ray_length'],
+        ray_original_idx=data['ray_original_idx'],
+        path_x=data['path_x'],
+        path_y=data['path_y'],
+        path_depth=data['path_depth'],
+        path_direction=data['path_direction'],
+        path_tube_width=data['path_tube_width'],
+        path_Hs_local=data['path_Hs_local'],
+        n_rays_total=int(data['n_rays_total']),
+        sample_fraction=float(data['sample_fraction']),
+    )
 
 
 def load_forward_result(npz_path: Path) -> 'ForwardTracingResult':

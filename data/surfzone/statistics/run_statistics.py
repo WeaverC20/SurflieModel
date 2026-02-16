@@ -108,7 +108,14 @@ def load_surfzone_partitions(output_dir: Path) -> Dict[str, dict]:
                 'data': data,
                 'meta': meta
             }
-            print(f"  Loaded {pname}: {meta.get('n_converged', '?')}/{meta.get('n_points', '?')} converged points")
+
+            # Report loading status
+            if 'converged' in data:
+                n_converged = int(np.sum(data['converged']))
+                n_points = len(data['converged'])
+                print(f"  Loaded {pname}: {n_converged:,}/{n_points:,} converged points")
+            else:
+                print(f"  Loaded {pname}: {meta.get('n_converged', '?')}/{meta.get('n_points', '?')} converged points")
 
     return partitions
 
