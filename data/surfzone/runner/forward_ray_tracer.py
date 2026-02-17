@@ -51,9 +51,12 @@ class ForwardTracerConfig:
     # Ray initialization
     boundary_spacing_m: float = 50.0  # Spacing between boundary sample points
 
-    # Ray propagation
-    step_size_m: float = 10.0  # Step size for ray marching
-    max_steps: int = 300  # Maximum steps before termination
+    # Ray propagation - adaptive step sizing based on depth
+    max_distance_m: float = 6000.0  # Maximum distance a ray can travel (6km)
+    step_deep_m: float = 50.0       # Step size in deep water (>10m depth)
+    step_10m_m: float = 20.0        # Step size at 10m depth
+    step_5m_m: float = 10.0         # Step size at 5m depth
+    step_3m_m: float = 5.0          # Step size at ≤3m depth
 
     # Energy deposition
     kernel_sigma_m: float = 25.0  # Gaussian kernel width
@@ -293,6 +296,44 @@ class BoundaryRayInitializer:
 
 
 # =============================================================================
+# Numba-accelerated Helper Functions
+# =============================================================================
+
+@njit(cache=True)
+def compute_step_size(
+    depth: float,
+    step_deep: float,
+    step_10m: float,
+    step_5m: float,
+    step_3m: float,
+) -> float:
+    """
+    Compute adaptive step size based on water depth.
+
+    Uses larger steps in deep water (coarser mesh) and smaller steps
+    in shallow water (finer mesh near coastline).
+
+    Args:
+        depth: Water depth in meters
+        step_deep: Step size for deep water (>10m)
+        step_10m: Step size at 10m depth
+        step_5m: Step size at 5m depth
+        step_3m: Step size at ≤3m depth
+
+    Returns:
+        Step size in meters
+    """
+    if depth <= 3.0:
+        return step_3m
+    elif depth <= 5.0:
+        return step_5m
+    elif depth <= 10.0:
+        return step_10m
+    else:
+        return step_deep
+
+
+# =============================================================================
 # Numba-accelerated Energy Deposition
 # =============================================================================
 
@@ -487,23 +528,32 @@ def propagate_single_ray(
     dir_x_grid: np.ndarray,
     dir_y_grid: np.ndarray,
     ray_count: np.ndarray,
-    # Config
-    step_size: float,
-    max_steps: int,
+    # Config - adaptive step sizing
+    max_distance: float,
+    step_deep: float,
+    step_10m: float,
+    step_5m: float,
+    step_3m: float,
     kernel_sigma: float,
     min_width: float,
-) -> Tuple[int, bool, float]:
+) -> Tuple[float, bool, float]:
     """
     Propagate a single ray and deposit energy density at each step.
 
     Uses power-based model where P = E × Cg × W is conserved.
     Local energy density E = P / (Cg × W) increases with focusing (smaller W).
 
+    Step size adapts to water depth:
+    - Deep water (>10m): step_deep (default 50m)
+    - 10m depth: step_10m (default 20m)
+    - 5m depth: step_5m (default 10m)
+    - ≤3m depth: step_3m (default 5m)
+
     Also accumulates direction components (dir_x_grid, dir_y_grid) weighted by
     energy for computing energy-weighted average direction at each mesh point.
 
     Returns:
-        Tuple of (steps_taken, broke, final_depth)
+        Tuple of (distance_traveled, broke, final_depth)
     """
     x = start_x
     y = start_y
@@ -517,8 +567,9 @@ def propagate_single_ray(
     cutoff = 3.0 * kernel_sigma
     broke = False
     final_depth = 0.0
+    distance_traveled = 0.0
 
-    for step in range(max_steps):
+    while distance_traveled < max_distance:
         # 1. Interpolate depth at current position
         h = interpolate_depth_indexed(
             x, y, points_x, points_y, depth, triangles,
@@ -530,11 +581,14 @@ def propagate_single_ray(
         if np.isnan(h) or h <= 0:
             # Hit land or outside mesh
             final_depth = h if not np.isnan(h) else 0.0
-            return step, False, final_depth
+            return distance_traveled, False, final_depth
 
         final_depth = h
 
-        # 2. Compute local wave properties
+        # 2. Compute adaptive step size based on depth
+        current_step = compute_step_size(h, step_deep, step_10m, step_5m, step_3m)
+
+        # 3. Compute local wave properties
         # Fenton-McKee approximation for wavelength
         x_fm = (2.0 * 3.141592653589793 * h / L0) ** 0.75
         L = L0 * (np.tanh(x_fm) ** (2.0 / 3.0))
@@ -551,19 +605,19 @@ def propagate_single_ray(
             n = 0.5 * (1.0 + 2.0 * kh / np.sinh(2.0 * kh))
         Cg = n * C
 
-        # 3. Compute local energy density from power conservation
+        # 4. Compute local energy density from power conservation
         # P = E × Cg × W is conserved, so E = P / (Cg × W)
         # Focusing (W smaller) → higher E; Spreading (W larger) → lower E
         E_local = power / (Cg * width)
 
-        # 4. Ray direction components
+        # 5. Ray direction components
         dx = np.cos(theta)
         dy = np.sin(theta)
 
-        # 5. Compute tube area for this step
-        area = width * step_size
+        # 6. Compute tube area for this step
+        area = width * current_step
 
-        # 6. Find nearby points and deposit energy density (O(k) using spatial index)
+        # 7. Find nearby points and deposit energy density (O(k) using spatial index)
         nearby = _find_nearby_points(
             x, y, cutoff,
             mesh_x, mesh_y,
@@ -581,7 +635,7 @@ def propagate_single_ray(
                 kernel_sigma, nearby,
             )
 
-        # 7. Compute refraction (celerity gradients)
+        # 8. Compute refraction (celerity gradients)
         dC_dx, dC_dy = celerity_gradient_indexed(
             x, y, period, L0,
             points_x, points_y, depth, triangles,
@@ -590,21 +644,22 @@ def propagate_single_ray(
             grid_cell_starts, grid_cell_counts, grid_triangles,
         )
 
-        # 8. Update direction (forward refraction - no negation needed)
+        # 9. Update direction (forward refraction - no negation needed)
         if C > 0:
             dC_dn = -dy * dC_dx + dx * dC_dy
-            dtheta = -(step_size / C) * dC_dn
+            dtheta = -(current_step / C) * dC_dn
             theta += dtheta
 
-            # 9. Update tube width: dW/ds = W × dθ/ds
+            # 10. Update tube width: dW/ds = W × dθ/ds
             width += width * dtheta
             width = max(width, min_width)
 
-        # 10. Move ray forward
-        x += dx * step_size
-        y += dy * step_size
+        # 11. Move ray forward
+        x += dx * current_step
+        y += dy * current_step
+        distance_traveled += current_step
 
-    return max_steps, broke, final_depth
+    return distance_traveled, broke, final_depth
 
 
 @njit(cache=True)
@@ -640,16 +695,19 @@ def propagate_single_ray_with_path(
     dir_x_grid: np.ndarray,
     dir_y_grid: np.ndarray,
     ray_count: np.ndarray,
-    # Path output arrays (pre-allocated, max_steps length)
+    # Path output arrays (pre-allocated, max possible steps)
     path_x: np.ndarray,
     path_y: np.ndarray,
     path_depth: np.ndarray,
     path_direction: np.ndarray,
     path_tube_width: np.ndarray,
     path_Hs_local: np.ndarray,
-    # Config
-    step_size: float,
-    max_steps: int,
+    # Config - adaptive step sizing
+    max_distance: float,
+    step_deep: float,
+    step_10m: float,
+    step_5m: float,
+    step_3m: float,
     kernel_sigma: float,
     min_width: float,
 ) -> int:
@@ -657,6 +715,7 @@ def propagate_single_ray_with_path(
     Propagate a single ray, deposit energy, and record path.
 
     Same as propagate_single_ray but also fills path arrays.
+    Uses adaptive step sizing based on water depth.
 
     Returns:
         Number of steps taken (length of valid path data)
@@ -669,8 +728,11 @@ def propagate_single_ray_with_path(
 
     L0 = 9.81 * period * period / (2.0 * 3.141592653589793)
     cutoff = 3.0 * kernel_sigma
+    distance_traveled = 0.0
+    step = 0
+    max_steps = len(path_x)  # Use pre-allocated array length as safety limit
 
-    for step in range(max_steps):
+    while distance_traveled < max_distance and step < max_steps:
         # 1. Interpolate depth at current position
         h = interpolate_depth_indexed(
             x, y, points_x, points_y, depth, triangles,
@@ -682,7 +744,10 @@ def propagate_single_ray_with_path(
         if np.isnan(h) or h <= 0:
             return step
 
-        # 2. Compute local wave properties
+        # 2. Compute adaptive step size based on depth
+        current_step = compute_step_size(h, step_deep, step_10m, step_5m, step_3m)
+
+        # 3. Compute local wave properties
         x_fm = (2.0 * 3.141592653589793 * h / L0) ** 0.75
         L = L0 * (np.tanh(x_fm) ** (2.0 / 3.0))
         C = L / period
@@ -697,11 +762,11 @@ def propagate_single_ray_with_path(
             n = 0.5 * (1.0 + 2.0 * kh / np.sinh(2.0 * kh))
         Cg = n * C
 
-        # 3. Compute local energy density and Hs
+        # 4. Compute local energy density and Hs
         E_local = power / (Cg * width)
         Hs_local = np.sqrt(8.0 * E_local / (1025.0 * 9.81))
 
-        # 4. Record path data
+        # 5. Record path data
         path_x[step] = x
         path_y[step] = y
         path_depth[step] = h
@@ -709,12 +774,12 @@ def propagate_single_ray_with_path(
         path_tube_width[step] = width
         path_Hs_local[step] = Hs_local
 
-        # 5. Ray direction components
+        # 6. Ray direction components
         dx = np.cos(theta)
         dy = np.sin(theta)
 
-        # 6. Compute tube area and deposit energy
-        area = width * step_size
+        # 7. Compute tube area and deposit energy
+        area = width * current_step
         nearby = _find_nearby_points(
             x, y, cutoff,
             mesh_x, mesh_y,
@@ -732,7 +797,7 @@ def propagate_single_ray_with_path(
                 kernel_sigma, nearby,
             )
 
-        # 7. Compute refraction
+        # 8. Compute refraction
         dC_dx, dC_dy = celerity_gradient_indexed(
             x, y, period, L0,
             points_x, points_y, depth, triangles,
@@ -741,19 +806,21 @@ def propagate_single_ray_with_path(
             grid_cell_starts, grid_cell_counts, grid_triangles,
         )
 
-        # 8. Update direction and width
+        # 9. Update direction and width
         if C > 0:
             dC_dn = -dy * dC_dx + dx * dC_dy
-            dtheta = -(step_size / C) * dC_dn
+            dtheta = -(current_step / C) * dC_dn
             theta += dtheta
             width += width * dtheta
             width = max(width, min_width)
 
-        # 9. Move ray forward
-        x += dx * step_size
-        y += dy * step_size
+        # 10. Move ray forward
+        x += dx * current_step
+        y += dy * current_step
+        distance_traveled += current_step
+        step += 1
 
-    return max_steps
+    return step
 
 
 @njit(parallel=True, cache=True)
@@ -785,9 +852,12 @@ def propagate_all_rays(
     point_grid_starts: np.ndarray,
     point_grid_counts: np.ndarray,
     point_grid_indices: np.ndarray,
-    # Config
-    step_size: float,
-    max_steps: int,
+    # Config - adaptive step sizing
+    max_distance: float,
+    step_deep: float,
+    step_10m: float,
+    step_5m: float,
+    step_3m: float,
     kernel_sigma: float,
     min_width: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -798,13 +868,13 @@ def propagate_all_rays(
     race conditions, then combines them at the end.
 
     Returns:
-        Tuple of (energy_grid, dir_x_grid, dir_y_grid, ray_counts, steps_taken, broke_flags)
+        Tuple of (energy_grid, dir_x_grid, dir_y_grid, ray_counts, distances_traveled, broke_flags)
     """
     n_rays = len(rays_x)
     n_points = len(mesh_x)
 
     # Output arrays
-    steps_taken = np.empty(n_rays, dtype=np.int32)
+    distances_traveled = np.empty(n_rays, dtype=np.float64)
     broke_flags = np.empty(n_rays, dtype=np.bool_)
 
     # NOTE: For true parallel execution, each thread needs its own energy grid.
@@ -818,7 +888,7 @@ def propagate_all_rays(
 
     # Sequential for correctness (parallel deposition needs atomic ops)
     for ray_idx in range(n_rays):
-        steps, broke, _ = propagate_single_ray(
+        dist, broke, _ = propagate_single_ray(
             rays_x[ray_idx],
             rays_y[ray_idx],
             rays_theta[ray_idx],
@@ -832,12 +902,13 @@ def propagate_all_rays(
             grid_cell_starts, grid_cell_counts, grid_triangles,
             point_grid_starts, point_grid_counts, point_grid_indices,
             energy_grid, dir_x_grid, dir_y_grid, ray_counts,
-            step_size, max_steps, kernel_sigma, min_width,
+            max_distance, step_deep, step_10m, step_5m, step_3m,
+            kernel_sigma, min_width,
         )
-        steps_taken[ray_idx] = steps
+        distances_traveled[ray_idx] = dist
         broke_flags[ray_idx] = broke
 
-    return energy_grid, dir_x_grid, dir_y_grid, ray_counts, steps_taken, broke_flags
+    return energy_grid, dir_x_grid, dir_y_grid, ray_counts, distances_traveled, broke_flags
 
 
 # =============================================================================
@@ -987,17 +1058,19 @@ class ForwardRayTracer:
             sample_indices = set()
 
         # Pre-allocate path arrays for path-tracked rays
-        max_steps = self.config.max_steps
-        path_x = np.zeros(max_steps, dtype=np.float64)
-        path_y = np.zeros(max_steps, dtype=np.float64)
-        path_depth = np.zeros(max_steps, dtype=np.float64)
-        path_direction = np.zeros(max_steps, dtype=np.float64)
-        path_tube_width = np.zeros(max_steps, dtype=np.float64)
-        path_Hs_local = np.zeros(max_steps, dtype=np.float64)
+        # Max possible steps = max_distance / smallest step size + buffer
+        max_possible_steps = int(self.config.max_distance_m / self.config.step_3m_m) + 100
+        path_x = np.zeros(max_possible_steps, dtype=np.float64)
+        path_y = np.zeros(max_possible_steps, dtype=np.float64)
+        path_depth = np.zeros(max_possible_steps, dtype=np.float64)
+        path_direction = np.zeros(max_possible_steps, dtype=np.float64)
+        path_tube_width = np.zeros(max_possible_steps, dtype=np.float64)
+        path_Hs_local = np.zeros(max_possible_steps, dtype=np.float64)
 
         # Track rays individually when path tracking is needed
         start_time = time.time()
         rays_done = 0
+        all_distances = []
 
         for ray_idx in range(n_rays):
             original_ray_idx = self._total_rays_traced + ray_idx
@@ -1017,7 +1090,9 @@ class ForwardRayTracer:
                     self._point_grid_starts, self._point_grid_counts, self._point_grid_indices,
                     energy_grid, dir_x_grid, dir_y_grid, ray_counts,
                     path_x, path_y, path_depth, path_direction, path_tube_width, path_Hs_local,
-                    self.config.step_size_m, self.config.max_steps,
+                    self.config.max_distance_m,
+                    self.config.step_deep_m, self.config.step_10m_m,
+                    self.config.step_5m_m, self.config.step_3m_m,
                     self.config.kernel_sigma_m, self.config.min_tube_width_m,
                 )
 
@@ -1039,7 +1114,7 @@ class ForwardRayTracer:
                 all_broke.append(False)
             else:
                 # Use standard version (no path tracking)
-                steps, broke, _ = propagate_single_ray(
+                dist, broke, _ = propagate_single_ray(
                     rays.x[ray_idx], rays.y[ray_idx], rays.theta[ray_idx],
                     rays.power[ray_idx], rays.width[ray_idx], rays.period[ray_idx],
                     ma['points_x'], ma['points_y'],
@@ -1051,10 +1126,12 @@ class ForwardRayTracer:
                     ma['grid_cell_starts'], ma['grid_cell_counts'], ma['grid_triangles'],
                     self._point_grid_starts, self._point_grid_counts, self._point_grid_indices,
                     energy_grid, dir_x_grid, dir_y_grid, ray_counts,
-                    self.config.step_size_m, self.config.max_steps,
+                    self.config.max_distance_m,
+                    self.config.step_deep_m, self.config.step_10m_m,
+                    self.config.step_5m_m, self.config.step_3m_m,
                     self.config.kernel_sigma_m, self.config.min_tube_width_m,
                 )
-                all_steps.append(steps)
+                all_distances.append(dist)
                 all_broke.append(broke)
 
             # Progress update (every batch_size rays)
@@ -1074,12 +1151,12 @@ class ForwardRayTracer:
 
         # Report statistics
         n_broke = sum(all_broke)
-        avg_steps = np.mean(all_steps) if all_steps else 0
+        avg_dist = np.mean(all_distances) if all_distances else 0
         n_sampled = len(sample_indices)
         if self.track_paths and n_sampled > 0:
-            print(f"    Avg steps: {avg_steps:.1f}, Sampled paths: {n_sampled:,} ({100*n_sampled/n_rays:.1f}%)")
+            print(f"    Avg distance: {avg_dist:.0f}m, Sampled paths: {n_sampled:,} ({100*n_sampled/n_rays:.1f}%)")
         else:
-            print(f"    Avg steps: {avg_steps:.1f}")
+            print(f"    Avg distance: {avg_dist:.0f}m")
 
         return energy_grid, dir_x_grid, dir_y_grid, ray_counts
 
