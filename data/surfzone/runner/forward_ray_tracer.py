@@ -31,6 +31,7 @@ from .wave_physics import (
 from .ray_tracer import (
     interpolate_depth_indexed,
     celerity_gradient_indexed,
+    celerity_gradient_smoothed,
 )
 
 if TYPE_CHECKING:
@@ -63,6 +64,18 @@ class ForwardTracerConfig:
 
     # Tube width
     min_tube_width_m: float = 1.0  # Minimum tube width (prevent collapse)
+
+    # Physics-based refraction limits (prevents ray "parking" on steep bathymetry)
+    # Minimum curvature radius = wavelength (ray theory breaks down below this)
+    # CFL: step size = fraction of curvature radius for numerical stability
+    cfl_curvature_fraction: float = 0.1  # Step ≤ 10% of curvature radius
+    min_curvature_step_m: float = 1.0    # Floor on step size (meters)
+
+    # Wavelength-dependent gradient smoothing
+    # Long-period waves "see" smoother bathymetry than short-period waves
+    # Based on WKB validity: bathymetry should vary slowly relative to wavelength
+    gradient_min_smooth_m: float = 25.0    # Minimum smoothing radius (m)
+    gradient_smooth_fraction: float = 0.25  # Fraction of wavelength (L/4)
 
 
 @dataclass
@@ -536,6 +549,12 @@ def propagate_single_ray(
     step_3m: float,
     kernel_sigma: float,
     min_width: float,
+    # Physics-based refraction limits
+    cfl_curvature_fraction: float,
+    min_curvature_step: float,
+    # Wavelength-dependent gradient smoothing
+    gradient_min_smooth: float,
+    gradient_smooth_fraction: float,
 ) -> Tuple[float, bool, float]:
     """
     Propagate a single ray and deposit energy density at each step.
@@ -635,26 +654,51 @@ def propagate_single_ray(
                 kernel_sigma, nearby,
             )
 
-        # 8. Compute refraction (celerity gradients)
-        dC_dx, dC_dy = celerity_gradient_indexed(
-            x, y, period, L0,
+        # 8. Compute refraction (celerity gradients with wavelength-dependent smoothing)
+        dC_dx, dC_dy = celerity_gradient_smoothed(
+            x, y, period, L0, L,
             points_x, points_y, depth, triangles,
             grid_x_min, grid_y_min, grid_cell_size,
             grid_n_cells_x, grid_n_cells_y,
             grid_cell_starts, grid_cell_counts, grid_triangles,
+            gradient_min_smooth, gradient_smooth_fraction,
         )
 
-        # 9. Update direction (forward refraction - no negation needed)
+        # 9. Apply physics-based refraction limits
+        # Compute perpendicular gradient magnitude
+        dC_dn = -dy * dC_dx + dx * dC_dy
+        dC_dn_mag = abs(dC_dn)
+
+        if C > 0 and dC_dn_mag > 0:
+            # Compute curvature radius: R = C / |dC/dn|
+            curvature_radius = C / dC_dn_mag
+
+            # Physical limit: minimum curvature radius = wavelength
+            # Ray theory breaks down below R = L (waves diffract, don't refract sharply)
+            if curvature_radius < L:
+                curvature_radius = L
+                # Clamp the gradient to enforce minimum radius
+                dC_dn_mag = C / L
+                dC_dn = np.sign(dC_dn) * dC_dn_mag if dC_dn != 0 else 0.0
+
+            # CFL condition: step size should be fraction of curvature radius
+            cfl_max_step = cfl_curvature_fraction * curvature_radius
+            cfl_max_step = max(cfl_max_step, min_curvature_step)
+            if current_step > cfl_max_step:
+                current_step = cfl_max_step
+                # Recompute area with adjusted step
+                area = width * current_step
+
+        # 10. Update direction using (possibly clamped) gradient
         if C > 0:
-            dC_dn = -dy * dC_dx + dx * dC_dy
             dtheta = -(current_step / C) * dC_dn
             theta += dtheta
 
-            # 10. Update tube width: dW/ds = W × dθ/ds
+            # 11. Update tube width: dW/ds = W × dθ/ds
             width += width * dtheta
             width = max(width, min_width)
 
-        # 11. Move ray forward
+        # 12. Move ray forward
         x += dx * current_step
         y += dy * current_step
         distance_traveled += current_step
@@ -710,6 +754,12 @@ def propagate_single_ray_with_path(
     step_3m: float,
     kernel_sigma: float,
     min_width: float,
+    # Physics-based refraction limits
+    cfl_curvature_fraction: float,
+    min_curvature_step: float,
+    # Wavelength-dependent gradient smoothing
+    gradient_min_smooth: float,
+    gradient_smooth_fraction: float,
 ) -> int:
     """
     Propagate a single ray, deposit energy, and record path.
@@ -797,24 +847,44 @@ def propagate_single_ray_with_path(
                 kernel_sigma, nearby,
             )
 
-        # 8. Compute refraction
-        dC_dx, dC_dy = celerity_gradient_indexed(
-            x, y, period, L0,
+        # 8. Compute refraction (with wavelength-dependent smoothing)
+        dC_dx, dC_dy = celerity_gradient_smoothed(
+            x, y, period, L0, L,
             points_x, points_y, depth, triangles,
             grid_x_min, grid_y_min, grid_cell_size,
             grid_n_cells_x, grid_n_cells_y,
             grid_cell_starts, grid_cell_counts, grid_triangles,
+            gradient_min_smooth, gradient_smooth_fraction,
         )
 
-        # 9. Update direction and width
+        # 9. Apply physics-based refraction limits
+        dC_dn = -dy * dC_dx + dx * dC_dy
+        dC_dn_mag = abs(dC_dn)
+
+        if C > 0 and dC_dn_mag > 0:
+            curvature_radius = C / dC_dn_mag
+
+            # Physical limit: minimum curvature radius = wavelength
+            if curvature_radius < L:
+                curvature_radius = L
+                dC_dn_mag = C / L
+                dC_dn = np.sign(dC_dn) * dC_dn_mag if dC_dn != 0 else 0.0
+
+            # CFL: step size should be fraction of curvature radius
+            cfl_max_step = cfl_curvature_fraction * curvature_radius
+            cfl_max_step = max(cfl_max_step, min_curvature_step)
+            if current_step > cfl_max_step:
+                current_step = cfl_max_step
+                area = width * current_step
+
+        # 10. Update direction and width
         if C > 0:
-            dC_dn = -dy * dC_dx + dx * dC_dy
             dtheta = -(current_step / C) * dC_dn
             theta += dtheta
             width += width * dtheta
             width = max(width, min_width)
 
-        # 10. Move ray forward
+        # 11. Move ray forward
         x += dx * current_step
         y += dy * current_step
         distance_traveled += current_step
@@ -860,6 +930,12 @@ def propagate_all_rays(
     step_3m: float,
     kernel_sigma: float,
     min_width: float,
+    # Physics-based refraction limits
+    cfl_curvature_fraction: float,
+    min_curvature_step: float,
+    # Wavelength-dependent gradient smoothing
+    gradient_min_smooth: float,
+    gradient_smooth_fraction: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Propagate all rays in parallel and deposit energy.
@@ -904,6 +980,8 @@ def propagate_all_rays(
             energy_grid, dir_x_grid, dir_y_grid, ray_counts,
             max_distance, step_deep, step_10m, step_5m, step_3m,
             kernel_sigma, min_width,
+            cfl_curvature_fraction, min_curvature_step,
+            gradient_min_smooth, gradient_smooth_fraction,
         )
         distances_traveled[ray_idx] = dist
         broke_flags[ray_idx] = broke
@@ -1094,6 +1172,8 @@ class ForwardRayTracer:
                     self.config.step_deep_m, self.config.step_10m_m,
                     self.config.step_5m_m, self.config.step_3m_m,
                     self.config.kernel_sigma_m, self.config.min_tube_width_m,
+                    self.config.cfl_curvature_fraction, self.config.min_curvature_step_m,
+                    self.config.gradient_min_smooth_m, self.config.gradient_smooth_fraction,
                 )
 
                 # Store the path data (copy the valid portion)
@@ -1130,6 +1210,8 @@ class ForwardRayTracer:
                     self.config.step_deep_m, self.config.step_10m_m,
                     self.config.step_5m_m, self.config.step_3m_m,
                     self.config.kernel_sigma_m, self.config.min_tube_width_m,
+                    self.config.cfl_curvature_fraction, self.config.min_curvature_step_m,
+                    self.config.gradient_min_smooth_m, self.config.gradient_smooth_fraction,
                 )
                 all_distances.append(dist)
                 all_broke.append(broke)

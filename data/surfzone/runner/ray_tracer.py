@@ -434,6 +434,118 @@ def celerity_gradient_indexed(
 
 
 @njit(cache=True)
+def celerity_gradient_smoothed(
+    x: float,
+    y: float,
+    T: float,
+    L0: float,
+    L_local: float,
+    points_x: np.ndarray,
+    points_y: np.ndarray,
+    depth: np.ndarray,
+    triangles: np.ndarray,
+    grid_x_min: float,
+    grid_y_min: float,
+    grid_cell_size: float,
+    grid_n_cells_x: int,
+    grid_n_cells_y: int,
+    grid_cell_starts: np.ndarray,
+    grid_cell_counts: np.ndarray,
+    grid_triangles: np.ndarray,
+    min_smooth_radius: float = 10.0,
+    smooth_fraction: float = 0.25,
+) -> Tuple[float, float]:
+    """
+    Calculate celerity gradient with wavelength-adaptive smoothing.
+
+    The smoothing radius adapts with local wavelength:
+        smooth_radius = max(L_local * smooth_fraction, min_smooth_radius)
+
+    This makes long-period waves less sensitive to small-scale bathymetry
+    and short-period waves more responsive to fine features.
+
+    Based on WKB/ray theory validity: the approximation holds when bathymetry
+    varies slowly relative to wavelength. By sampling over a wavelength-scaled
+    distance, we effectively low-pass filter the bathymetry at the appropriate
+    scale for each wave period.
+
+    Args:
+        x, y: Query point in UTM
+        T: Wave period (s)
+        L0: Deep water wavelength (m)
+        L_local: Local wavelength (m) - determines smoothing scale
+        points_x, points_y: Mesh vertex coordinates
+        depth: Depth values at vertices
+        triangles: Triangle vertex indices
+        grid_*: Spatial index arrays
+        min_smooth_radius: Minimum smoothing radius (m), floor for short waves
+        smooth_fraction: Fraction of wavelength to use (0.25 = L/4)
+
+    Returns:
+        Tuple of (dC/dx, dC/dy) - celerity gradients
+    """
+    # Adaptive smoothing radius based on local wavelength
+    # Long-period waves sample further apart, short waves use minimum
+    smooth_radius = L_local * smooth_fraction
+    if smooth_radius < min_smooth_radius:
+        smooth_radius = min_smooth_radius
+
+    h_step = smooth_radius
+
+    # Sample depths at center and 4 cardinal directions
+    d_c = interpolate_depth_indexed(
+        x, y, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+    d_xp = interpolate_depth_indexed(
+        x + h_step, y, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+    d_xm = interpolate_depth_indexed(
+        x - h_step, y, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+    d_yp = interpolate_depth_indexed(
+        x, y + h_step, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+    d_ym = interpolate_depth_indexed(
+        x, y - h_step, points_x, points_y, depth, triangles,
+        grid_x_min, grid_y_min, grid_cell_size, grid_n_cells_x, grid_n_cells_y,
+        grid_cell_starts, grid_cell_counts, grid_triangles
+    )
+
+    if np.isnan(d_c) or d_c <= 0:
+        return 0.0, 0.0
+
+    # dC/dx
+    if not np.isnan(d_xp) and not np.isnan(d_xm) and d_xp > 0 and d_xm > 0:
+        L_xp = local_wavelength_fenton_mckee(L0, d_xp)
+        L_xm = local_wavelength_fenton_mckee(L0, d_xm)
+        C_xp = local_celerity(L_xp, T)
+        C_xm = local_celerity(L_xm, T)
+        dC_dx = (C_xp - C_xm) / (2.0 * h_step)
+    else:
+        dC_dx = 0.0
+
+    # dC/dy
+    if not np.isnan(d_yp) and not np.isnan(d_ym) and d_yp > 0 and d_ym > 0:
+        L_yp = local_wavelength_fenton_mckee(L0, d_yp)
+        L_ym = local_wavelength_fenton_mckee(L0, d_ym)
+        C_yp = local_celerity(L_yp, T)
+        C_ym = local_celerity(L_ym, T)
+        dC_dy = (C_yp - C_ym) / (2.0 * h_step)
+    else:
+        dC_dy = 0.0
+
+    return dC_dx, dC_dy
+
+
+@njit(cache=True)
 def trace_single_ray(
     start_x: float,
     start_y: float,
