@@ -144,6 +144,45 @@ class DataManager:
         return self._cache[key]
 
     # -----------------------------------------------------------------
+    # Statistics
+    # -----------------------------------------------------------------
+
+    def get_statistics(self, region: str):
+        """Load statistics_latest.csv for a region (cached)."""
+        key = ('statistics', region)
+        if key not in self._cache:
+            import pandas as pd
+
+            stats_path = (
+                self._project_root / "data" / "surfzone" / "output"
+                / region / "statistics_latest.csv"
+            )
+            if stats_path.exists():
+                self._cache[key] = pd.read_csv(stats_path)
+            else:
+                self._cache[key] = None
+        return self._cache[key]
+
+    def get_spot_aggregator(self, region: str):
+        """Get (or create) SpotStatisticsAggregator for a region (cached)."""
+        key = ('spot_aggregator', region)
+        if key not in self._cache:
+            from data.spots.spot_statistics import SpotStatisticsAggregator
+
+            stats_df = self.get_statistics(region)
+            try:
+                result = self.get_result(region)
+                mesh = self.get_mesh(region)
+            except Exception:
+                result = None
+                mesh = None
+            if stats_df is not None and result is not None and mesh is not None:
+                self._cache[key] = SpotStatisticsAggregator(stats_df, result, mesh)
+            else:
+                self._cache[key] = None
+        return self._cache[key]
+
+    # -----------------------------------------------------------------
     # Buoy Data (NDBC + CDIP with partitioned spectral data)
     # -----------------------------------------------------------------
 

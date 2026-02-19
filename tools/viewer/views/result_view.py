@@ -21,6 +21,7 @@ from tools.viewer.views.base import BaseView
 from tools.viewer.config import (
     WAVE_CMAP, NO_WAVE_COLOR, COASTLINE_COLOR, DARK_BG, SIDEBAR_BG,
     PARTITION_COLORS, PARTITION_LABELS,
+    SPOT_BBOX_COLOR, SPOT_BBOX_DASH, SPOT_BBOX_WIDTH,
 )
 from tools.viewer.components.colorbar import create_matplotlib_colorbar
 from tools.viewer.components.point_inspector import PointInspector
@@ -39,6 +40,14 @@ class ResultView(BaseView):
         )
         self._show_rays.param.watch(self._on_ray_toggle, 'value')
         self._n_rays.param.watch(self._on_ray_toggle, 'value')
+        # Spot selector
+        self._spot_selector = pn.widgets.Select(
+            name='Surf Spot', options=['(none)'], value='(none)', width=260,
+        )
+        self._spot_stats_html = pn.pane.HTML("", width=280)
+        self._spot_selector.param.watch(self._on_spot_change, 'value')
+        self._spots_list = []  # Populated in update()
+        self._selected_spot = None
         # Store state for re-renders
         self._current_use_lonlat = False
 
@@ -46,11 +55,141 @@ class ResultView(BaseView):
         """Reload result data and rebuild the plot."""
         self.region = region
         self._current_use_lonlat = kwargs.get('use_lonlat', False)
+
+        # Load spots for this region
+        spots = self.data_manager.get_spots(region)
+        self._spots_list = spots
+        if spots:
+            self._spot_selector.options = ['(none)'] + [s.display_name for s in spots]
+            self._spot_selector.value = '(none)'
+        else:
+            self._spot_selector.options = ['(none)']
+        self._selected_spot = None
+        self._spot_stats_html.object = ""
+
         self._rebuild_plot()
 
     def _on_ray_toggle(self, event):
         """Re-render when ray visibility changes."""
         self._rebuild_plot()
+
+    def _on_spot_change(self, event):
+        """Update stats panel and rebuild plot when spot selection changes."""
+        if event.new == '(none)':
+            self._selected_spot = None
+            self._spot_stats_html.object = ""
+        else:
+            # Find the spot by display_name
+            spot = next((s for s in self._spots_list if s.display_name == event.new), None)
+            self._selected_spot = spot
+            if spot:
+                self._update_spot_stats(spot)
+        self._rebuild_plot()
+
+    def _update_spot_stats(self, spot):
+        """Compute and display aggregated statistics for a spot."""
+        aggregator = self.data_manager.get_spot_aggregator(self.region)
+        if aggregator is None:
+            self._spot_stats_html.object = (
+                f"<div style='color: #ff8888; padding: 10px; font-size: 11px;'>"
+                f"Statistics not available. Run:<br>"
+                f"<code>python data/surfzone/statistics/run_statistics.py --region {self.region}</code>"
+                f"</div>"
+            )
+            return
+
+        summary = aggregator.aggregate(spot)
+        self._spot_stats_html.object = self._format_spot_stats_html(summary)
+
+    def _format_spot_stats_html(self, s):
+        """Render SpotStatsSummary as styled HTML."""
+        import math
+
+        bb = s.spot.bbox
+
+        def fmt(val, fmt_str=".2f", suffix=""):
+            """Format a value, returning 'N/A' for NaN."""
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                return "N/A"
+            return f"{val:{fmt_str}}{suffix}"
+
+        def fmt_time(seconds):
+            """Format seconds as 'Xs (Y.Z min)' or just 'Xs'."""
+            if seconds is None or (isinstance(seconds, float) and math.isnan(seconds)):
+                return "N/A"
+            if seconds >= 60:
+                return f"{seconds:.0f}s ({seconds/60:.1f} min)"
+            return f"{seconds:.0f}s"
+
+        # Groupiness interpretation
+        gf = s.groupiness_factor_mean
+        if isinstance(gf, float) and not math.isnan(gf):
+            if gf < 0.7:
+                g_label = "choppy/disorganized"
+            elif gf < 1.0:
+                g_label = "moderate grouping"
+            elif gf < 1.2:
+                g_label = "well-defined sets"
+            else:
+                g_label = "very clean swell"
+        else:
+            g_label = ""
+
+        g_text = f"{fmt(gf)}" + (f" ({g_label})" if g_label else "")
+
+        html = f"""
+        <div style="color: white; font-size: 11px; padding: 10px;
+                    background: {SIDEBAR_BG}; border-radius: 5px;
+                    max-height: 400px; overflow-y: auto;">
+            <b style="font-size: 13px;">{s.spot.display_name}</b><br>
+            <span style="color: #888;">{bb.lat_min:.3f}-{bb.lat_max:.3f}°N, {abs(bb.lon_min):.3f}-{abs(bb.lon_max):.3f}°W</span><br>
+            <span style="color: #888;">Points: {s.n_points:,} ({s.n_covered:,} covered)</span><br>
+            <hr style="border-color: #444;">
+
+            <b>Wave Height</b><br>
+            Min: {fmt(s.hs_min)} m &nbsp; Max: {fmt(s.hs_max)} m<br>
+            Mean: {fmt(s.hs_mean)} m &nbsp; Std: {fmt(s.hs_std)} m<br>
+
+            <br><b>Sets &amp; Timing</b><br>
+            Set period: {fmt_time(s.set_period_mean)}<br>
+            Waves per set: {fmt(s.waves_per_set_mean, '.1f')}<br>
+            Set duration: {fmt_time(s.set_duration_mean)}<br>
+            Lull duration: {fmt_time(s.lull_duration_mean)}<br>
+
+            <br><b>Wave Quality</b><br>
+            Height amplification: {fmt(s.height_amplification_mean)}x<br>
+            Groupiness: {g_text}<br>
+            Steepness: {fmt(s.dominant_steepness, '.4f')}<br>
+            Wavelength: {fmt(s.dominant_wavelength, '.1f')} m<br>
+
+            <br><b>Depth</b><br>
+            Range: {fmt(s.depth_min)} - {fmt(s.depth_max)} m &nbsp; Mean: {fmt(s.depth_mean)} m<br>
+        </div>
+        """
+        return html
+
+    def _build_spot_overlay(self, spot, use_lonlat, mesh):
+        """Build HoloViews overlay for spot bounding box rectangle + label."""
+        bb = spot.bbox
+        if use_lonlat:
+            x0, y0 = bb.lon_min, bb.lat_min
+            x1, y1 = bb.lon_max, bb.lat_max
+        else:
+            corners_lon = np.array([bb.lon_min, bb.lon_max, bb.lon_max, bb.lon_min, bb.lon_min])
+            corners_lat = np.array([bb.lat_min, bb.lat_min, bb.lat_max, bb.lat_max, bb.lat_min])
+            cx, cy = mesh.lon_lat_to_utm(corners_lon, corners_lat)
+            x0, y0 = cx[0], cy[0]
+            x1, y1 = cx[2], cy[2]
+
+        rect_path = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]])
+        rect = hv.Path([rect_path]).opts(
+            color=SPOT_BBOX_COLOR, line_width=SPOT_BBOX_WIDTH, line_dash=SPOT_BBOX_DASH,
+        )
+        label = hv.Text((x0 + x1) / 2, y1, spot.display_name).opts(
+            color=SPOT_BBOX_COLOR, text_font_size='9pt',
+            text_align='center', text_baseline='bottom',
+        )
+        return rect * label
 
     def _rebuild_plot(self):
         """Build the full Datashader result plot."""
@@ -156,6 +295,11 @@ class ResultView(BaseView):
             ray_overlay = self._build_ray_overlay(use_lonlat, mesh)
             if ray_overlay is not None:
                 plot = plot * ray_overlay
+
+        # Spot bbox overlay
+        if self._selected_spot is not None:
+            spot_overlay = self._build_spot_overlay(self._selected_spot, use_lonlat, mesh)
+            plot = plot * spot_overlay
 
         # Click marker
         tap = streams.SingleTap(x=None, y=None)
@@ -369,10 +513,20 @@ class ResultView(BaseView):
             self._n_rays,
             width=260,
         )
+
+        spot_controls = pn.Column(
+            pn.pane.Markdown("### Surf Spots"),
+            self._spot_selector,
+            self._spot_stats_html,
+            width=280,
+        )
+
         return pn.Row(
             self._plot_pane,
             self._colorbar_col,
             pn.Column(
+                spot_controls,
+                pn.Spacer(height=10),
                 pn.pane.Markdown("### Point Inspector"),
                 self._inspector_pane,
                 pn.Spacer(height=10),

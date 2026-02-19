@@ -76,3 +76,8 @@ WAVE_TYPE_COLORS = {
     'short_swell': '#ffff66',         # Yellow
     'wind_waves': '#ff9966',          # Orange
 }
+
+# Spot overlay styling
+SPOT_BBOX_COLOR = 'white'
+SPOT_BBOX_DASH = 'dashed'
+SPOT_BBOX_WIDTH = 2
