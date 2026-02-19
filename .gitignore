@@ -17,6 +17,11 @@ env/
 ENV/
 .env/
 
+# Claude Code
+.claude/skills/
+.claude/settings.local.json
+.agents/
+
 # IDEs
 .vscode/
 .idea/
