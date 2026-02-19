@@ -41,39 +41,11 @@ SurflieModel/
 │   │   ├── central/          # coarse, fine
 │   │   └── norcal/           # coarse, fine
 │   │
-│   ├── swan/                 # SWAN model data
-│   │   ├── runs/             # SWAN run outputs (by region)
-│   │   │   ├── socal/{resolution}/latest/
-│   │   │   ├── central/{resolution}/latest/
-│   │   │   └── norcal/{resolution}/latest/
-│   │   ├── ww3_endpoints/    # WW3 boundary extraction points
-│   │   │   └── {region}/ww3_boundaries.json
-│   │   └── run_swan.py       # SWAN runner script
-│   │
-│   ├── surfzone/             # Surfzone wave modeling
-│   │   ├── mesh.py           # SurfZoneMesh class
-│   │   ├── meshes/           # Generated surfzone meshes (by region)
-│   │   │   └── {region}/     # socal/, central/, norcal/
-│   │   ├── output/           # Simulation results (by region)
-│   │   │   └── {region}/     # socal/, central/, norcal/
-│   │   └── runner/           # Ray tracing engine
-│   │       ├── run_simulation.py      # Main simulation CLI
-│   │       ├── surfzone_runner.py     # Runner orchestration
-│   │       ├── forward_ray_tracer.py  # Forward ray tracer with energy deposition
-│   │       ├── wave_physics.py        # Numba wave physics
-│   │       ├── swan_input_provider.py # SWAN boundary conditions
-│   │       ├── surfzone_result.py     # Result dataclasses
-│   │       └── output_writer.py       # Results storage
-│   │
-│   ├── pipelines/            # Data fetching pipelines
-│   │   ├── noaa/             # NOAA data (tides, WW3, GFS)
-│   │   ├── wave/             # WaveWatch III fetcher
-│   │   ├── wind/             # GFS wind fetcher
-│   │   ├── buoy/             # NDBC buoy fetcher
-│   │   └── ocean_tiles/      # RTOFS ocean current fetcher
-│   │
-│   ├── storage/              # Data storage utilities
-│   └── cache/                # Cached data
+│   ├── swan/                 # SWAN model (see memory/data-pipelines.md)
+│   ├── surfzone/             # Surfzone modeling (see memory/surfzone-physics.md)
+│   ├── pipelines/            # Data fetching (see memory/data-pipelines.md)
+│   ├── storage/              # Optional Zarr stores
+│   └── cache/                # Cached GRIB/NetCDF data
 │
 ├── data/spots/                # Surf spot definitions (JSON per region)
 │   ├── spot.py               # SurfSpot/BoundingBox classes
@@ -115,30 +87,7 @@ California is divided into three modeling regions:
 
 ### Surfzone Wave Modeling (`data/surfzone/`)
 
-The surfzone module uses **forward ray tracing with energy deposition** to propagate waves from the SWAN boundary into the surfzone.
-
-**Key Components:**
-
-- **SurfZoneMesh** (`mesh.py`): Coastline-following mesh with bathymetry and spatial index
-- **ForwardRayTracer** (`runner/forward_ray_tracer.py`): Forward ray tracing with energy deposition
-- **ForwardSurfzoneRunner** (`runner/surfzone_runner.py`): Simulation orchestrator
-- **wave_physics.py**: Numba-accelerated physics (shoaling, refraction, breaking)
-
-**Running Simulations:**
-
-```bash
-# List available regions
-python data/surfzone/runner/run_simulation.py --list-regions
-
-# Run forward ray tracing (recommended)
-python data/surfzone/runner/run_simulation.py --region socal --mode forward
-
-# Configure ray density
-python data/surfzone/runner/run_simulation.py --region socal --mode forward --boundary-spacing 100 --rays-per-point 32
-
-# View results
-python scripts/dev/view_surfzone_result.py --region socal
-```
+Forward ray tracing with energy deposition. See `surfzone-physics.md` in memory for full details (components, commands, physics conventions).
 
 ## Data Flow
 
@@ -156,24 +105,6 @@ NOAA WaveWatch III (global)
 ## Surf Spot Configuration
 
 Spots defined in `data/spots/{region}.json`. Each spot has name, display name, and bounding box. Classes: `SurfSpot` and `BoundingBox` in `data/spots/spot.py`. Load with `load_spots_config("socal")`.
-
-## Surfzone Physics Conventions
-
-**Direction conventions:**
-- SWAN outputs: nautical "coming FROM" (0=N, 90=E, clockwise)
-- Ray tracer internal: math convention (0=E, counterclockwise)
-- Conversion: `nautical_to_math()` / `math_to_nautical()` in `wave_physics.py`
-
-**Coordinate systems:**
-- GEBCO bathymetry and spot configs: lat/lon (WGS84)
-- SurfZoneMesh and ray tracer: UTM (meters), converted via pyproj
-
-**Energy conservation:** Power P = E × Cg × W conserved along each ray. Local Hs = sqrt(8E / (ρg)).
-
-**Numba constraints** (`@njit` in `wave_physics.py`, `forward_ray_tracer.py`):
-- No Python objects in `@njit` functions - NumPy arrays and scalars only
-- `prange` for parallel loops - no shared mutable state
-- Delete `__pycache__` if Numba cache becomes stale
 
 ## Development Notes
 
@@ -215,37 +146,16 @@ cd apps/mobile && npx expo start
 pytest backend/ packages/python/
 ```
 
-### Surfzone Simulation Workflow
-
-```bash
-# 1. Generate surfzone mesh for a region
-python scripts/generate_surfzone_mesh.py socal
-
-# 2. Run SWAN model (requires WW3 boundary data)
-python data/swan/run_swan.py --region socal --mesh coarse
-
-# 3. Run surfzone simulation (forward mode)
-python data/surfzone/runner/run_simulation.py --region socal --mode forward
-
-# 4. View results
-python scripts/dev/view_surfzone_result.py --region socal
-```
-
 ## Notes for Claude
 
 1. **GEBCO data**: Located at `data/raw/bathymetry/gebco_2024/gebco_2024_california.nc`
 2. **OOP approach**: Use classes for new functionality
 3. **Build incrementally**: Work closely with user to design and implement features
-4. **Data fetching is done**: Don't modify pipelines in `data/pipelines/` unless asked
+4. **Data fetching is done**: Don't modify pipelines unless asked. See `data-pipelines.md` in memory for pipeline details
 5. **Frontend is stable**: The 4 heatmaps work - don't modify unless asked
 6. **Regions**: Three California regions defined in `data/regions/region.py`
 7. **Directory conventions**: All region-specific data follows `{base_path}/{region}/` pattern
-8. **Forward ray tracing**: Use `ForwardRayTracer` for wave propagation with energy deposition
-9. **Surfzone runner**: Use `run_simulation.py --region {name} --mode forward`
-10. **Direction conventions**: SWAN uses nautical FROM, ray tracer uses math convention - always convert
-11. **Coordinate systems**: Spots/GEBCO use lat/lon, surfzone mesh uses UTM meters
-12. **Numba code**: `@njit` functions can't use Python objects - only NumPy arrays and scalars
-13. **Energy conservation**: P = E × Cg × W must be conserved in ray tracing modifications
+8. **Surfzone details**: Physics, conventions, simulation workflow, Numba constraints — see `surfzone-physics.md` in memory
 
 ## Environment Setup
 
