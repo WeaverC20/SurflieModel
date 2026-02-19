@@ -1,0 +1,35 @@
+{
+  "region": "socal",
+  "spots": [
+    {
+      "name": "huntington_pier",
+      "display_name": "Huntington Beach Pier",
+      "bbox": {
+        "lat_min": 33.640,
+        "lat_max": 33.670,
+        "lon_min": -118.015,
+        "lon_max": -117.985
+      }
+    },
+    {
+      "name": "trestles",
+      "display_name": "Trestles",
+      "bbox": {
+        "lat_min": 33.370,
+        "lat_max": 33.395,
+        "lon_min": -117.600,
+        "lon_max": -117.575
+      }
+    },
+    {
+      "name": "blacks_beach",
+      "display_name": "Black's Beach",
+      "bbox": {
+        "lat_min": 32.878,
+        "lat_max": 32.900,
+        "lon_min": -117.260,
+        "lon_max": -117.245
+      }
+    }
+  ]
+}

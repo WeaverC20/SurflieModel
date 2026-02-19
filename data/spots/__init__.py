@@ -1,25 +1,13 @@
 """Surf spot definitions and utilities."""
 
 from data.spots.spot import (
+    BoundingBox,
     SurfSpot,
-    SpotForecast,
-    SPOTS,
-    SOCAL_SPOTS,
-    get_spot,
-    get_spots_for_region,
-    HUNTINGTON_PIER,
-    TRESTLES,
-    BLACKS_BEACH,
+    load_spots_config,
 )
 
 __all__ = [
+    "BoundingBox",
     "SurfSpot",
-    "SpotForecast",
-    "SPOTS",
-    "SOCAL_SPOTS",
-    "get_spot",
-    "get_spots_for_region",
-    "HUNTINGTON_PIER",
-    "TRESTLES",
-    "BLACKS_BEACH",
+    "load_spots_config",
 ]
