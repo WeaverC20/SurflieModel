@@ -143,7 +143,7 @@ class SwanView(BaseView):
         self._partition_widget = pn.widgets.Select.from_param(self.param.partition)
         self._resolution_widget = pn.widgets.Select.from_param(self.param.resolution)
         self._buoy_widget = pn.widgets.Checkbox.from_param(self.param.show_buoys)
-        self._buoy_status_html = pn.pane.HTML("", width=260)
+        self._buoy_status_html = pn.pane.HTML("", width=220)
 
     def update(self, region: str, **kwargs):
         """Reload SWAN data and rebuild the heatmap."""
@@ -394,9 +394,9 @@ class SwanView(BaseView):
             pn.Spacer(height=5),
             self._buoy_widget,
             self._buoy_status_html,
-            width=260,
+            width=220,
         )
         return pn.Row(
             self._plotly_pane,
-            pn.Column(controls, pn.Spacer(height=10), self._summary_html, width=280),
+            pn.Column(controls, pn.Spacer(height=10), self._summary_html, width=240),
         )

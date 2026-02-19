@@ -32,8 +32,8 @@ class ResultView(BaseView):
 
     def __init__(self, data_manager, **params):
         super().__init__(data_manager, **params)
-        self._inspector_pane = pn.pane.HTML("", width=280, sizing_mode='stretch_height')
-        self._colorbar_col = pn.Column(width=140)
+        self._inspector_pane = pn.pane.HTML("", width=240, sizing_mode='stretch_height')
+        self._colorbar_col = pn.Column(width=120)
         self._show_rays = pn.widgets.Checkbox(name='Show ray paths', value=False)
         self._n_rays = pn.widgets.IntSlider(
             name='Rays to show', start=10, end=1000, step=10, value=100,
@@ -42,9 +42,9 @@ class ResultView(BaseView):
         self._n_rays.param.watch(self._on_ray_toggle, 'value')
         # Spot selector
         self._spot_selector = pn.widgets.Select(
-            name='Surf Spot', options=['(none)'], value='(none)', width=260,
+            name='Surf Spot', options=['(none)'], value='(none)', width=220,
         )
-        self._spot_stats_html = pn.pane.HTML("", width=280)
+        self._spot_stats_html = pn.pane.HTML("", width=240)
         self._spot_selector.param.watch(self._on_spot_change, 'value')
         self._spots_list = []  # Populated in update()
         self._selected_spot = None
@@ -301,29 +301,38 @@ class ResultView(BaseView):
             spot_overlay = self._build_spot_overlay(self._selected_spot, use_lonlat, mesh)
             plot = plot * spot_overlay
 
-        # Click marker
+        # Click marker — handled at the Bokeh level via a hook so that
+        # tapping never triggers a HoloViews/datashader range recalculation.
         tap = streams.SingleTap(x=None, y=None)
 
-        def click_marker(x, y):
-            if x is None or y is None:
-                return hv.Points([]).opts(size=0)
-            return hv.Points([(x, y)]).opts(
-                size=15, color='red', marker='circle',
-                line_color='white', line_width=2,
-            )
+        def _add_tap_handler(plot_obj, element):
+            from bokeh.events import Tap as BokehTap
+            from bokeh.models import ColumnDataSource
+            from bokeh.models.callbacks import CustomJS
 
-        marker_dmap = hv.DynamicMap(click_marker, streams=[tap])
-        plot = plot * marker_dmap
+            fig = plot_obj.state
+            marker_src = ColumnDataSource(data={'x': [], 'y': []})
+            fig.scatter(
+                'x', 'y', source=marker_src, size=15,
+                fill_color='red', line_color='white', line_width=2,
+                level='overlay',
+            )
+            fig.js_on_event('tap', CustomJS(
+                args=dict(source=marker_src),
+                code="source.data = {'x': [cb_obj.x], 'y': [cb_obj.y]};",
+            ))
+            fig.on_event(BokehTap, lambda event: tap.event(x=event.x, y=event.y))
 
         plot = plot.opts(
-            width=1200,
-            height=800,
+            width=1000,
+            height=700,
             xlabel=x_label,
             ylabel=y_label,
-            tools=['wheel_zoom', 'pan', 'reset', 'box_zoom', 'tap'],
+            tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
             active_tools=['wheel_zoom', 'pan'],
             bgcolor=DARK_BG,
             data_aspect=1,
+            hooks=[_add_tap_handler],
         )
 
         self._plot_pane.object = plot
@@ -416,8 +425,8 @@ class ResultView(BaseView):
         # Colorbar
         wave_cb = create_matplotlib_colorbar(0, h_max, 'Hs (m)', WAVE_CMAP, height=300)
         self._colorbar_col = pn.Column(
-            pn.pane.HTML(wave_cb, width=120, height=350),
-            width=140,
+            pn.pane.HTML(wave_cb, width=100, height=350),
+            width=120,
         )
 
         # Summary
@@ -511,14 +520,14 @@ class ResultView(BaseView):
             pn.pane.Markdown("**Ray Paths**"),
             self._show_rays,
             self._n_rays,
-            width=260,
+            width=220,
         )
 
         spot_controls = pn.Column(
             pn.pane.Markdown("### Surf Spots"),
             self._spot_selector,
             self._spot_stats_html,
-            width=280,
+            width=240,
         )
 
         return pn.Row(
@@ -533,6 +542,6 @@ class ResultView(BaseView):
                 ray_controls,
                 pn.Spacer(height=10),
                 self._summary_html,
-                width=300,
+                width=260,
             ),
         )

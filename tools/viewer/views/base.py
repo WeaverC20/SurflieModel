@@ -20,7 +20,7 @@ class BaseView(param.Parameterized):
         super().__init__(**params)
         self.data_manager = data_manager
         self._plot_pane = pn.pane.HoloViews(None, sizing_mode='fixed')
-        self._summary_html = pn.pane.HTML("", width=280)
+        self._summary_html = pn.pane.HTML("", width=240)
 
     def update(self, region: str, **kwargs):
         """Reload data and rebuild the plot for a new region or settings."""

@@ -89,6 +89,6 @@ class PointInspector:
         """Return a Panel pane that updates on click."""
         return pn.pane.HTML(
             pn.bind(self._get_info_html, self.tap.param.x, self.tap.param.y),
-            width=280,
+            width=240,
             sizing_mode='stretch_height',
         )

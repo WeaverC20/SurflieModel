@@ -72,7 +72,7 @@ class DevViewerApp(param.Parameterized):
         dtype_widget = pn.widgets.Select.from_param(self.param.data_type, name='Data Type')
         lonlat_widget = pn.widgets.Checkbox.from_param(self.param.use_lonlat)
 
-        availability = pn.pane.HTML(self._data_availability_html(), width=200)
+        availability = pn.pane.HTML(self._data_availability_html(), width=160)
 
         # Active view's summary
         active_view = self.views[self.data_type]
@@ -96,8 +96,8 @@ class DevViewerApp(param.Parameterized):
             pn.Spacer(height=10),
             availability,
             pn.Spacer(height=10),
-            pn.pane.HTML(legend_html, width=200),
-            width=230,
+            pn.pane.HTML(legend_html, width=160),
+            width=180,
         )
 
     def servable(self):

@@ -62,8 +62,8 @@ class MeshView(BaseView):
 
     def __init__(self, data_manager, **params):
         super().__init__(data_manager, **params)
-        self._inspector_pane = pn.pane.HTML("", width=280, sizing_mode='stretch_height')
-        self._colorbar_col = pn.Column(width=140)
+        self._inspector_pane = pn.pane.HTML("", width=240, sizing_mode='stretch_height')
+        self._colorbar_col = pn.Column(width=120)
 
     def update(self, region: str, **kwargs):
         """Reload mesh data and rebuild the Datashader plot."""
@@ -153,29 +153,38 @@ class MeshView(BaseView):
             )
             plot = plot * coastline_overlay
 
-        # Click marker via SingleTap
+        # Click marker — handled at the Bokeh level via a hook so that
+        # tapping never triggers a HoloViews/datashader range recalculation.
         tap = streams.SingleTap(x=None, y=None)
 
-        def click_marker(x, y):
-            if x is None or y is None:
-                return hv.Points([]).opts(size=0)
-            return hv.Points([(x, y)]).opts(
-                size=15, color='red', marker='circle',
-                line_color='white', line_width=2,
-            )
+        def _add_tap_handler(plot_obj, element):
+            from bokeh.events import Tap as BokehTap
+            from bokeh.models import ColumnDataSource
+            from bokeh.models.callbacks import CustomJS
 
-        marker_dmap = hv.DynamicMap(click_marker, streams=[tap])
-        plot = plot * marker_dmap
+            fig = plot_obj.state
+            marker_src = ColumnDataSource(data={'x': [], 'y': []})
+            fig.scatter(
+                'x', 'y', source=marker_src, size=15,
+                fill_color='red', line_color='white', line_width=2,
+                level='overlay',
+            )
+            fig.js_on_event('tap', CustomJS(
+                args=dict(source=marker_src),
+                code="source.data = {'x': [cb_obj.x], 'y': [cb_obj.y]};",
+            ))
+            fig.on_event(BokehTap, lambda event: tap.event(x=event.x, y=event.y))
 
         plot = plot.opts(
-            width=1200,
-            height=800,
+            width=1000,
+            height=700,
             xlabel=x_label,
             ylabel=y_label,
-            tools=['wheel_zoom', 'pan', 'reset', 'box_zoom', 'tap'],
+            tools=['wheel_zoom', 'pan', 'reset', 'box_zoom'],
             active_tools=['wheel_zoom', 'pan'],
             bgcolor=DARK_BG,
             data_aspect=1,
+            hooks=[_add_tap_handler],
         )
 
         self._plot_pane.object = plot
@@ -315,10 +324,10 @@ class MeshView(BaseView):
         ocean_cb = create_matplotlib_colorbar(0, depth_max, 'Ocean Depth (m)', OCEAN_CMAP, height=300)
         land_cb = create_matplotlib_colorbar(0, land_max, 'Land Elevation (m)', LAND_CMAP, height=150)
         self._colorbar_col = pn.Column(
-            pn.pane.HTML(ocean_cb, width=120, height=350),
+            pn.pane.HTML(ocean_cb, width=100, height=350),
             pn.Spacer(height=20),
-            pn.pane.HTML(land_cb, width=120, height=200),
-            width=140,
+            pn.pane.HTML(land_cb, width=100, height=200),
+            width=120,
         )
 
         # Summary stats
@@ -366,6 +375,6 @@ class MeshView(BaseView):
                 self._inspector_pane,
                 pn.Spacer(height=10),
                 self._summary_html,
-                width=300,
+                width=260,
             ),
         )
