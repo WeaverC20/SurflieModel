@@ -12,6 +12,7 @@ Supports:
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -93,6 +94,7 @@ class SwanOutput:
     region_name: str
     exception_value: float = -99.0
     partitions: List[WavePartitionGrid] = field(default_factory=list)
+    run_timestamp: Optional[datetime] = None
 
     def mask_land(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -182,6 +184,26 @@ class SwanOutputReader:
 
         # Load mesh metadata from INPUT file comments or find mesh JSON
         self.mesh_metadata = self._load_mesh_metadata()
+
+    def _parse_run_timestamp(self) -> Optional[datetime]:
+        """Parse the SWAN run timestamp from the INPUT file header.
+
+        Looks for: $ SWAN INPUT file generated 2026-01-21T12:37:36.590017
+        """
+        input_file = self.run_dir / "INPUT"
+        if not input_file.exists():
+            return None
+        try:
+            with open(input_file) as f:
+                first_line = f.readline().strip()
+            # Expected: $ SWAN INPUT file generated 2026-01-21T12:37:36.590017
+            prefix = "$ SWAN INPUT file generated "
+            if first_line.startswith(prefix):
+                ts_str = first_line[len(prefix):]
+                return datetime.fromisoformat(ts_str)
+        except (ValueError, OSError) as e:
+            logger.warning(f"Could not parse SWAN run timestamp: {e}")
+        return None
 
     def _load_mesh_metadata(self) -> Dict:
         """Load mesh metadata from run directory or mesh directory."""
@@ -358,6 +380,9 @@ class SwanOutputReader:
         # Read partition data if available
         partitions = self._read_partitions()
 
+        # Parse run timestamp from INPUT file
+        run_timestamp = self._parse_run_timestamp()
+
         logger.info(f"Loaded SWAN output: {hsig.shape}")
 
         return SwanOutput(
@@ -369,7 +394,8 @@ class SwanOutputReader:
             mesh_name=self.mesh_metadata.get("name", "unknown"),
             region_name=self.mesh_metadata.get("region_name", "unknown"),
             exception_value=self.mesh_metadata.get("exception_value", -99.0),
-            partitions=partitions
+            partitions=partitions,
+            run_timestamp=run_timestamp,
         )
 
     def read_single(self, variable: str) -> np.ndarray:

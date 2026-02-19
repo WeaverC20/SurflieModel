@@ -4,7 +4,12 @@ Surfzone mesh view using Datashader + HoloViews.
 Ported from scripts/dev/view_surfzone_mesh_ds.py. Shows ocean points
 colored by depth and land points colored by elevation, with a coastline
 overlay and click-to-inspect via PointInspector.
+
+Click inspector shows SWAN swell partition data (Hs, Tp, Dir) at each
+mesh point via nearest-neighbor lookup on the SWAN grid.
 """
+
+import logging
 
 import numpy as np
 import pandas as pd
@@ -17,10 +22,39 @@ import panel as pn
 from tools.viewer.views.base import BaseView
 from tools.viewer.config import (
     OCEAN_CMAP, LAND_CMAP, COASTLINE_COLOR, DARK_BG, SIDEBAR_BG,
-    DEFAULT_DEPTH_MAX, DEFAULT_LAND_MAX,
+    DEFAULT_DEPTH_MAX, DEFAULT_LAND_MAX, PARTITION_COLORS,
 )
 from tools.viewer.components.colorbar import create_matplotlib_colorbar
 from tools.viewer.components.point_inspector import PointInspector
+
+logger = logging.getLogger(__name__)
+
+
+def _swan_nearest_indices(lons_query, lats_query, swan_lons, swan_lats):
+    """Vectorized nearest-neighbor lookup on a regular SWAN grid.
+
+    Returns (lon_indices, lat_indices) arrays matching the input query arrays.
+    Points outside the SWAN grid extent are clipped to the boundary.
+    """
+    lon_idx = np.searchsorted(swan_lons, lons_query).clip(0, len(swan_lons) - 1)
+    lat_idx = np.searchsorted(swan_lats, lats_query).clip(0, len(swan_lats) - 1)
+
+    # searchsorted finds insertion point; check if left neighbor is closer
+    lon_left = np.maximum(lon_idx - 1, 0)
+    closer_left_lon = (
+        np.abs(swan_lons[lon_left] - lons_query)
+        < np.abs(swan_lons[lon_idx] - lons_query)
+    )
+    lon_idx = np.where(closer_left_lon, lon_left, lon_idx)
+
+    lat_left = np.maximum(lat_idx - 1, 0)
+    closer_left_lat = (
+        np.abs(swan_lats[lat_left] - lats_query)
+        < np.abs(swan_lats[lat_idx] - lats_query)
+    )
+    lat_idx = np.where(closer_left_lat, lat_left, lat_idx)
+
+    return lon_idx, lat_idx
 
 
 class MeshView(BaseView):
@@ -172,10 +206,51 @@ class MeshView(BaseView):
             'lat': all_lat,
         })
 
+        # Load SWAN data and pre-compute partition values at each mesh point
+        swan = None
+        swan_labels = []
+        resolutions = self.data_manager.available_swan_resolutions(region)
+        if resolutions:
+            try:
+                res = resolutions[0]  # Best available (typically 'coarse')
+                swan = self.data_manager.get_swan_output(region, res)
+
+                lon_idx, lat_idx = _swan_nearest_indices(
+                    all_lon, all_lat, swan.lons, swan.lats,
+                )
+
+                # Combined values
+                hsig_m, tps_m, dir_m = swan.mask_land()
+                inspector_df['swan_hs'] = hsig_m[lat_idx, lon_idx]
+                inspector_df['swan_tp'] = tps_m[lat_idx, lon_idx]
+                inspector_df['swan_dir'] = dir_m[lat_idx, lon_idx]
+
+                # Per-partition values
+                for p in swan.partitions:
+                    hs_m, tp_m, d_m = p.mask_invalid(swan.exception_value)
+                    tag = p.label.lower().replace(' ', '_')
+                    swan_labels.append((tag, p.label))
+                    inspector_df[f'swan_{tag}_hs'] = hs_m[lat_idx, lon_idx]
+                    inspector_df[f'swan_{tag}_tp'] = tp_m[lat_idx, lon_idx]
+                    inspector_df[f'swan_{tag}_dir'] = d_m[lat_idx, lon_idx]
+
+                logger.info(
+                    f"Mapped SWAN ({res}) to {n_points:,} mesh points "
+                    f"({len(swan.partitions)} partitions)"
+                )
+            except Exception as e:
+                logger.warning(f"Could not load SWAN data for mesh inspector: {e}")
+                swan = None
+
+        # Capture for closure
+        has_swan = swan is not None
+        partition_labels = swan_labels
+        swan_run_ts = swan.run_timestamp if swan else None
+
         def format_mesh_point(row, idx):
             elev = row['elevation']
             kind = "Ocean" if elev < 0 else "Land"
-            return f"""
+            html = f"""
             <div style="color: white; font-size: 11px; padding: 10px;
                         background: {SIDEBAR_BG}; border-radius: 5px;">
                 <b style="font-size: 13px;">Point #{idx:,} ({kind})</b><br>
@@ -190,8 +265,48 @@ class MeshView(BaseView):
                 Elevation: {elev:.2f} m<br>
                 Depth: {row['depth']:.2f} m<br>
                 Coast distance: {row['coast_distance']:.1f} m<br>
-            </div>
             """
+
+            # SWAN partition data (only for ocean points with valid data)
+            if has_swan and elev < 0:
+                hs = row.get('swan_hs', np.nan)
+                if not np.isnan(hs):
+                    tp = row.get('swan_tp', np.nan)
+                    dr = row.get('swan_dir', np.nan)
+                    html += f"""
+                <br>
+                <hr style="border-color: #444;">
+                <b>SWAN Combined</b><br>
+                Hs: {hs:.2f} m<br>
+                Tp: {tp:.1f} s<br>
+                Dir: {dr:.0f}&deg;<br>
+                    """
+
+                    if partition_labels:
+                        html += "<br><b>SWAN Partitions</b><br>"
+                        for tag, label in partition_labels:
+                            p_hs = row.get(f'swan_{tag}_hs', np.nan)
+                            if np.isnan(p_hs) or p_hs <= 0:
+                                continue
+                            p_tp = row.get(f'swan_{tag}_tp', np.nan)
+                            p_dir = row.get(f'swan_{tag}_dir', np.nan)
+                            color = PARTITION_COLORS.get(
+                                tag, PARTITION_COLORS.get(tag.replace(' ', '_'), 'white')
+                            )
+                            html += (
+                                f"<span style='color: {color}'>{label}</span>: "
+                                f"{p_hs:.2f}m, {p_tp:.1f}s, {p_dir:.0f}&deg;<br>"
+                            )
+
+                    if swan_run_ts:
+                        html += (
+                            f"<br><span style='color: #888; font-size: 10px;'>"
+                            f"SWAN run: {swan_run_ts.strftime('%Y-%m-%d %H:%M')} UTC"
+                            f"</span><br>"
+                        )
+
+            html += "</div>"
+            return html
 
         inspector = PointInspector(tap, coords, inspector_df, format_fn=format_mesh_point)
         self._inspector_pane = inspector.panel()
@@ -208,6 +323,21 @@ class MeshView(BaseView):
 
         # Summary stats
         depth_vals = -elevation[ocean_mask] if n_ocean > 0 else np.array([0])
+        swan_summary = ""
+        if has_swan:
+            n_parts = len(partition_labels)
+            swan_summary = f"""
+            <br>
+            <b>SWAN Data</b><br>
+            Resolution: {res}<br>
+            Partitions: {n_parts}<br>
+            """
+            if swan_run_ts:
+                swan_summary += f"Run: {swan_run_ts.strftime('%Y-%m-%d %H:%M')} UTC<br>"
+            swan_summary += "<i>Click ocean points to see swell partitions</i><br>"
+        else:
+            swan_summary = "<br><i>No SWAN data available for this region</i><br>"
+
         self._summary_html.object = f"""
         <div style="color: white; font-size: 11px; padding: 10px;
                     background: {SIDEBAR_BG}; border-radius: 5px;">
@@ -222,6 +352,7 @@ class MeshView(BaseView):
             Min: {np.min(depth_vals):.1f} m<br>
             Max: {np.max(depth_vals):.1f} m<br>
             Mean: {np.mean(depth_vals):.1f} m<br>
+            {swan_summary}
         </div>
         """
 

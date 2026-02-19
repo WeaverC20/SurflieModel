@@ -56,3 +56,23 @@ DATA_TYPES = ['SWAN Data', 'Surfzone Mesh', 'Surfzone Results']
 # Default depth/elevation clamp values for mesh view
 DEFAULT_DEPTH_MAX = 30.0
 DEFAULT_LAND_MAX = 5.0
+
+# Buoy marker styles
+NDBC_MARKER_COLOR = '#00cccc'     # Cyan for NDBC
+CDIP_MARKER_COLOR = '#ff66cc'     # Pink/magenta for CDIP
+NDBC_MARKER_SYMBOL = 'diamond'
+CDIP_MARKER_SYMBOL = 'square'
+BUOY_MARKER_SIZE = 12
+
+# Buoy hover text colors
+CONFIDENCE_COLORS = {
+    'HIGH': '#66ff66',   # Green — clean concentrated swell
+    'MED': '#ffff66',    # Yellow — moderate spread
+    'LOW': '#ff6666',    # Red — confused/mixed sea
+}
+WAVE_TYPE_COLORS = {
+    'long_period_swell': '#66ccff',  # Light blue
+    'swell': '#66ff66',               # Green
+    'short_swell': '#ffff66',         # Yellow
+    'wind_waves': '#ff9966',          # Orange
+}
