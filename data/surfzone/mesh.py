@@ -315,20 +315,7 @@ class SurfZoneMesh:
         n_primary = np.sum(primary_valid)
         print(f"    From primary source: {n_primary:,} points ({100*n_primary/len(all_x):.1f}%)")
 
-        # Fallback source: NCEI CRM (if provided)
-        if fallback_bathy is not None:
-            missing = np.isnan(all_elev)
-            n_missing = np.sum(missing)
-            if n_missing > 0:
-                print(f"    Filling {n_missing:,} missing points from fallback...")
-                fallback_elev = fallback_bathy.sample_points(
-                    all_lon[missing], all_lat[missing]
-                )
-                all_elev[missing] = fallback_elev
-                n_fallback = np.sum(~np.isnan(fallback_elev))
-                print(f"    From fallback: {n_fallback:,} points ({100*n_fallback/n_missing:.1f}% of missing)")
-
-        # Step 5b: Fill remaining gaps via spatial interpolation
+        # Step 5b: Interpolate from primary source for nearby gaps
         missing = np.isnan(all_elev)
         n_missing = np.sum(missing)
         if n_missing > 0:
@@ -360,12 +347,25 @@ class SurfZoneMesh:
                 all_elev[missing_indices[can_interpolate]] = interp_elev
 
                 n_filled = np.sum(~np.isnan(interp_elev))
-                print(f"    Interpolated: {n_filled:,} points (within {max_interp_dist:.0f}m of valid data)")
+                print(f"    Interpolated from primary: {n_filled:,} points (within {max_interp_dist:.0f}m of valid data)")
 
-            # Report remaining gaps
-            still_missing = np.sum(np.isnan(all_elev))
-            if still_missing > 0:
-                print(f"    Remaining gaps: {still_missing:,} points (>{max_interp_dist:.0f}m from valid data)")
+        # Step 5c: Fallback source — NCEI CRM (if provided) for remaining gaps
+        if fallback_bathy is not None:
+            missing = np.isnan(all_elev)
+            n_missing = np.sum(missing)
+            if n_missing > 0:
+                print(f"    Filling {n_missing:,} remaining points from fallback (NCEI CRM)...")
+                fallback_elev = fallback_bathy.sample_points(
+                    all_lon[missing], all_lat[missing]
+                )
+                all_elev[missing] = fallback_elev
+                n_fallback = np.sum(~np.isnan(fallback_elev))
+                print(f"    From fallback: {n_fallback:,} points ({100*n_fallback/n_missing:.1f}% of missing)")
+
+        # Report remaining gaps
+        still_missing = np.sum(np.isnan(all_elev))
+        if still_missing > 0:
+            print(f"    Remaining gaps: {still_missing:,} points (no data from any source)")
 
         # Remove points with no elevation data
         valid = ~np.isnan(all_elev)
