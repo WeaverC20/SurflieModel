@@ -1,11 +1,15 @@
 """
 Current Provider for SWAN
 
-Extracts ocean current data from RTOFS for SWAN input.
+Extracts ocean current data from WCOFS for SWAN input.
 Uses mesh bounds directly (like WindProvider) - no region name configuration needed.
 
 SWAN expects currents as UX (eastward) and UY (northward) velocity components
 in m/s, written as all UX values followed by all UY values (like wind).
+
+Data source: WCOFS (West Coast Operational Forecast System)
+- ~4km resolution, 72hr forecast, 4x daily updates
+- ROMS-based with 4DVAR assimilation of HF radar + satellite data
 
 References:
 - SWAN User Manual: https://swanmodel.sourceforge.io/online_doc/swanuse/node26.html
@@ -41,7 +45,7 @@ class CurrentData:
         dy: Grid spacing in y (degrees)
         origin: (lon, lat) of lower-left corner
         timestamp: Valid time of current data
-        metadata: Additional metadata from RTOFS
+        metadata: Additional metadata from WCOFS
     """
     u_current: np.ndarray
     v_current: np.ndarray
@@ -58,10 +62,10 @@ class CurrentData:
 
 class CurrentProvider:
     """
-    Extracts ocean current data from RTOFS for SWAN input.
+    Extracts ocean current data from WCOFS for SWAN input.
 
     Uses mesh bounds directly (like WindProvider) - no region configuration needed.
-    Fetches RTOFS data, interpolates to mesh resolution, and writes SWAN files.
+    Fetches WCOFS data, interpolates to mesh resolution, and writes SWAN files.
 
     Example usage:
         provider = CurrentProvider()
@@ -96,7 +100,7 @@ class CurrentProvider:
             CurrentData with u/v components interpolated to mesh grid
         """
         # Import here to avoid circular imports
-        from data.pipelines.ocean_tiles.rtofs_fetcher import RTOFSFetcher
+        from data.pipelines.ocean_tiles.wcofs_fetcher import WCOFSFetcher
 
         # Extract mesh bounds and grid parameters
         lon_min = mesh_metadata["origin"][0]
@@ -109,7 +113,7 @@ class CurrentProvider:
         lon_max = lon_min + nx * dx
         lat_max = lat_min + ny * dy
 
-        # Build bounds dict for RTOFS fetcher
+        # Build bounds dict for WCOFS fetcher
         bounds = {
             'min_lat': lat_min,
             'max_lat': lat_max,
@@ -121,43 +125,43 @@ class CurrentProvider:
                    f"lon=[{lon_min:.2f}, {lon_max:.2f}], "
                    f"lat=[{lat_min:.2f}, {lat_max:.2f}]")
 
-        # Fetch RTOFS data using bounds directly (no region name needed)
-        fetcher = RTOFSFetcher()
-        rtofs_data = await fetcher.fetch_for_bounds(
+        # Fetch WCOFS data using bounds directly (no region name needed)
+        fetcher = WCOFSFetcher()
+        current_data = await fetcher.fetch_for_bounds(
             bounds=bounds,
             forecast_hour=forecast_hour
         )
 
-        if rtofs_data is None:
-            raise RuntimeError(f"Failed to fetch RTOFS data for bounds: {bounds}")
+        if current_data is None:
+            raise RuntimeError(f"Failed to fetch WCOFS data for bounds: {bounds}")
 
         # Extract data arrays
-        rtofs_u = rtofs_data['u_velocity']
-        rtofs_v = rtofs_data['v_velocity']
-        rtofs_lons = rtofs_data['lons']
-        rtofs_lats = rtofs_data['lats']
-        metadata = rtofs_data['metadata']
+        src_u = current_data['u_velocity']
+        src_v = current_data['v_velocity']
+        src_lons = current_data['lons']
+        src_lats = current_data['lats']
+        metadata = current_data['metadata']
 
-        logger.info(f"RTOFS data shape: {rtofs_u.shape}")
+        logger.info(f"WCOFS data shape: {src_u.shape}")
 
-        # Handle RTOFS curvilinear grid - need to regrid to regular grid first
-        # RTOFS uses 2D lat/lon arrays for curvilinear coordinates
-        if rtofs_lons.ndim == 2:
-            rtofs_u, rtofs_v, rtofs_lons_1d, rtofs_lats_1d = self._regrid_curvilinear(
-                rtofs_u, rtofs_v, rtofs_lons, rtofs_lats
+        # Handle curvilinear grid - need to regrid to regular grid first
+        # WCOFS ROMS uses 2D lat/lon arrays for curvilinear coordinates
+        if src_lons.ndim == 2:
+            src_u, src_v, src_lons_1d, src_lats_1d = self._regrid_curvilinear(
+                src_u, src_v, src_lons, src_lats
             )
         else:
-            rtofs_lons_1d = rtofs_lons
-            rtofs_lats_1d = rtofs_lats
+            src_lons_1d = src_lons
+            src_lats_1d = src_lats
 
         # Create mesh grid coordinates (cell centers, matching SWAN grid points)
         # SWAN grid has nx+1 points in x, ny+1 points in y
         mesh_lons = np.linspace(lon_min, lon_max, nx + 1)
         mesh_lats = np.linspace(lat_min, lat_max, ny + 1)
 
-        # Interpolate RTOFS to mesh resolution using bilinear interpolation
-        u_interp = self._bilinear_interpolate(rtofs_lons_1d, rtofs_lats_1d, rtofs_u, mesh_lons, mesh_lats)
-        v_interp = self._bilinear_interpolate(rtofs_lons_1d, rtofs_lats_1d, rtofs_v, mesh_lons, mesh_lats)
+        # Interpolate to mesh resolution using bilinear interpolation
+        u_interp = self._bilinear_interpolate(src_lons_1d, src_lats_1d, src_u, mesh_lons, mesh_lats)
+        v_interp = self._bilinear_interpolate(src_lons_1d, src_lats_1d, src_v, mesh_lons, mesh_lats)
 
         # Handle any NaN values (land) by filling with zero (no current)
         u_interp = self._fill_nan_zero(u_interp)
@@ -203,7 +207,7 @@ class CurrentProvider:
         """
         Regrid curvilinear data to a regular lat/lon grid.
 
-        RTOFS uses a curvilinear grid with 2D lat/lon arrays.
+        ROMS-based models (WCOFS) use a curvilinear grid with 2D lat/lon arrays.
         We regrid to a regular grid for easier interpolation to the mesh.
 
         Args:
@@ -222,8 +226,8 @@ class CurrentProvider:
         lat_min, lat_max = np.nanmin(lats_2d), np.nanmax(lats_2d)
 
         # Create regular grid at similar resolution
-        # RTOFS is ~1/12° (~0.083°), use slightly coarser for efficiency
-        resolution = 0.1  # degrees
+        # WCOFS is ~4km (~0.04°), use slightly coarser for efficiency
+        resolution = 0.05  # degrees
         lons_1d = np.arange(lon_min, lon_max + resolution, resolution)
         lats_1d = np.arange(lat_min, lat_max + resolution, resolution)
 

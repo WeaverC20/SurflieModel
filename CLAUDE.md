@@ -22,7 +22,7 @@ SurflieModel/
 │           ├── buoys.py      # NDBC buoy data
 │           ├── waves.py      # WaveWatch III data
 │           ├── wind.py       # GFS wind data
-│           ├── ocean_currents.py  # RTOFS current data
+│           ├── ocean_currents.py  # WCOFS forecast + HF Radar observation currents
 │           └── dev.py        # Development endpoints
 │
 ├── data/
@@ -94,12 +94,16 @@ Forward ray tracing with energy deposition. See `surfzone-physics.md` in memory 
 ```
 NOAA WaveWatch III (global)
   → WW3 boundary extraction (data/swan/ww3_endpoints/)
-    → SWAN spectral model (data/swan/runs/{region}/{resolution}/)
+    → SWAN spectral model + WCOFS currents (data/swan/runs/{region}/{resolution}/)
       → Surfzone boundary conditions (SwanInputProvider)
         → Forward ray tracing with energy deposition (ForwardRayTracer)
           → Per-mesh-point wave heights (data/surfzone/output/{region}/)
             → API endpoints (backend/api/)
               → Frontend heatmaps (apps/web/)
+
+Ocean Currents:
+  WCOFS (ROMS, ~4km, 72hr forecast) → API /ocean-currents/grid → Frontend heatmap
+  HF Radar (6km, hourly obs)        → API /ocean-currents/hfradar → Frontend heatmap
 ```
 
 ## Surf Spot Configuration
@@ -109,7 +113,7 @@ Spots defined in `data/spots/{region}.json`. Each spot has name, display name, a
 ## Development Notes
 
 ### What Exists
-- Complete data fetching infrastructure (NOAA, WW3, GFS, RTOFS, NDBC)
+- Complete data fetching infrastructure (NOAA, WW3, GFS, WCOFS, HF Radar, NDBC)
 - Frontend dashboard with 4 working heatmaps
 - GEBCO bathymetry viewing capability
 - Region definitions for socal, central, norcal

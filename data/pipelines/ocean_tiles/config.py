@@ -103,24 +103,47 @@ TILE_FORMAT = "png"  # PNG for raster tiles
 TILE_CACHE_DAYS = 2  # Keep tiles for 2 days
 
 # NOAA model configurations
+
+# DEPRECATED: RTOFS replaced by WCOFS (better resolution and accuracy for California coast)
 RTOFS_CONFIG = {
     "model_name": "rtofs",
     "nomads_url": "https://nomads.ncep.noaa.gov/cgi-bin/filter_rtofs_global.pl",
-    "update_time_utc": 0,  # Model runs at 00Z
-    "forecast_hours_max": 192,  # 8-day forecast
-    "resolution_km": 9,  # ~9km resolution
+    "update_time_utc": 0,
+    "forecast_hours_max": 192,
+    "resolution_km": 9,
     "variables": ["u_velocity", "v_velocity", "water_temp"],
-    "depth_level": "surface",  # Surface currents only for now
+    "depth_level": "surface",
+    "_deprecated": "Use WCOFS_CONFIG instead. RTOFS is 9km global; WCOFS is 4km regional with better nearshore accuracy.",
 }
 
 WCOFS_CONFIG = {
     "model_name": "wcofs",
-    "nomads_url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/nos/prod/",
-    "update_time_utc": 0,  # Model runs once daily
+    "thredds_base": "https://opendap.co-ops.nos.noaa.gov/thredds",
+    "update_times_utc": [3, 9, 15, 21],  # 4x daily cycles
     "forecast_hours_max": 72,  # 3-day forecast
-    "resolution_km": 4,  # Higher resolution than RTOFS
-    "variables": ["u", "v", "temp", "salinity"],
+    "nowcast_hours": 24,
+    "resolution_km": 4,
+    "variables": ["u_sur_eastward", "v_sur_northward"],
+    "file_types": {
+        "2ds": "2D surface fields (hourly)",
+        "fields": "3D fields (3-hourly)",
+        "regulargrid": "Interpolated to regular grid",
+    },
     "depth_level": "surface",
+}
+
+HFRADAR_CONFIG = {
+    "model_name": "hfradar",
+    "erddap_base": "https://coastwatch.pfeg.noaa.gov/erddap/griddap",
+    "datasets": {
+        "6km": "ucsdHfrW6",
+        "2km": "ucsdHfrW2",
+        "1km": "ucsdHfrW1",
+    },
+    "default_resolution": "6km",
+    "update_frequency": "hourly",
+    "variables": ["water_u", "water_v"],
+    "type": "observation",  # No forecast capability
 }
 
 

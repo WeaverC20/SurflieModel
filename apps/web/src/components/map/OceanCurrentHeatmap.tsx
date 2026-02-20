@@ -162,7 +162,7 @@ export default function OceanCurrentHeatmap({
       <div className="flex h-full items-center justify-center bg-slate-900">
         <div className="text-center">
           <div className="text-white text-xl mb-2">Loading Ocean Currents...</div>
-          <div className="text-slate-400 text-sm">Fetching RTOFS data</div>
+          <div className="text-slate-400 text-sm">Fetching WCOFS data</div>
         </div>
       </div>
     )
@@ -197,7 +197,7 @@ export default function OceanCurrentHeatmap({
         <ForecastHourSelector
           value={forecastHour}
           onChange={setForecastHour}
-          maxHours={192}
+          maxHours={72}
           disabled={loading}
         />
       </div>
