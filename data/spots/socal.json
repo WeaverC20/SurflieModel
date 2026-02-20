@@ -2,13 +2,63 @@
   "region": "socal",
   "spots": [
     {
-      "name": "huntington_pier",
-      "display_name": "Huntington Beach Pier",
+      "name": "ocean_beach",
+      "display_name": "Ocean Beach",
       "bbox": {
-        "lat_min": 33.640,
-        "lat_max": 33.670,
-        "lon_min": -118.015,
-        "lon_max": -117.985
+        "lat_min": 32.736,
+        "lat_max": 32.760,
+        "lon_min": -117.268,
+        "lon_max": -117.243
+      }
+    },
+    {
+      "name": "windansea",
+      "display_name": "Windansea",
+      "bbox": {
+        "lat_min": 32.820,
+        "lat_max": 32.842,
+        "lon_min": -117.293,
+        "lon_max": -117.271
+      }
+    },
+    {
+      "name": "blacks_beach",
+      "display_name": "Black's Beach",
+      "bbox": {
+        "lat_min": 32.878,
+        "lat_max": 32.900,
+        "lon_min": -117.260,
+        "lon_max": -117.245
+      }
+    },
+    {
+      "name": "swamis",
+      "display_name": "Swami's",
+      "bbox": {
+        "lat_min": 33.023,
+        "lat_max": 33.045,
+        "lon_min": -117.305,
+        "lon_max": -117.282
+      }
+    },
+    {
+      "name": "oceanside_pier",
+      "display_name": "Oceanside Pier",
+      "bbox": {
+        "lat_min": 33.181,
+        "lat_max": 33.206,
+        "lon_min": -117.400,
+        "lon_max": -117.374
+      }
+    },
+    {
+      "name": "san_onofre",
+      "display_name": "San Onofre",
+      "bbox": {
+        "lat_min": 33.362,
+        "lat_max": 33.385,
+        "lon_min": -117.578,
+        "lon_max": -117.553
       }
     },
     {
@@ -22,13 +72,113 @@
       }
     },
     {
-      "name": "blacks_beach",
-      "display_name": "Black's Beach",
+      "name": "salt_creek",
+      "display_name": "Salt Creek",
       "bbox": {
-        "lat_min": 32.878,
-        "lat_max": 32.900,
-        "lon_min": -117.260,
-        "lon_max": -117.245
+        "lat_min": 33.471,
+        "lat_max": 33.493,
+        "lon_min": -117.741,
+        "lon_max": -117.718
+      }
+    },
+    {
+      "name": "the_wedge",
+      "display_name": "The Wedge",
+      "bbox": {
+        "lat_min": 33.578,
+        "lat_max": 33.600,
+        "lon_min": -117.889,
+        "lon_max": -117.865
+      }
+    },
+    {
+      "name": "huntington_pier",
+      "display_name": "Huntington Beach Pier",
+      "bbox": {
+        "lat_min": 33.640,
+        "lat_max": 33.670,
+        "lon_min": -118.015,
+        "lon_max": -117.985
+      }
+    },
+    {
+      "name": "el_porto",
+      "display_name": "El Porto",
+      "bbox": {
+        "lat_min": 33.893,
+        "lat_max": 33.917,
+        "lon_min": -118.436,
+        "lon_max": -118.412
+      }
+    },
+    {
+      "name": "topanga",
+      "display_name": "Topanga",
+      "bbox": {
+        "lat_min": 34.027,
+        "lat_max": 34.049,
+        "lon_min": -118.594,
+        "lon_max": -118.571
+      }
+    },
+    {
+      "name": "malibu",
+      "display_name": "Malibu/Surfrider",
+      "bbox": {
+        "lat_min": 34.024,
+        "lat_max": 34.047,
+        "lon_min": -118.692,
+        "lon_max": -118.668
+      }
+    },
+    {
+      "name": "c_street",
+      "display_name": "C Street/Ventura Point",
+      "bbox": {
+        "lat_min": 34.263,
+        "lat_max": 34.286,
+        "lon_min": -119.311,
+        "lon_max": -119.286
+      }
+    },
+    {
+      "name": "rincon",
+      "display_name": "Rincon",
+      "bbox": {
+        "lat_min": 34.362,
+        "lat_max": 34.384,
+        "lon_min": -119.491,
+        "lon_max": -119.467
+      }
+    },
+    {
+      "name": "leadbetter",
+      "display_name": "Leadbetter Point",
+      "bbox": {
+        "lat_min": 34.389,
+        "lat_max": 34.411,
+        "lon_min": -119.712,
+        "lon_max": -119.688
+      }
+    },
+    {
+      "name": "sandspit",
+      "display_name": "Santa Barbara Sandspit",
+      "bbox": {
+        "lat_min": 34.400,
+        "lat_max": 34.422,
+        "lon_min": -119.700,
+        "lon_max": -119.676
+      }
+    },
+    {
+      "name": "el_capitan",
+      "display_name": "El Capitan",
+      "bbox": {
+        "lat_min": 34.446,
+        "lat_max": 34.468,
+        "lon_min": -120.035,
+        "lon_max": -120.011
       }
     }
   ]

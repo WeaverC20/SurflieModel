@@ -138,11 +138,12 @@ class BoundaryRayInitializer:
         boundary_points = np.column_stack([self.boundary.x, self.boundary.y])
         self._boundary_tree = cKDTree(boundary_points)
 
-    def _sample_offshore_boundary(self) -> List[Tuple[float, float]]:
+    def _sample_offshore_boundary(self) -> List[Tuple[float, float, float]]:
         """
         Sample the offshore boundary at regular intervals.
 
-        Returns list of (x, y) points in UTM.
+        Returns list of (x, y, tangent_angle_rad) tuples in UTM.
+        The tangent angle is in math convention (radians, 0=East, CCW positive).
         """
         samples = []
 
@@ -173,7 +174,12 @@ class BoundaryRayInitializer:
                 x = boundary_segment[idx, 0] + t * (boundary_segment[idx + 1, 0] - boundary_segment[idx, 0])
                 y = boundary_segment[idx, 1] + t * (boundary_segment[idx + 1, 1] - boundary_segment[idx, 1])
 
-                samples.append((x, y))
+                # Tangent direction from the local segment
+                dx_seg = boundary_segment[idx + 1, 0] - boundary_segment[idx, 0]
+                dy_seg = boundary_segment[idx + 1, 1] - boundary_segment[idx, 1]
+                tangent_angle = np.arctan2(dy_seg, dx_seg)
+
+                samples.append((x, y, tangent_angle))
 
         return samples
 
@@ -230,7 +236,7 @@ class BoundaryRayInitializer:
 
         ray_count = 0
 
-        for bx, by in boundary_samples:
+        for bx, by, tangent_angle in boundary_samples:
             hs, tp, dir_nautical, is_valid = self._get_partition_at_boundary(bx, by, partition)
 
             if not is_valid or hs < 0.01 or tp < 1.0:
@@ -238,6 +244,17 @@ class BoundaryRayInitializer:
 
             # Convert direction to math convention (wave travel direction)
             dir_math = nautical_to_math(dir_nautical)
+
+            # Correct tube width for boundary-swell angle
+            # W should be the perpendicular distance between adjacent rays,
+            # not the along-contour spacing. When boundary tangent aligns with
+            # swell direction, rays pile up and W must shrink accordingly.
+            angle_diff = dir_math - tangent_angle
+            sin_factor = abs(np.sin(angle_diff))
+            W_corrected = max(
+                self.config.min_tube_width_m,
+                self.config.boundary_spacing_m * sin_factor,
+            )
 
             # Deep water wavelength and group velocity at boundary
             L0 = G * tp * tp / TWO_PI
@@ -247,7 +264,7 @@ class BoundaryRayInitializer:
             energy = (1.0 / 8.0) * RHO * G * (hs ** 2)
 
             # Initial power P = E × Cg × W (conserved during propagation)
-            power = energy * Cg0 * self.config.boundary_spacing_m
+            power = energy * Cg0 * W_corrected
 
             # Single ray at exact SWAN direction
             ray_x[ray_count] = bx
@@ -255,7 +272,7 @@ class BoundaryRayInitializer:
             ray_theta[ray_count] = dir_math
             ray_period[ray_count] = tp
             ray_power[ray_count] = power
-            ray_width[ray_count] = self.config.boundary_spacing_m
+            ray_width[ray_count] = W_corrected
             ray_partition[ray_count] = partition_idx
             ray_count += 1
 
