@@ -140,9 +140,10 @@ def generate_mesh(
 
     print()
 
-    # Load NCEI CRM data (fallback source, if provided)
+    # Load NCEI CRM data (fallback source)
     fallback_bathy = None
     if crm_file:
+        # Explicit CRM file provided
         print("Loading NCEI CRM data (fallback source)...")
         from data.bathymetry.ncei_crm import NCECRM
         try:
@@ -150,6 +151,16 @@ def generate_mesh(
             print()
         except FileNotFoundError as e:
             print(f"Warning: {e}")
+            print("Continuing without fallback bathymetry...\n")
+    elif bathy_source == "usace":
+        # Auto-load CRM as fallback for USACE (has coverage gaps)
+        print("Auto-loading NCEI CRM data (fallback for USACE coverage gaps)...")
+        from data.bathymetry.ncei_crm import NCECRM
+        try:
+            fallback_bathy = NCECRM()  # Uses default path
+            print()
+        except FileNotFoundError as e:
+            print(f"Warning: NCEI CRM not found at default path: {e}")
             print("Continuing without fallback bathymetry...\n")
 
     # Generate mesh
