@@ -17,6 +17,8 @@ from holoviews.operation.datashader import datashade, spread
 import datashader as ds
 import panel as pn
 
+from scipy.spatial import cKDTree
+
 from tools.viewer.views.base import BaseView
 from tools.viewer.config import (
     WAVE_CMAP, NO_WAVE_COLOR, COASTLINE_COLOR, DARK_BG, SIDEBAR_BG,
@@ -32,7 +34,18 @@ class ResultView(BaseView):
 
     def __init__(self, data_manager, **params):
         super().__init__(data_manager, **params)
-        self._inspector_pane = pn.pane.HTML("", width=240, sizing_mode='stretch_height')
+        # Persistent tap stream and inspector — created once so the Panel layout
+        # always holds the same pane object regardless of how many times
+        # _rebuild_plot() is called (which happens on region/use_lonlat changes
+        # without panel() being re-invoked).
+        self._tap = streams.SingleTap(x=None, y=None)
+        _dummy_coords = np.zeros((1, 2))
+        _dummy_df = pd.DataFrame({
+            'H_at_mesh': [0], 'energy': [0], 'ray_count': [0], 'depth': [0],
+            'utm_x': [0], 'utm_y': [0], 'lon': [0], 'lat': [0],
+        })
+        self._inspector = PointInspector(self._tap, _dummy_coords, _dummy_df)
+        self._inspector_pane = self._inspector.panel()
         self._colorbar_col = pn.Column(width=120)
         self._show_rays = pn.widgets.Checkbox(name='Show ray paths', value=False)
         self._n_rays = pn.widgets.IntSlider(
@@ -320,7 +333,8 @@ class ResultView(BaseView):
 
         # Click marker — handled at the Bokeh level via a hook so that
         # tapping never triggers a HoloViews/datashader range recalculation.
-        tap = streams.SingleTap(x=None, y=None)
+        # Uses self._tap (persistent) so the Panel layout's inspector pane
+        # is always bound to the same stream across region/use_lonlat changes.
 
         def _add_tap_handler(plot_obj, element):
             from bokeh.events import Tap as BokehTap
@@ -347,7 +361,7 @@ class ResultView(BaseView):
                 args=dict(source=marker_src),
                 code="source.data = {'x': [cb_obj.x], 'y': [cb_obj.y]};",
             ))
-            fig.on_event(BokehTap, lambda event: tap.event(x=event.x, y=event.y))
+            fig.on_event(BokehTap, lambda event: self._tap.event(x=event.x, y=event.y))
 
         plot = plot.opts(
             width=1000,
@@ -363,7 +377,9 @@ class ResultView(BaseView):
 
         self._plot_pane.object = plot
 
-        # Build PointInspector
+        # Update the persistent PointInspector in-place.
+        # self._inspector_pane is the same object in the Panel layout throughout
+        # the session; only its underlying data and format function are swapped.
         coords = np.column_stack([display_x, display_y])
 
         if use_lonlat:
@@ -445,8 +461,14 @@ class ResultView(BaseView):
             html += "</div>"
             return html
 
-        inspector = PointInspector(tap, coords, inspector_df, format_fn=format_result_point)
-        self._inspector_pane = inspector.panel()
+        # Update inspector data in-place (keeps self._inspector_pane identity stable)
+        self._inspector.tree = cKDTree(coords)
+        self._inspector.data_df = inspector_df
+        self._inspector.format_fn = format_result_point
+
+        # Reset inspector display so stale data from a previous region isn't shown
+        if self._tap.x is not None or self._tap.y is not None:
+            self._tap.event(x=None, y=None)
 
         # Colorbar (horizontal, below plot)
         wave_cb = create_matplotlib_colorbar(

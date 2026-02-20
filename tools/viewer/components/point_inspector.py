@@ -90,5 +90,4 @@ class PointInspector:
         return pn.pane.HTML(
             pn.bind(self._get_info_html, self.tap.param.x, self.tap.param.y),
             width=240,
-            sizing_mode='stretch_height',
         )
