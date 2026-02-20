@@ -70,6 +70,17 @@ class MeshView(BaseView):
         self.region = region
         use_lonlat = kwargs.get('use_lonlat', False)
 
+        # Capture own ranges if no cross-view ranges were set,
+        # but only when region and coordinate system are unchanged.
+        if self._pending_ranges is None:
+            current = self.get_ranges()
+            if (current is not None
+                    and getattr(self, '_prev_region', None) == region
+                    and getattr(self, '_prev_use_lonlat', None) == use_lonlat):
+                self._pending_ranges = current
+        self._prev_region = region
+        self._prev_use_lonlat = use_lonlat
+
         try:
             mesh = self.data_manager.get_mesh(region)
         except Exception as e:
@@ -163,6 +174,15 @@ class MeshView(BaseView):
             from bokeh.models.callbacks import CustomJS
 
             fig = plot_obj.state
+            self._bokeh_fig = fig
+
+            if self._pending_ranges is not None:
+                fig.x_range.start = self._pending_ranges['x_start']
+                fig.x_range.end = self._pending_ranges['x_end']
+                fig.y_range.start = self._pending_ranges['y_start']
+                fig.y_range.end = self._pending_ranges['y_end']
+                self._pending_ranges = None
+
             marker_src = ColumnDataSource(data={'x': [], 'y': []})
             fig.scatter(
                 'x', 'y', source=marker_src, size=15,

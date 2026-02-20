@@ -28,6 +28,8 @@ class DevViewerApp(param.Parameterized):
     data_type = param.Selector(default='Surfzone Results', objects=DATA_TYPES)
     use_lonlat = param.Boolean(default=False, label='Use Lon/Lat')
 
+    _BOKEH_VIEWS = {'Surfzone Mesh', 'Surfzone Results'}
+
     def __init__(self, project_root, **params):
         super().__init__(**params)
         self.data_manager = DataManager(project_root)
@@ -36,11 +38,32 @@ class DevViewerApp(param.Parameterized):
             'Surfzone Mesh': MeshView(self.data_manager),
             'Surfzone Results': ResultView(self.data_manager),
         }
+        self._prev_data_type = self.data_type
+        self._prev_region = self.region
+        self._prev_use_lonlat = self.use_lonlat
         self._update_view()
 
     @param.depends('region', 'data_type', 'use_lonlat', watch=True)
     def _update_view(self):
         """Reload the active view when selector params change."""
+        outgoing_type = self._prev_data_type
+        incoming_type = self.data_type
+
+        # Transfer zoom/pan ranges between Bokeh views when only data_type
+        # changed (same region and coordinate system).
+        if (outgoing_type in self._BOKEH_VIEWS
+                and incoming_type in self._BOKEH_VIEWS
+                and outgoing_type != incoming_type
+                and self._prev_region == self.region
+                and self._prev_use_lonlat == self.use_lonlat):
+            ranges = self.views[outgoing_type].get_ranges()
+            if ranges is not None:
+                self.views[incoming_type].set_pending_ranges(ranges)
+
+        self._prev_data_type = self.data_type
+        self._prev_region = self.region
+        self._prev_use_lonlat = self.use_lonlat
+
         view = self.views[self.data_type]
         view.update(self.region, use_lonlat=self.use_lonlat)
 
