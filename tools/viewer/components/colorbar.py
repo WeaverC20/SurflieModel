@@ -19,21 +19,29 @@ def create_matplotlib_colorbar(
     label: str,
     cmap_colors: list,
     height: int = 400,
+    orientation: str = 'vertical',
+    width: int = None,
 ) -> str:
     """
-    Create a vertical colorbar as a base64 PNG HTML image.
+    Create a colorbar as a base64 PNG HTML image.
 
     Args:
         vmin: Minimum value for the color scale.
         vmax: Maximum value for the color scale.
         label: Label text displayed next to the colorbar.
         cmap_colors: List of hex color strings for the colormap.
-        height: Height of the colorbar image in pixels.
+        height: Height of the colorbar image in pixels (used for vertical).
+        orientation: 'vertical' or 'horizontal'.
+        width: Width of the colorbar image in pixels (used for horizontal).
 
     Returns:
         HTML string with an embedded base64 PNG image.
     """
-    fig, ax = plt.subplots(figsize=(1.2, height / 100), dpi=100)
+    if orientation == 'horizontal':
+        fig_w = (width or 800) / 100
+        fig, ax = plt.subplots(figsize=(fig_w, 0.5), dpi=100)
+    else:
+        fig, ax = plt.subplots(figsize=(1.2, height / 100), dpi=100)
 
     cmap = mcolors.LinearSegmentedColormap.from_list('custom', cmap_colors, N=256)
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
@@ -41,18 +49,24 @@ def create_matplotlib_colorbar(
     cb = plt.colorbar(
         plt.cm.ScalarMappable(norm=norm, cmap=cmap),
         cax=ax,
-        orientation='vertical',
+        orientation=orientation,
     )
     cb.set_label(label, fontsize=10)
     cb.ax.tick_params(labelsize=8)
 
     # Style for dark theme
     ax.tick_params(colors='white')
-    cb.ax.yaxis.set_tick_params(color='white')
+    if orientation == 'horizontal':
+        cb.ax.xaxis.set_tick_params(color='white')
+        cb.ax.xaxis.label.set_color('white')
+        for tick_label in cb.ax.get_xticklabels():
+            tick_label.set_color('white')
+    else:
+        cb.ax.yaxis.set_tick_params(color='white')
+        cb.ax.yaxis.label.set_color('white')
+        for tick_label in cb.ax.get_yticklabels():
+            tick_label.set_color('white')
     cb.outline.set_edgecolor('white')
-    cb.ax.yaxis.label.set_color('white')
-    for tick_label in cb.ax.get_yticklabels():
-        tick_label.set_color('white')
 
     buf = io.BytesIO()
     plt.savefig(

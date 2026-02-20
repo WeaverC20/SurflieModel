@@ -422,11 +422,14 @@ class ResultView(BaseView):
         inspector = PointInspector(tap, coords, inspector_df, format_fn=format_result_point)
         self._inspector_pane = inspector.panel()
 
-        # Colorbar
-        wave_cb = create_matplotlib_colorbar(0, h_max, 'Hs (m)', WAVE_CMAP, height=300)
-        self._colorbar_col = pn.Column(
-            pn.pane.HTML(wave_cb, width=100, height=350),
-            width=120,
+        # Colorbar (horizontal, below plot)
+        wave_cb = create_matplotlib_colorbar(
+            0, h_max, 'Hs (m)', WAVE_CMAP,
+            orientation='horizontal', width=800,
+        )
+        self._colorbar_col = pn.Row(
+            pn.pane.HTML(wave_cb, height=60, sizing_mode='stretch_width'),
+            sizing_mode='stretch_width',
         )
 
         # Summary
@@ -531,8 +534,10 @@ class ResultView(BaseView):
         )
 
         return pn.Row(
-            self._plot_pane,
-            self._colorbar_col,
+            pn.Column(
+                self._plot_pane,
+                self._colorbar_col,
+            ),
             pn.Column(
                 spot_controls,
                 pn.Spacer(height=10),
