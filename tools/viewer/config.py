@@ -28,6 +28,9 @@ WAVE_CMAP = [
 # Gray for uncovered points
 NO_WAVE_COLOR = '#444455'
 
+# Colormap for statistics variables (set_period, waves_per_set, etc.)
+STATS_CMAP = 'viridis'
+
 # Partition colors for ray paths and per-partition display
 PARTITION_COLORS = {
     'wind_sea': 'cornflowerblue',

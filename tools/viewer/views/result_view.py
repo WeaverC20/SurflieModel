@@ -9,6 +9,7 @@ Ported from scripts/dev/view_surfzone_result.py (converted from Plotly
 Scattergl to Datashader) with click patterns from view_statistics.py.
 """
 
+import math
 import numpy as np
 import pandas as pd
 import holoviews as hv
@@ -21,7 +22,7 @@ from scipy.spatial import cKDTree
 
 from tools.viewer.views.base import BaseView
 from tools.viewer.config import (
-    WAVE_CMAP, NO_WAVE_COLOR, COASTLINE_COLOR, DARK_BG, SIDEBAR_BG,
+    WAVE_CMAP, STATS_CMAP, NO_WAVE_COLOR, COASTLINE_COLOR, DARK_BG, SIDEBAR_BG,
     PARTITION_COLORS, PARTITION_LABELS,
     SPOT_BBOX_COLOR, SPOT_BBOX_DASH, SPOT_BBOX_WIDTH,
 )
@@ -46,7 +47,16 @@ class ResultView(BaseView):
         })
         self._inspector = PointInspector(self._tap, _dummy_coords, _dummy_df)
         self._inspector_pane = self._inspector.panel()
-        self._colorbar_col = pn.Column(width=120)
+        self._colorbar_pane = pn.pane.HTML("", height=60, sizing_mode='stretch_width')
+        # Variable selector for heatmap display
+        self._variable_select = pn.widgets.Select(
+            name='Display Variable',
+            options=['Wave Height (Hs)'],
+            value='Wave Height (Hs)',
+            width=220,
+        )
+        self._variable_select.param.watch(self._on_variable_change, 'value')
+        self._stats_column_map = {}  # display label → CSV column name
         self._show_rays = pn.widgets.Checkbox(name='Show ray paths', value=False)
         self._n_rays = pn.widgets.IntSlider(
             name='Rays to show', start=10, end=1000, step=10, value=100,
@@ -91,10 +101,38 @@ class ResultView(BaseView):
         self._selected_spot = None
         self._spot_stats_html.object = ""
 
+        # Populate variable selector from available stats columns
+        STAT_LABELS = {
+            'set_period': 'Set Period (s)',
+            'waves_per_set': 'Waves per Set',
+            'groupiness_factor': 'Groupiness Factor',
+            'height_amplification': 'Height Amplification',
+            'set_duration': 'Set Duration (s)',
+            'lull_duration': 'Lull Duration (s)',
+            'set_height': 'Set Height (m)',
+        }
+        stats_df = self.data_manager.get_statistics(region)
+        if stats_df is not None:
+            col_map = {label: col for col, label in STAT_LABELS.items()
+                       if col in stats_df.columns}
+            self._stats_column_map = col_map
+            options = ['Wave Height (Hs)'] + list(col_map.keys())
+        else:
+            self._stats_column_map = {}
+            options = ['Wave Height (Hs)']
+        current = self._variable_select.value
+        self._variable_select.options = options
+        if current not in options:
+            self._variable_select.value = 'Wave Height (Hs)'
+
         self._rebuild_plot()
 
     def _on_ray_toggle(self, event):
         """Re-render when ray visibility changes."""
+        self._rebuild_plot()
+
+    def _on_variable_change(self, event):
+        """Re-render when display variable changes."""
         self._rebuild_plot()
 
     def _on_spot_change(self, event):
@@ -127,8 +165,6 @@ class ResultView(BaseView):
 
     def _format_spot_stats_html(self, s):
         """Render SpotStatsSummary as styled HTML."""
-        import math
-
         bb = s.spot.bbox
 
         def fmt(val, fmt_str=".2f", suffix=""):
@@ -247,16 +283,40 @@ class ResultView(BaseView):
             x_label = "UTM Easting (m)"
             y_label = "UTM Northing (m)"
 
-        covered_mask = result.ray_count > 0
+        # Determine display variable: Hs or a statistic from the CSV
+        selected_var = self._variable_select.value
+        if selected_var != 'Wave Height (Hs)' and selected_var in self._stats_column_map:
+            col_name = self._stats_column_map[selected_var]
+            stats_df = self.data_manager.get_statistics(self.region)
+            stats_arr = np.full(result.n_points, np.nan)
+            if stats_df is not None and col_name in stats_df.columns:
+                point_ids = stats_df['point_id'].values.astype(int)
+                stats_arr[point_ids] = stats_df[col_name].values
+            color_values = stats_arr
+            covered_mask = np.isfinite(color_values)
+            cmap = STATS_CMAP
+            cb_label = selected_var
+        else:
+            color_values = result.H_at_mesh
+            covered_mask = result.ray_count > 0
+            cmap = WAVE_CMAP
+            cb_label = 'Hs (m)'
+
         not_covered_mask = ~covered_mask
         n_covered = int(np.sum(covered_mask))
 
-        # Auto wave height max
+        # Color range: 98th percentile for Hs, 2nd-98th for stats
         if n_covered > 0:
-            h_max = float(np.nanpercentile(result.H_at_mesh[covered_mask], 98))
-            h_max = max(h_max, 0.5)
+            if cmap is WAVE_CMAP:
+                v_min = 0.0
+                v_max = float(np.nanpercentile(color_values[covered_mask], 98))
+                v_max = max(v_max, 0.5)
+            else:
+                v_min = float(np.nanpercentile(color_values[covered_mask], 2))
+                v_max = float(np.nanpercentile(color_values[covered_mask], 98))
+                v_max = max(v_max, v_min + 1e-6)
         else:
-            h_max = 2.0
+            v_min, v_max = 0.0, 1.0
 
         plot = None
 
@@ -279,19 +339,19 @@ class ResultView(BaseView):
             )
             plot = no_wave_shaded
 
-        # Layer 2: Covered points - colored by wave height
+        # Layer 2: Covered points - colored by selected variable
         if n_covered > 0:
             wave_df = pd.DataFrame({
                 'x': display_x[covered_mask],
                 'y': display_y[covered_mask],
-                'H': np.clip(result.H_at_mesh[covered_mask], 0, h_max),
+                'H': np.clip(color_values[covered_mask], v_min, v_max),
             })
             wave_points = hv.Points(wave_df, kdims=['x', 'y'], vdims=['H'])
             wave_shaded = spread(
                 datashade(
                     wave_points,
                     aggregator=ds.mean('H'),
-                    cmap=WAVE_CMAP,
+                    cmap=cmap,
                     cnorm='linear',
                 ),
                 px=4,
@@ -400,6 +460,19 @@ class ResultView(BaseView):
             'lat': all_lat,
         })
 
+        # Merge per-point statistics into inspector_df
+        _INSPECTOR_STAT_COLS = [
+            'set_period', 'waves_per_set', 'groupiness_factor',
+            'height_amplification', 'set_duration', 'lull_duration',
+        ]
+        stats_df = self.data_manager.get_statistics(self.region)
+        if stats_df is not None:
+            for col in _INSPECTOR_STAT_COLS:
+                if col in stats_df.columns:
+                    arr = np.full(result.n_points, np.nan)
+                    arr[stats_df['point_id'].values.astype(int)] = stats_df[col].values
+                    inspector_df[col] = arr
+
         # Capture partition data reference for the format function
         partition_data = self.data_manager.get_partition_data(self.region)
 
@@ -458,6 +531,35 @@ class ResultView(BaseView):
                                 f"Dir: {dir_val:.0f} deg<br>"
                             )
 
+            # Wave Statistics section (from statistics CSV)
+            stat_display = [
+                ('set_period',          'Set period'),
+                ('waves_per_set',       'Waves/set'),
+                ('set_duration',        'Set duration'),
+                ('lull_duration',       'Lull duration'),
+                ('groupiness_factor',   'Groupiness'),
+                ('height_amplification', 'Ht. amplif.'),
+            ]
+            stat_rows = []
+            for col, label in stat_display:
+                if col in row.index:
+                    val = row[col]
+                    if not (isinstance(val, float) and math.isnan(val)):
+                        if col in ('set_period', 'set_duration', 'lull_duration'):
+                            fmt_val = (f"{val:.0f}s ({val/60:.1f} min)"
+                                       if val >= 60 else f"{val:.0f}s")
+                        elif col == 'height_amplification':
+                            fmt_val = f"{val:.2f}x"
+                        elif col == 'waves_per_set':
+                            fmt_val = f"{val:.1f}"
+                        else:
+                            fmt_val = f"{val:.2f}"
+                        stat_rows.append((label, fmt_val))
+            if stat_rows:
+                html += "<hr style='border-color: #444;'><b>Wave Statistics</b><br>"
+                for label, fmt_val in stat_rows:
+                    html += f"{label}: {fmt_val}<br>"
+
             html += "</div>"
             return html
 
@@ -470,15 +572,12 @@ class ResultView(BaseView):
         if self._tap.x is not None or self._tap.y is not None:
             self._tap.event(x=None, y=None)
 
-        # Colorbar (horizontal, below plot)
-        wave_cb = create_matplotlib_colorbar(
-            0, h_max, 'Hs (m)', WAVE_CMAP,
+        # Colorbar (horizontal, below plot) — update in-place
+        cb_html = create_matplotlib_colorbar(
+            v_min, v_max, cb_label, cmap,
             orientation='horizontal', width=800,
         )
-        self._colorbar_col = pn.Row(
-            pn.pane.HTML(wave_cb, height=60, sizing_mode='stretch_width'),
-            sizing_mode='stretch_width',
-        )
+        self._colorbar_pane.object = cb_html
 
         # Summary
         coverage_pct = 100 * result.coverage_rate
@@ -492,9 +591,10 @@ class ResultView(BaseView):
             Covered: {result.n_covered:,} ({coverage_pct:.1f}%)<br>
             Rays traced: {result.n_rays_total:,}<br>
         """
-        if n_covered > 0:
-            H_cov = result.H_at_mesh[covered_mask]
-            ray_cov = result.ray_count[covered_mask]
+        ray_covered_mask = result.ray_count > 0
+        if np.any(ray_covered_mask):
+            H_cov = result.H_at_mesh[ray_covered_mask]
+            ray_cov = result.ray_count[ray_covered_mask]
             summary += f"""
             <hr style="border-color: #444;">
             <b>Wave Height (covered)</b><br>
@@ -567,6 +667,12 @@ class ResultView(BaseView):
 
     def panel(self):
         """Return the Panel layout."""
+        display_controls = pn.Column(
+            pn.pane.Markdown("### Display"),
+            self._variable_select,
+            width=240,
+        )
+
         ray_controls = pn.Column(
             pn.pane.Markdown("**Ray Paths**"),
             self._show_rays,
@@ -584,9 +690,11 @@ class ResultView(BaseView):
         return pn.Row(
             pn.Column(
                 self._plot_pane,
-                self._colorbar_col,
+                self._colorbar_pane,
             ),
             pn.Column(
+                display_controls,
+                pn.Spacer(height=10),
                 spot_controls,
                 pn.Spacer(height=10),
                 pn.pane.Markdown("### Point Inspector"),

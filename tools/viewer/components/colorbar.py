@@ -43,7 +43,10 @@ def create_matplotlib_colorbar(
     else:
         fig, ax = plt.subplots(figsize=(1.2, height / 100), dpi=100)
 
-    cmap = mcolors.LinearSegmentedColormap.from_list('custom', cmap_colors, N=256)
+    if isinstance(cmap_colors, str):
+        cmap = plt.get_cmap(cmap_colors)
+    else:
+        cmap = mcolors.LinearSegmentedColormap.from_list('custom', cmap_colors, N=256)
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     cb = plt.colorbar(
