@@ -1,7 +1,20 @@
 """
 Set Duration Statistic
 
-Calculates the duration of a typical wave set in seconds.
+Calculates the mean duration of a wave set using Rice envelope crossing theory.
+
+The set duration is the mean time the envelope spends above the threshold
+per crossing. From Rice (1945), the fraction of time above threshold alpha*Hs
+is P = exp(-2*alpha^2) (Rayleigh). Combined with the set period T_set:
+
+    tau_set = T_set * exp(-2*alpha^2) = 1 / (2*alpha * sqrt(2*pi) * sigma_f)
+
+The exp(-2*alpha^2) cancels between numerator and denominator, giving a
+result that depends only on alpha and sigma_f.
+
+References
+----------
+Rice, S.O. (1945). Mathematical analysis of random noise. Bell System Tech. J. 24.
 """
 
 from typing import List
@@ -11,18 +24,20 @@ import numpy as np
 from data.surfzone.runner.swan_input_provider import WavePartition
 from .base import StatisticFunction, StatisticOutput
 from .registry import StatisticsRegistry
-from .waves_per_set import _spectral_correlation
+from .spectral_utils import reconstruct_spectral_moments
+
+ALPHA_DEFAULT = 1.0
 
 
 @StatisticsRegistry.register
 class SetDurationStatistic(StatisticFunction):
     """
-    Duration of a typical wave set.
+    Duration of a typical wave set via direct Rice formula.
 
-    Set duration = waves_per_set × mean_period
+    tau_set = 1 / (2*alpha * sqrt(2*pi) * sigma_f)
 
-    This gives the approximate time from the first large wave
-    in a set to the last.
+    This is the mean time the wave envelope exceeds alpha*Hs per set cycle.
+    Self-consistent with set_frequency.py: tau_set + tau_lull = T_set exactly.
     """
 
     @property
@@ -35,7 +50,7 @@ class SetDurationStatistic(StatisticFunction):
 
     @property
     def description(self) -> str:
-        return "Duration of a typical wave set"
+        return "Duration of a typical wave set (Rice envelope theory)"
 
     def compute_vectorized(
         self,
@@ -45,35 +60,15 @@ class SetDurationStatistic(StatisticFunction):
         lons: np.ndarray,
     ) -> StatisticOutput:
         n_points = len(depths)
+        moments = reconstruct_spectral_moments(partitions, n_points)
 
-        # Create combined validity mask
-        valid_mask = np.zeros(n_points, dtype=bool)
-        for p in partitions:
-            valid_mask |= p.is_valid
-
-        # Calculate spectral correlation and waves per set
-        gamma = _spectral_correlation(partitions, valid_mask)
-        waves_per_set = (1 + gamma) / (1 - gamma)
-        waves_per_set = np.clip(waves_per_set, 1, 20)
-
-        # Calculate energy-weighted mean period
-        total_E = np.zeros(n_points)
-        weighted_T = np.zeros(n_points)
-
-        for p in partitions:
-            energy = np.where(p.is_valid, p.hs**2, 0)
-            total_E += energy
-            weighted_T += energy * p.tp
-
-        total_E = np.where(total_E > 0, total_E, 1)
-        T_mean = weighted_T / total_E
-
-        # Set duration = waves per set × mean period
-        set_duration = waves_per_set * T_mean
+        # tau_set = 1 / (2*alpha * sqrt(2*pi) * sigma_f)
+        denominator = 2.0 * ALPHA_DEFAULT * np.sqrt(2.0 * np.pi) * moments.sigma_f
+        set_duration = np.where(denominator > 0, 1.0 / denominator, np.nan)
 
         return StatisticOutput(
             name=self.name,
             values=set_duration,
             units=self.units,
-            description=self.description
+            description=self.description,
         )

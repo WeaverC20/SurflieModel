@@ -1,8 +1,22 @@
 """
 Height Amplification Statistic
 
-Calculates the amplification factor for set waves due to constructive
-interference between multiple swells.
+Calculates the expected ratio of maximum wave height to significant wave height
+using Forristall's (1978) empirical Weibull distribution with bandwidth correction.
+
+The effective number of independent waves N_eff accounts for spectral bandwidth:
+narrow-band spectra have fewer independent waves (stronger grouping, higher
+H_max/Hs), while broad spectra have more independent waves.
+
+Also outputs the energy distribution ratio (Hs_total / Hs_dominant) as a
+secondary column indicating how spread the energy is across partitions.
+
+References
+----------
+Forristall, G.Z. (1978). On the statistical distribution of wave heights in a storm.
+    J. Geophys. Res. 83(C5).
+Cartwright, D.E. & Longuet-Higgins, M.S. (1956). Statistical distribution of the
+    maxima of a random function. Proc. R. Soc. London A237.
 """
 
 from typing import List
@@ -12,22 +26,24 @@ import numpy as np
 from data.surfzone.runner.swan_input_provider import WavePartition
 from .base import StatisticFunction, StatisticOutput
 from .registry import StatisticsRegistry
+from .spectral_utils import reconstruct_spectral_moments
+
+# Observation window for H_max estimate (30 minutes)
+T_RECORD = 1800.0
 
 
 @StatisticsRegistry.register
 class HeightAmplificationStatistic(StatisticFunction):
     """
-    Height amplification factor for set waves.
+    Expected H_max/Hs ratio using Forristall (1978) Weibull distribution.
 
-    When multiple swells are present, waves can constructively interfere
-    during sets, producing waves larger than the combined Hs would suggest.
+    H_max/Hs = 0.681 * ln(N_eff)^(1/2.126)
 
-    For two swells with Hs1 and Hs2:
-    - Combined Hs = sqrt(Hs1^2 + Hs2^2) (energy addition)
-    - Max aligned height = Hs1 + Hs2 (linear superposition)
-    - Amplification = (Hs1 + Hs2) / sqrt(Hs1^2 + Hs2^2)
+    where N_eff = N / sqrt(1 + nu^2) corrects for spectral bandwidth.
 
-    Maximum amplification of sqrt(2) ≈ 1.41 occurs when two swells have equal energy.
+    Output columns:
+    - height_amplification: H_max/Hs ratio (Forristall)
+    - energy_ratio: Hs_total / Hs_dominant (energy distribution)
     """
 
     @property
@@ -40,7 +56,11 @@ class HeightAmplificationStatistic(StatisticFunction):
 
     @property
     def description(self) -> str:
-        return "Ratio of max set wave height to combined Hs"
+        return "Expected H_max/Hs ratio (Forristall) and energy distribution"
+
+    @property
+    def output_columns(self) -> List[str]:
+        return ["height_amplification", "energy_ratio"]
 
     def compute_vectorized(
         self,
@@ -50,58 +70,48 @@ class HeightAmplificationStatistic(StatisticFunction):
         lons: np.ndarray,
     ) -> StatisticOutput:
         n_points = len(depths)
+        moments = reconstruct_spectral_moments(partitions, n_points)
 
-        # Get swells only (partition_id > 0)
-        swells = [p for p in partitions if p.partition_id > 0]
+        # Number of waves in observation window
+        safe_T_01 = np.where(moments.valid & (moments.T_01 > 0), moments.T_01, 1.0)
+        N = T_RECORD / safe_T_01
 
-        if len(swells) == 0:
-            # No swells, no amplification
-            return StatisticOutput(
-                name=self.name,
-                values=np.ones(n_points),
-                units=self.units,
-                description=self.description
-            )
+        # Effective independent waves (bandwidth correction)
+        # nu = spectral narrowness; higher nu = broader spectrum = more independent waves
+        safe_nu = np.where(moments.valid, moments.nu, 0.0)
+        N_eff = N / np.sqrt(1.0 + safe_nu ** 2)
+        N_eff = np.maximum(N_eff, 2.0)  # minimum 2 waves to avoid log issues
 
-        # Stack Hs values: shape (n_swells, n_points)
-        hs_stack = np.array([
-            np.where(p.is_valid, p.hs, 0) for p in swells
-        ])
-
-        # Get top 2 swells by energy at each point
-        energies = hs_stack**2
-        sorted_idx = np.argsort(energies, axis=0)
-
-        if len(swells) >= 2:
-            idx1 = sorted_idx[-1, :]
-            idx2 = sorted_idx[-2, :]
-            hs1 = np.take_along_axis(hs_stack, idx1[np.newaxis, :], axis=0)[0]
-            hs2 = np.take_along_axis(hs_stack, idx2[np.newaxis, :], axis=0)[0]
-        else:
-            # Only one swell
-            hs1 = hs_stack[0]
-            hs2 = np.zeros(n_points)
-
-        # Calculate amplification factor
-        # Linear superposition (max when aligned)
-        hs_aligned = hs1 + hs2
-
-        # Energy-based combined Hs
-        hs_combined = np.sqrt(hs1**2 + hs2**2)
-
-        # Amplification ratio
+        # Forristall (1978): H_max/Hs = 0.681 * ln(N_eff)^(1/2.126)
         amplification = np.where(
-            hs_combined > 0,
-            hs_aligned / hs_combined,
-            1.0
+            moments.valid,
+            0.681 * np.log(N_eff) ** (1.0 / 2.126),
+            np.nan,
         )
 
-        # Clip to valid range (1.0 to sqrt(2))
-        amplification = np.clip(amplification, 1.0, np.sqrt(2))
+        # Energy distribution ratio: Hs_total / Hs_dominant
+        # Hs_total = 4*sqrt(m0), Hs_dominant from most energetic partition
+        max_E = np.zeros(n_points)
+        for E_i in moments.partition_E:
+            max_E = np.maximum(max_E, E_i)
+
+        # Hs_dominant = 4*sqrt(E_dominant), Hs_total = 4*sqrt(m0)
+        # ratio = sqrt(m0) / sqrt(E_dominant) = sqrt(m0 / E_dominant)
+        safe_max_E = np.where(max_E > 0, max_E, 1.0)
+        safe_m0 = np.where(moments.valid, moments.m0, 1.0)
+        energy_ratio = np.where(
+            moments.valid & (max_E > 0),
+            np.sqrt(safe_m0 / safe_max_E),
+            np.nan,
+        )
+
+        # Assemble multi-column output
+        values = np.column_stack([amplification, energy_ratio])
 
         return StatisticOutput(
             name=self.name,
-            values=amplification,
+            values=values,
             units=self.units,
-            description=self.description
+            description=self.description,
+            extra={"columns": self.output_columns},
         )

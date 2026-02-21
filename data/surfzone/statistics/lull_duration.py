@@ -1,7 +1,19 @@
 """
 Lull Duration Statistic
 
-Calculates the time between sets (the "lull" period).
+Calculates the mean time between wave sets using Rice envelope crossing theory.
+
+The lull duration is the complement of set duration within one set cycle:
+
+    tau_lull = T_set - tau_set
+             = (exp(2*alpha^2) - 1) / (2*alpha * sqrt(2*pi) * sigma_f)
+
+Self-consistent with set_frequency.py and set_duration.py by construction:
+    tau_set + tau_lull = T_set (exact).
+
+References
+----------
+Rice, S.O. (1945). Mathematical analysis of random noise. Bell System Tech. J. 24.
 """
 
 from typing import List
@@ -11,18 +23,19 @@ import numpy as np
 from data.surfzone.runner.swan_input_provider import WavePartition
 from .base import StatisticFunction, StatisticOutput
 from .registry import StatisticsRegistry
-from .waves_per_set import _spectral_correlation
+from .spectral_utils import reconstruct_spectral_moments
+
+ALPHA_DEFAULT = 1.0
 
 
 @StatisticsRegistry.register
 class LullDurationStatistic(StatisticFunction):
     """
-    Duration of the lull between wave sets.
+    Duration of the lull between wave sets via Rice envelope theory.
 
-    Lull duration = set_period - set_duration
+    tau_lull = (exp(2*alpha^2) - 1) / (2*alpha * sqrt(2*pi) * sigma_f)
 
-    This is the approximate waiting time between the end of one set
-    and the start of the next.
+    This is the mean time the wave envelope stays below alpha*Hs between sets.
     """
 
     @property
@@ -35,7 +48,7 @@ class LullDurationStatistic(StatisticFunction):
 
     @property
     def description(self) -> str:
-        return "Time between wave sets (lull period)"
+        return "Time between wave sets (Rice envelope theory)"
 
     def compute_vectorized(
         self,
@@ -45,55 +58,19 @@ class LullDurationStatistic(StatisticFunction):
         lons: np.ndarray,
     ) -> StatisticOutput:
         n_points = len(depths)
+        moments = reconstruct_spectral_moments(partitions, n_points)
 
-        # Get swells only for set period calculation
-        swells = [p for p in partitions if p.partition_id > 0]
-
-        # Calculate set period (beat period)
-        if len(swells) >= 2:
-            energies = np.array([
-                np.where(p.is_valid, p.hs**2, 0) for p in swells
-            ])
-            sorted_idx = np.argsort(energies, axis=0)
-            idx1 = sorted_idx[-1, :]
-            idx2 = sorted_idx[-2, :]
-
-            tp_stack = np.array([p.tp for p in swells])
-            tp1 = np.take_along_axis(tp_stack, idx1[np.newaxis, :], axis=0)[0]
-            tp2 = np.take_along_axis(tp_stack, idx2[np.newaxis, :], axis=0)[0]
-
-            f1, f2 = 1 / tp1, 1 / tp2
-            delta_f = np.abs(f1 - f2)
-            delta_f = np.where(delta_f < 0.001, np.nan, delta_f)
-            set_period = np.clip(1 / delta_f, 0, 600)
-        else:
-            set_period = np.full(n_points, np.inf)
-
-        # Calculate set duration
-        valid_mask = np.zeros(n_points, dtype=bool)
-        for p in partitions:
-            valid_mask |= p.is_valid
-
-        gamma = _spectral_correlation(partitions, valid_mask)
-        waves_per_set = np.clip((1 + gamma) / (1 - gamma), 1, 20)
-
-        total_E = np.zeros(n_points)
-        weighted_T = np.zeros(n_points)
-        for p in partitions:
-            energy = np.where(p.is_valid, p.hs**2, 0)
-            total_E += energy
-            weighted_T += energy * p.tp
-        total_E = np.where(total_E > 0, total_E, 1)
-        T_mean = weighted_T / total_E
-
-        set_duration = waves_per_set * T_mean
-
-        # Lull = set period - set duration
-        lull_duration = np.maximum(0, set_period - set_duration)
+        # tau_lull = (exp(2*alpha^2) - 1) / (2*alpha * sqrt(2*pi) * sigma_f)
+        denominator = 2.0 * ALPHA_DEFAULT * np.sqrt(2.0 * np.pi) * moments.sigma_f
+        lull_duration = np.where(
+            denominator > 0,
+            (np.exp(2.0 * ALPHA_DEFAULT ** 2) - 1.0) / denominator,
+            np.nan,
+        )
 
         return StatisticOutput(
             name=self.name,
             values=lull_duration,
             units=self.units,
-            description=self.description
+            description=self.description,
         )

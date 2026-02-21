@@ -49,7 +49,7 @@ Longuet-Higgins, M.S. (1984). Statistical properties of wave groups in a random 
     Phil. Trans. R. Soc. London A312.
 """
 
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
 from scipy.special import erfc
@@ -57,14 +57,11 @@ from scipy.special import erfc
 from data.surfzone.runner.swan_input_provider import WavePartition
 from .base import StatisticFunction, StatisticOutput
 from .registry import StatisticsRegistry
+from .spectral_utils import reconstruct_spectral_moments
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-# Relative bandwidth β for each partition type (std_freq / peak_freq)
-BETA_SWELL = 0.07       # typical distant swell
-BETA_WIND_SEA = 0.12    # wind sea / short-period chop
 
 # Default set-height threshold as a fraction of combined Hs
 ALPHA_DEFAULT = 1.0
@@ -76,86 +73,6 @@ ALPHA_SWEEP = [0.8, 1.0, 1.2, 1.5]
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
-
-def _reconstruct_spectral_moments(
-    partitions: List[WavePartition],
-    n_points: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Reconstruct combined spectral moments from SWAN partition summaries.
-
-    Each partition is modelled as a Gaussian spectral peak at f_i = 1/Tp_i with
-    energy E_i = (Hs_i/4)² and intrinsic relative bandwidth β_i.
-
-    Returns
-    -------
-    m0 : np.ndarray, shape (n_points,)
-        Zeroth moment (total energy).  Hs_total = 4 * sqrt(m0).
-    sigma_f : np.ndarray, shape (n_points,)
-        Combined frequency spread (std of energy-weighted frequency distribution).
-        Captures both within-partition bandwidth and between-partition separation.
-    """
-    m0 = np.zeros(n_points)
-    m1 = np.zeros(n_points)
-    m2 = np.zeros(n_points)
-
-    for p in partitions:
-        beta = BETA_WIND_SEA if p.partition_id == 0 else BETA_SWELL
-        # Energy from this partition (zero out invalid points)
-        E = np.where(p.is_valid & (p.tp > 0), (p.hs / 4.0) ** 2, 0.0)
-        # Peak frequency and intrinsic bandwidth
-        f_i = np.where(p.tp > 0, 1.0 / p.tp, 0.0)
-        sigma_fi = beta * f_i
-
-        m0 += E
-        m1 += E * f_i
-        m2 += E * (f_i ** 2 + sigma_fi ** 2)
-
-    # Combined frequency spread: σ_f = sqrt(m2/m0 - (m1/m0)²)
-    # Protected against m0 == 0
-    valid = m0 > 0
-    safe_m0 = np.where(valid, m0, 1.0)
-    sigma_f = np.where(
-        valid,
-        np.sqrt(np.maximum(0.0, m2 / safe_m0 - (m1 / safe_m0) ** 2)),
-        np.nan,
-    )
-    m0 = np.where(valid, m0, np.nan)
-    return m0, sigma_f
-
-
-def _directional_coherence(dir_i: np.ndarray, dir_j: np.ndarray) -> np.ndarray:
-    """
-    Directional coherence factor between two swell partitions.
-
-    Returns a value in [0, 1]:
-      1.0 → same direction (full constructive interference)
-      0.0 → opposite / perpendicular direction (no beating)
-
-    Uses cos²(Δθ/2) for a smooth rolloff with angular separation.
-
-    DORMANT — not called by the current implementation.
-    Enable this function if results for mixed-direction swell combos
-    (e.g. NW swell + S swell at a SoCal point) appear too short.
-    To activate: multiply cross-partition energy contributions to m2 by this
-    coherence factor inside _reconstruct_spectral_moments, specifically the
-    between-partition frequency separation terms in the m2 expansion.
-
-    Parameters
-    ----------
-    dir_i, dir_j : np.ndarray
-        Nautical directions (degrees, 0=N clockwise) for two partitions.
-
-    Returns
-    -------
-    np.ndarray
-        Coherence factor, shape (n_points,).
-    """
-    delta_deg = np.abs(dir_i - dir_j) % 360.0
-    delta_deg = np.where(delta_deg > 180.0, 360.0 - delta_deg, delta_deg)
-    delta_rad = np.radians(delta_deg)
-    return np.cos(delta_rad / 2.0) ** 2
-
 
 def _set_wave_height(m0: np.ndarray, alpha: float) -> np.ndarray:
     """
@@ -260,7 +177,8 @@ class SetFrequencyStatistic(StatisticFunction):
         n_points = len(depths)
 
         # --- Step 1: reconstruct spectral moments ---
-        m0, sigma_f = _reconstruct_spectral_moments(partitions, n_points)
+        moments = reconstruct_spectral_moments(partitions, n_points)
+        m0, sigma_f = moments.m0, moments.sigma_f
 
         # --- Step 2: set period at default threshold ---
         # ν⁺(α) = √(2π) × σ_f × 2α × exp(-2α²)
