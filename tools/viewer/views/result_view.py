@@ -316,9 +316,9 @@ class ResultView(BaseView):
         g_text = f"{fmt(gf)}" + (f" ({g_label})" if g_label else "")
 
         html = f"""
-        <div style="color: white; font-size: 11px; padding: 10px;
+        <div style="color: white; font-size: 11px; padding: 6px;
                     background: {SIDEBAR_BG}; border-radius: 5px;
-                    max-height: 400px; overflow-y: auto;">
+                    max-height: 300px; overflow-y: auto;">
             <b style="font-size: 13px;">{s.spot.display_name}</b><br>
             <span style="color: #888;">{bb.lat_min:.3f}-{bb.lat_max:.3f}°N, {abs(bb.lon_min):.3f}-{abs(bb.lon_max):.3f}°W</span><br>
             <span style="color: #888;">Points: {s.n_points:,} ({s.n_covered:,} covered)</span><br>
@@ -394,9 +394,6 @@ class ResultView(BaseView):
             mesh = self.data_manager.get_mesh(self.region)
         except Exception as e:
             self._plot_pane.object = None
-            self._summary_html.object = (
-                f"<div style='color: #ff8888; padding: 10px;'>Error: {e}</div>"
-            )
             return
 
         n_points = result.n_points
@@ -641,6 +638,8 @@ class ResultView(BaseView):
         _INSPECTOR_STAT_COLS = [
             'set_period', 'waves_per_set', 'groupiness_factor',
             'height_amplification', 'set_duration', 'lull_duration',
+            'is_breaking', 'breaker_index', 'iribarren',
+            'breaker_type', 'breaking_intensity',
         ]
         stats_df = self.data_manager.get_statistics(self.region)
         if stats_df is not None:
@@ -657,7 +656,7 @@ class ResultView(BaseView):
             ray_count = int(row['ray_count'])
             if ray_count == 0:
                 return f"""
-                <div style="color: white; font-size: 11px; padding: 10px;
+                <div style="color: white; font-size: 11px; padding: 6px;
                             background: {SIDEBAR_BG}; border-radius: 5px;">
                     <b style="font-size: 13px;">Point #{idx:,}</b><br>
                     <hr style="border-color: #444;">
@@ -670,9 +669,9 @@ class ResultView(BaseView):
                 """
 
             html = f"""
-            <div style="color: white; font-size: 11px; padding: 10px;
+            <div style="color: white; font-size: 11px; padding: 6px;
                         background: {SIDEBAR_BG}; border-radius: 5px;
-                        max-height: 700px; overflow-y: auto;">
+                        max-height: 400px; overflow-y: auto;">
                 <b style="font-size: 13px;">Point #{idx:,}</b><br>
                 <hr style="border-color: #444;">
                 <b>Location</b><br>
@@ -766,36 +765,6 @@ class ResultView(BaseView):
         )
         self._colorbar_pane.object = cb_html
 
-        # Summary
-        coverage_pct = 100 * result.coverage_rate
-        summary = f"""
-        <div style="color: white; font-size: 11px; padding: 10px;
-                    background: {SIDEBAR_BG}; border-radius: 5px;">
-            <b>Result Summary</b><br><br>
-            Region: {result.region_name}<br>
-            Partitions: {result.n_partitions}<br>
-            Total points: {result.n_points:,}<br>
-            Covered: {result.n_covered:,} ({coverage_pct:.1f}%)<br>
-            Rays traced: {result.n_rays_total:,}<br>
-        """
-        ray_covered_mask = result.ray_count > 0
-        if np.any(ray_covered_mask):
-            H_cov = result.H_at_mesh[ray_covered_mask]
-            ray_cov = result.ray_count[ray_covered_mask]
-            summary += f"""
-            <hr style="border-color: #444;">
-            <b>Wave Height (covered)</b><br>
-            Min: {np.nanmin(H_cov):.2f} m<br>
-            Max: {np.nanmax(H_cov):.2f} m<br>
-            Mean: {np.nanmean(H_cov):.2f} m<br>
-            <br>
-            <b>Rays per point</b><br>
-            Min: {ray_cov.min()}<br>
-            Max: {ray_cov.max()}<br>
-            Mean: {ray_cov.mean():.1f}<br>
-            """
-        summary += "</div>"
-        self._summary_html.object = summary
 
     def _build_ray_overlay(self, use_lonlat: bool, mesh):
         """Build HoloViews Path overlay for sampled ray paths."""
@@ -855,7 +824,7 @@ class ResultView(BaseView):
     def panel(self):
         """Return the Panel layout."""
         display_controls = pn.Column(
-            pn.pane.Markdown("### Display"),
+            pn.pane.Markdown("**Display**", margin=(0, 0, 0, 0)),
             self._variable_select,
             width=240,
         )
@@ -868,7 +837,7 @@ class ResultView(BaseView):
         )
 
         spot_controls = pn.Column(
-            pn.pane.Markdown("### Surf Spots"),
+            pn.pane.Markdown("**Surf Spots**", margin=(0, 0, 0, 0)),
             self._spot_selector,
             self._edit_mode,
             self._save_spots_btn,
@@ -884,15 +853,13 @@ class ResultView(BaseView):
             ),
             pn.Column(
                 display_controls,
-                pn.Spacer(height=10),
-                spot_controls,
-                pn.Spacer(height=10),
-                pn.pane.Markdown("### Point Inspector"),
+                pn.Spacer(height=5),
+                pn.pane.Markdown("**Point Inspector**", margin=(0, 0, 0, 0)),
                 self._inspector_pane,
-                pn.Spacer(height=10),
+                pn.Spacer(height=5),
+                spot_controls,
+                pn.Spacer(height=5),
                 ray_controls,
-                pn.Spacer(height=10),
-                self._summary_html,
                 width=260,
             ),
         )

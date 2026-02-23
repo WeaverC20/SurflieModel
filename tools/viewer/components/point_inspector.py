@@ -50,9 +50,9 @@ class PointInspector:
     def _default_format(self, row: pd.Series, idx: int) -> str:
         """Build generic HTML showing all columns in the row."""
         html = f"""
-        <div style="color: white; font-size: 11px; padding: 10px;
+        <div style="color: white; font-size: 11px; padding: 6px;
                     background: {SIDEBAR_BG}; border-radius: 5px;
-                    max-height: 700px; overflow-y: auto;">
+                    max-height: 400px; overflow-y: auto;">
             <b style="font-size: 13px;">Point #{idx:,}</b><br>
             <hr style="border-color: #444;">
         """
