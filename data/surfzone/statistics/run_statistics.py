@@ -207,6 +207,14 @@ def run_statistics(
     mesh = SurfZoneMesh.load(PROJECT_ROOT / "data" / "surfzone" / "meshes" / region_name)
     lons, lats = mesh.utm_to_lon_lat(mesh_x, mesh_y)
 
+    # Compute bottom slopes for breaking statistics
+    print("Computing bottom slopes...")
+    slopes = mesh.get_slope_magnitude(mesh_x, mesh_y, h=10.0)
+    print(f"  Slope range: {np.nanmin(slopes):.4f} - {np.nanmax(slopes):.4f}")
+
+    # Build context dict for statistics that need extra data
+    context = {"slopes": slopes}
+
     # Create WavePartition objects
     print("\nCreating wave partitions...")
     wave_partitions = create_wave_partitions(partitions_data)
@@ -232,7 +240,8 @@ def run_statistics(
         lats=lats,
         lons=lons,
         depths=depths,
-        region=region_name
+        region=region_name,
+        context=context,
     )
 
     print(f"\nComputed {len(result.df.columns) - 4} statistic columns for {result.num_points:,} points")

@@ -173,6 +173,7 @@ class SetFrequencyStatistic(StatisticFunction):
         depths: np.ndarray,
         lats: np.ndarray,
         lons: np.ndarray,
+        **kwargs,
     ) -> StatisticOutput:
         n_points = len(depths)
 

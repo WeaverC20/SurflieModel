@@ -83,6 +83,7 @@ class PeakinessStatistic(StatisticFunction):
         depths: np.ndarray,
         lats: np.ndarray,
         lons: np.ndarray,
+        **kwargs,
     ) -> StatisticOutput:
         g = 9.81
         n_points = len(depths)

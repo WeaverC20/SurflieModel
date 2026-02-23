@@ -28,6 +28,7 @@ from . import height_amplification
 from . import groupiness
 from . import set_duration
 from . import lull_duration
+from . import breaking
 
 __all__ = [
     "StatisticFunction",

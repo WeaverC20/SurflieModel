@@ -917,6 +917,55 @@ class SurfZoneMesh:
 
         return dz_dx, dz_dy
 
+    def get_depth_gradient_vectorized(
+        self, x: np.ndarray, y: np.ndarray, h: float = 10.0
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get depth gradient (dd/dx, dd/dy) at multiple points using finite differences.
+
+        Args:
+            x: UTM x coordinates, shape (n,)
+            y: UTM y coordinates, shape (n,)
+            h: Finite difference step size in meters
+
+        Returns:
+            (dz_dx, dz_dy) each shape (n,)
+        """
+        # Depth = -elevation, so d(depth)/dx = -d(elev)/dx
+        elev_xp = self.get_elevation_at_points(x + h, y)
+        elev_xm = self.get_elevation_at_points(x - h, y)
+        elev_yp = self.get_elevation_at_points(x, y + h)
+        elev_ym = self.get_elevation_at_points(x, y - h)
+
+        dz_dx = -(elev_xp - elev_xm) / (2 * h)
+        dz_dy = -(elev_yp - elev_ym) / (2 * h)
+
+        # Handle NaN at mesh boundaries
+        dz_dx = np.where(np.isfinite(dz_dx), dz_dx, 0.0)
+        dz_dy = np.where(np.isfinite(dz_dy), dz_dy, 0.0)
+
+        return dz_dx, dz_dy
+
+    def get_slope_magnitude(
+        self, x: np.ndarray, y: np.ndarray, h: float = 10.0
+    ) -> np.ndarray:
+        """
+        Get bottom slope magnitude |grad(depth)| at multiple points.
+
+        Clamped to [0.005, 0.2] (same bounds as ray_tracer.py).
+
+        Args:
+            x: UTM x coordinates, shape (n,)
+            y: UTM y coordinates, shape (n,)
+            h: Finite difference step size in meters
+
+        Returns:
+            slopes: shape (n,), dimensionless (rise/run)
+        """
+        dz_dx, dz_dy = self.get_depth_gradient_vectorized(x, y, h)
+        slopes = np.sqrt(dz_dx**2 + dz_dy**2)
+        return np.clip(slopes, 0.005, 0.2)
+
     # =========================================================================
     # Spatial Index for Fast Triangle Lookup
     # =========================================================================

@@ -83,6 +83,7 @@ class StatisticFunction(ABC):
         depths: np.ndarray,
         lats: np.ndarray,
         lons: np.ndarray,
+        **kwargs,
     ) -> StatisticOutput:
         """
         Compute statistic for ALL mesh points at once (vectorized).
@@ -97,6 +98,7 @@ class StatisticFunction(ABC):
             depths: Water depth at each point, shape (n_points,)
             lats: Latitude of each point, shape (n_points,)
             lons: Longitude of each point, shape (n_points,)
+            **kwargs: Additional context (e.g., slopes for breaking statistics)
 
         Returns:
             StatisticOutput with values of shape (n_points,) or (n_points, k)
@@ -109,6 +111,7 @@ class StatisticFunction(ABC):
         depth: float,
         lat: float,
         lon: float,
+        **kwargs,
     ) -> Union[float, Dict[str, Any]]:
         """
         Compute statistic for a SINGLE point.
@@ -122,6 +125,7 @@ class StatisticFunction(ABC):
             depth: Water depth at the point (m)
             lat: Latitude
             lon: Longitude
+            **kwargs: Additional context (forwarded to compute_vectorized)
 
         Returns:
             Single value or dict of values
@@ -141,7 +145,8 @@ class StatisticFunction(ABC):
             wave_parts,
             depths=np.array([depth]),
             lats=np.array([lat]),
-            lons=np.array([lon])
+            lons=np.array([lon]),
+            **kwargs,
         )
 
         # Extract single value

@@ -273,6 +273,14 @@ class ResultView(BaseView):
         if self._selected_spot:
             self._update_spot_stats(self._selected_spot)
 
+    @staticmethod
+    def _breaker_type_label(val):
+        """Convert breaker type code to label."""
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            return "N/A"
+        labels = {0: "Spilling", 1: "Plunging", 2: "Collapsing", 3: "Surging"}
+        return labels.get(int(val), "N/A")
+
     def _format_spot_stats_html(self, s):
         """Render SpotStatsSummary as styled HTML."""
         bb = s.spot.bbox
@@ -331,6 +339,12 @@ class ResultView(BaseView):
             Groupiness: {g_text}<br>
             Steepness: {fmt(s.dominant_steepness, '.4f')}<br>
             Wavelength: {fmt(s.dominant_wavelength, '.1f')} m<br>
+
+            <br><b>Breaking</b><br>
+            Breaking: {fmt(s.breaking_fraction, '.0%') if hasattr(s, 'breaking_fraction') else 'N/A'} of points<br>
+            Iribarren: {fmt(s.iribarren_mean) if hasattr(s, 'iribarren_mean') else 'N/A'}<br>
+            Breaker type: {self._breaker_type_label(s.dominant_breaker_type) if hasattr(s, 'dominant_breaker_type') else 'N/A'}<br>
+            Intensity: {fmt(s.breaking_intensity_mean) if hasattr(s, 'breaking_intensity_mean') else 'N/A'}<br>
 
             <br><b>Depth</b><br>
             Range: {fmt(s.depth_min)} - {fmt(s.depth_max)} m &nbsp; Mean: {fmt(s.depth_mean)} m<br>
@@ -702,6 +716,11 @@ class ResultView(BaseView):
                 ('lull_duration',       'Lull duration'),
                 ('groupiness_factor',   'Groupiness'),
                 ('height_amplification', 'Ht. amplif.'),
+                ('is_breaking',         'Breaking'),
+                ('breaker_index',       'Breaker idx'),
+                ('iribarren',           'Iribarren'),
+                ('breaker_type',        'Breaker type'),
+                ('breaking_intensity',  'Break. intens.'),
             ]
             stat_rows = []
             for col, label in stat_display:
@@ -715,6 +734,11 @@ class ResultView(BaseView):
                             fmt_val = f"{val:.2f}x"
                         elif col == 'waves_per_set':
                             fmt_val = f"{val:.1f}"
+                        elif col == 'is_breaking':
+                            fmt_val = "Yes" if val >= 0.5 else "No"
+                        elif col == 'breaker_type':
+                            bt_labels = {0: "Spilling", 1: "Plunging", 2: "Collapsing", 3: "Surging"}
+                            fmt_val = bt_labels.get(int(val), f"{val:.0f}")
                         else:
                             fmt_val = f"{val:.2f}"
                         stat_rows.append((label, fmt_val))

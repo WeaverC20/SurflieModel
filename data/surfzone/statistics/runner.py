@@ -153,7 +153,8 @@ class StatisticsRunner:
         self,
         boundary: BoundaryConditions,
         depths: np.ndarray,
-        region: str = "unknown"
+        region: str = "unknown",
+        context: Optional[Dict] = None,
     ) -> StatisticsResult:
         """
         Compute all statistics from SWAN boundary conditions.
@@ -182,6 +183,7 @@ class StatisticsRunner:
         }
 
         # Compute each statistic
+        extra_kwargs = context or {}
         metadata_stats = []
         for stat in self.statistics:
             logger.debug(f"Computing {stat.name}...")
@@ -190,7 +192,8 @@ class StatisticsRunner:
                 partitions=boundary.partitions,
                 depths=depths,
                 lats=boundary.lat,
-                lons=boundary.lon
+                lons=boundary.lon,
+                **extra_kwargs,
             )
 
             # Handle multi-column output
@@ -232,7 +235,8 @@ class StatisticsRunner:
         lats: np.ndarray,
         lons: np.ndarray,
         depths: np.ndarray,
-        region: str = "unknown"
+        region: str = "unknown",
+        context: Optional[Dict] = None,
     ) -> StatisticsResult:
         """
         Compute statistics from raw WavePartition arrays.
@@ -259,13 +263,15 @@ class StatisticsRunner:
             'depth': depths
         }
 
+        extra_kwargs = context or {}
         metadata_stats = []
         for stat in self.statistics:
             output = stat.compute_vectorized(
                 partitions=partitions,
                 depths=depths,
                 lats=lats,
-                lons=lons
+                lons=lons,
+                **extra_kwargs,
             )
 
             if output.values.ndim == 1:

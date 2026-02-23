@@ -58,6 +58,7 @@ class SetDurationStatistic(StatisticFunction):
         depths: np.ndarray,
         lats: np.ndarray,
         lons: np.ndarray,
+        **kwargs,
     ) -> StatisticOutput:
         n_points = len(depths)
         moments = reconstruct_spectral_moments(partitions, n_points)

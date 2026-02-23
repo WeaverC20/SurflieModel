@@ -53,6 +53,12 @@ class SpotStatsSummary:
     depth_max: float
     depth_mean: float
 
+    # Breaking
+    breaking_fraction: float         # fraction of points where is_breaking == 1
+    iribarren_mean: float            # mean Iribarren number (surf similarity)
+    dominant_breaker_type: float     # most common breaker type code (mode), NaN if none
+    breaking_intensity_mean: float   # mean H/(gamma_b*h), >1 = breaking
+
 
 class SpotStatisticsAggregator:
     """Maps surf spots to mesh points and aggregates statistics.
@@ -199,6 +205,10 @@ class SpotStatisticsAggregator:
                 depth_min=nan,
                 depth_max=nan,
                 depth_mean=nan,
+                breaking_fraction=nan,
+                iribarren_mean=nan,
+                dominant_breaker_type=nan,
+                breaking_intensity_mean=nan,
             )
 
         # Set timing — filter out inf values in set_period
@@ -235,6 +245,33 @@ class SpotStatisticsAggregator:
         depth_max = float(np.nanmax(depth))
         depth_mean = float(np.nanmean(depth))
 
+        # Breaking stats
+        if "is_breaking" in self._stats_df.columns:
+            breaking_vals = self._stats_df["is_breaking"].values[stats_mask]
+            valid_breaking = breaking_vals[np.isfinite(breaking_vals)]
+            breaking_fraction = (
+                float(np.nanmean(valid_breaking)) if len(valid_breaking) > 0 else nan
+            )
+
+            iribarren_vals = self._stats_df["iribarren"].values[stats_mask]
+            iribarren_mean = float(np.nanmean(iribarren_vals))
+
+            breaker_vals = self._stats_df["breaker_type"].values[stats_mask]
+            valid_breaker = breaker_vals[np.isfinite(breaker_vals)]
+            if len(valid_breaker) > 0:
+                codes, counts = np.unique(valid_breaker.astype(int), return_counts=True)
+                dominant_breaker_type = float(codes[np.argmax(counts)])
+            else:
+                dominant_breaker_type = nan
+
+            intensity_vals = self._stats_df["breaking_intensity"].values[stats_mask]
+            breaking_intensity_mean = float(np.nanmean(intensity_vals))
+        else:
+            breaking_fraction = nan
+            iribarren_mean = nan
+            dominant_breaker_type = nan
+            breaking_intensity_mean = nan
+
         return SpotStatsSummary(
             spot=spot,
             n_points=n_points,
@@ -254,4 +291,8 @@ class SpotStatisticsAggregator:
             depth_min=depth_min,
             depth_max=depth_max,
             depth_mean=depth_mean,
+            breaking_fraction=breaking_fraction,
+            iribarren_mean=iribarren_mean,
+            dominant_breaker_type=dominant_breaker_type,
+            breaking_intensity_mean=breaking_intensity_mean,
         )
