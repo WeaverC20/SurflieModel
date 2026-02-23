@@ -43,20 +43,42 @@ SurflieModel/
 │   │
 │   ├── swan/                 # SWAN model (see memory/data-pipelines.md)
 │   ├── surfzone/             # Surfzone modeling (see memory/surfzone-physics.md)
+│   │   ├── statistics/       # Wave statistics (see memory/statistics.md)
+│   │   │   ├── run_statistics.py   # CLI entry point
+│   │   │   ├── runner.py           # StatisticsRunner orchestration
+│   │   │   ├── registry.py         # Pluggable @register decorator
+│   │   │   ├── spectral_utils.py   # Shared spectral moment reconstruction
+│   │   │   └── {stat_name}.py      # Individual statistics (7 total)
+│   │   └── ...
 │   ├── pipelines/            # Data fetching (see memory/data-pipelines.md)
 │   ├── storage/              # Optional Zarr stores
 │   └── cache/                # Cached GRIB/NetCDF data
 │
 ├── data/spots/                # Surf spot definitions (JSON per region)
 │   ├── spot.py               # SurfSpot/BoundingBox classes
+│   ├── spot_statistics.py    # SpotStatisticsAggregator (bbox → mesh point stats)
 │   └── {region}.json         # Spot configs (e.g., socal.json)
+│
+├── tools/
+│   └── viewer/                # Panel-based dev viewer (see memory/viewer.md)
+│       ├── app.py            # DevViewerApp — main Panel application
+│       ├── config.py         # Theme, colormaps, styling constants
+│       ├── data_manager.py   # Centralized lazy-loading data cache
+│       ├── components/       # Reusable UI components
+│       │   ├── colorbar.py   # Matplotlib colorbar renderer
+│       │   └── point_inspector.py  # KDTree click-to-inspect
+│       └── views/            # View panels
+│           ├── base.py       # BaseView abstract class
+│           ├── swan_view.py  # SWAN output (Plotly heatmaps, buoy markers)
+│           ├── mesh_view.py  # Surfzone mesh (Datashader, depth coloring)
+│           └── result_view.py # Simulation results (Datashader, spot editing)
 │
 ├── apps/mobile/               # Expo React Native mobile app
 ├── packages/python/common/    # Shared Python utilities
 ├── scripts/                   # Utility scripts
 │   ├── generate_surfzone_mesh.py  # Generate surfzone mesh for a region
 │   └── dev/
-│       └── view_surfzone_result.py # Interactive result viewer
+│       └── viewer.py         # CLI entry point for dev viewer
 ├── .github/workflows/         # CI/CD (test, deploy, scheduled fetch)
 └── docs/                      # Documentation
 ```
@@ -89,6 +111,31 @@ California is divided into three modeling regions:
 
 Forward ray tracing with energy deposition. See `surfzone-physics.md` in memory for full details (components, commands, physics conventions).
 
+### Surfzone Statistics (`data/surfzone/statistics/`)
+
+Pluggable registry of 7 vectorized statistics computed over all mesh points. Each statistic is a class registered via `@StatisticsRegistry.register`. Shared spectral moment reconstruction in `spectral_utils.py`. See `statistics.md` in memory for physics details.
+
+```bash
+# Run all statistics
+python data/surfzone/statistics/run_statistics.py --region socal
+
+# Run specific statistics
+python data/surfzone/statistics/run_statistics.py --region socal --statistics set_period waves_per_set
+```
+
+Statistics: set_period, waves_per_set, set_duration, lull_duration, peakiness, groupiness_factor, height_amplification. Output: CSV + metadata JSON in `data/surfzone/output/{region}/`.
+
+### Dev Viewer (`tools/viewer/`)
+
+Panel-based interactive tool with 3 views for inspecting SWAN output, surfzone meshes, and simulation results. See `viewer.md` in memory for full details.
+
+```bash
+python scripts/dev/viewer.py --region socal
+python scripts/dev/viewer.py --region socal --view "Surfzone Results" --lonlat
+```
+
+Key features: Datashader/Plotly heatmaps, KDTree point inspection, spot bounding box editing (persisted to JSON), buoy markers with spectral data, statistics overlay, ray path overlay, zoom/pan persistence across views.
+
 ## Data Flow
 
 ```
@@ -98,8 +145,13 @@ NOAA WaveWatch III (global)
       → Surfzone boundary conditions (SwanInputProvider)
         → Forward ray tracing with energy deposition (ForwardRayTracer)
           → Per-mesh-point wave heights (data/surfzone/output/{region}/)
+            → Statistics (data/surfzone/statistics/) → CSV + metadata JSON
             → API endpoints (backend/api/)
               → Frontend heatmaps (apps/web/)
+
+Dev Viewer (tools/viewer/):
+  SWAN output + Surfzone mesh + Ray tracing results + Statistics CSV
+    → Panel app (scripts/dev/viewer.py) → localhost:5007
 
 Ocean Currents:
   WCOFS (ROMS, ~4km, 72hr forecast) → API /ocean-currents/grid → Frontend heatmap
@@ -121,7 +173,9 @@ Spots defined in `data/spots/{region}.json`. Each spot has name, display name, a
 - Surfzone mesh generation with spatial indexing
 - Forward ray tracing with energy deposition
 - Wave physics (shoaling, refraction, breaking criteria)
-- Interactive result viewer
+- Surfzone wave statistics (7 pluggable statistics, vectorized computation)
+- Spot-level statistics aggregation (`data/spots/spot_statistics.py`)
+- Dev viewer tool (Panel, 3 views: SWAN/Mesh/Results, spot editing, buoy data)
 
 ### Code Style
 - Use object-oriented programming for new modules
@@ -160,6 +214,8 @@ pytest backend/ packages/python/
 6. **Regions**: Three California regions defined in `data/regions/region.py`
 7. **Directory conventions**: All region-specific data follows `{base_path}/{region}/` pattern
 8. **Surfzone details**: Physics, conventions, simulation workflow, Numba constraints — see `surfzone-physics.md` in memory
+9. **Statistics**: 7 pluggable wave statistics with spectral reconstruction — see `statistics.md` in memory
+10. **Dev viewer**: Panel tool with 3 views, spot editing, buoy integration — see `viewer.md` in memory
 
 ## Environment Setup
 
