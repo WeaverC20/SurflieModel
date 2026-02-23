@@ -25,6 +25,7 @@ from tools.viewer.config import (
     WAVE_CMAP, STATS_CMAP, NO_WAVE_COLOR, COASTLINE_COLOR, DARK_BG, SIDEBAR_BG,
     PARTITION_COLORS, PARTITION_LABELS,
     SPOT_BBOX_COLOR, SPOT_BBOX_DASH, SPOT_BBOX_WIDTH,
+    SPOT_EDIT_COLOR, SPOT_EDIT_FILL_ALPHA, SPOT_DIMMED_COLOR, SPOT_DIMMED_WIDTH,
 )
 from tools.viewer.components.colorbar import create_matplotlib_colorbar
 from tools.viewer.components.point_inspector import PointInspector
@@ -71,11 +72,30 @@ class ResultView(BaseView):
         self._spot_selector.param.watch(self._on_spot_change, 'value')
         self._spots_list = []  # Populated in update()
         self._selected_spot = None
+        # Spot edit mode
+        self._edit_mode = pn.widgets.Toggle(
+            name='Edit Spots', value=False, button_type='warning', width=220,
+        )
+        self._save_spots_btn = pn.widgets.Button(
+            name='Save Changes', button_type='success', width=220, visible=False,
+        )
+        self._edit_status_html = pn.pane.HTML("", width=240)
+        self._box_stream = None
+        self._has_unsaved_changes = False
+        self._edit_mode.param.watch(self._on_edit_toggle, 'value')
+        self._save_spots_btn.on_click(self._on_save_click)
         # Store state for re-renders
         self._current_use_lonlat = False
 
     def update(self, region: str, **kwargs):
         """Reload result data and rebuild the plot."""
+        # Auto-save and exit edit mode on region change
+        if self._edit_mode.value:
+            if self._has_unsaved_changes and self._selected_spot is not None:
+                self._save_edited_spot()
+                self._do_save_to_json()
+            self._edit_mode.value = False
+
         self.region = region
         self._current_use_lonlat = kwargs.get('use_lonlat', False)
 
@@ -137,6 +157,11 @@ class ResultView(BaseView):
 
     def _on_spot_change(self, event):
         """Update stats panel and rebuild plot when spot selection changes."""
+        # Auto-save if switching spots during edit mode with unsaved changes
+        if self._edit_mode.value and self._has_unsaved_changes and self._selected_spot is not None:
+            self._save_edited_spot()
+            self._do_save_to_json()
+
         if event.new == '(none)':
             self._selected_spot = None
             self._spot_stats_html.object = ""
@@ -162,6 +187,91 @@ class ResultView(BaseView):
 
         summary = aggregator.aggregate(spot)
         self._spot_stats_html.object = self._format_spot_stats_html(summary)
+
+    def _on_edit_toggle(self, event):
+        """Enter or exit spot edit mode."""
+        if event.new and self._selected_spot is None:
+            self._edit_mode.value = False
+            self._edit_status_html.object = (
+                "<div style='color: #ff8888; padding: 5px; font-size: 11px;'>"
+                "Select a spot first</div>"
+            )
+            return
+        self._save_spots_btn.visible = event.new
+        if not event.new:
+            self._edit_status_html.object = ""
+            self._has_unsaved_changes = False
+        self._rebuild_plot()
+
+    def _on_box_edit(self, data):
+        """Called when box geometry changes via drag/resize."""
+        if data and data.get('x0'):
+            self._has_unsaved_changes = True
+            self._edit_status_html.object = (
+                "<div style='color: #ffaa00; padding: 5px; font-size: 11px;'>"
+                "Unsaved changes</div>"
+            )
+
+    def _save_edited_spot(self):
+        """Read BoxEdit stream data and update the selected spot's bbox."""
+        if self._box_stream is None or self._selected_spot is None:
+            return
+        data = self._box_stream.data
+        if not data or not data.get('x0'):
+            return
+
+        disp_x0 = data['x0'][0]
+        disp_y0 = data['y0'][0]
+        disp_x1 = data['x1'][0]
+        disp_y1 = data['y1'][0]
+
+        # Normalize min/max (user may have swapped corners)
+        disp_x_min = min(disp_x0, disp_x1)
+        disp_x_max = max(disp_x0, disp_x1)
+        disp_y_min = min(disp_y0, disp_y1)
+        disp_y_max = max(disp_y0, disp_y1)
+
+        if self._current_use_lonlat:
+            lon_min, lon_max = disp_x_min, disp_x_max
+            lat_min, lat_max = disp_y_min, disp_y_max
+        else:
+            # Convert from UTM to lon/lat
+            mesh = self.data_manager.get_mesh(self.region)
+            lons, lats = mesh.utm_to_lon_lat(
+                np.array([disp_x_min, disp_x_max]),
+                np.array([disp_y_min, disp_y_max]),
+            )
+            lon_min, lon_max = float(lons[0]), float(lons[1])
+            lat_min, lat_max = float(lats[0]), float(lats[1])
+
+        from data.spots.spot import BoundingBox
+        self._selected_spot.bbox = BoundingBox(
+            lat_min=round(lat_min, 6),
+            lat_max=round(lat_max, 6),
+            lon_min=round(lon_min, 6),
+            lon_max=round(lon_max, 6),
+        )
+
+    def _do_save_to_json(self):
+        """Write all spots for this region to JSON and invalidate caches."""
+        from data.spots.spot import save_spots_config
+        save_spots_config(self.region, self._spots_list)
+        self.data_manager.invalidate_spots(self.region)
+        self._has_unsaved_changes = False
+        self._edit_status_html.object = (
+            "<div style='color: #44ff44; padding: 5px; font-size: 11px;'>"
+            "Saved!</div>"
+        )
+
+    def _on_save_click(self, event):
+        """Save edited bounding box to JSON."""
+        if self._selected_spot is None or not self._has_unsaved_changes:
+            return
+        self._save_edited_spot()
+        self._do_save_to_json()
+        # Refresh stats for the edited spot
+        if self._selected_spot:
+            self._update_spot_stats(self._selected_spot)
 
     def _format_spot_stats_html(self, s):
         """Render SpotStatsSummary as styled HTML."""
@@ -228,7 +338,7 @@ class ResultView(BaseView):
         """
         return html
 
-    def _build_spot_overlay(self, spot, use_lonlat, mesh):
+    def _build_spot_overlay(self, spot, use_lonlat, mesh, dimmed=False):
         """Build HoloViews overlay for spot bounding box rectangle + label."""
         bb = spot.bbox
         if use_lonlat:
@@ -241,12 +351,16 @@ class ResultView(BaseView):
             x0, y0 = cx[0], cy[0]
             x1, y1 = cx[2], cy[2]
 
+        color = SPOT_DIMMED_COLOR if dimmed else SPOT_BBOX_COLOR
+        width = SPOT_DIMMED_WIDTH if dimmed else SPOT_BBOX_WIDTH
+        dash = 'dotted' if dimmed else SPOT_BBOX_DASH
+
         rect_path = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]])
         rect = hv.Path([rect_path]).opts(
-            color=SPOT_BBOX_COLOR, line_width=SPOT_BBOX_WIDTH, line_dash=SPOT_BBOX_DASH,
+            color=color, line_width=width, line_dash=dash,
         )
         label = hv.Text((x0 + x1) / 2, y1, spot.display_name).opts(
-            color=SPOT_BBOX_COLOR, text_font_size='9pt',
+            color=color, text_font_size='9pt',
             text_align='center', text_baseline='bottom',
         )
         return rect * label
@@ -386,15 +500,56 @@ class ResultView(BaseView):
             if ray_overlay is not None:
                 plot = plot * ray_overlay
 
-        # Spot bbox overlay
-        if self._selected_spot is not None:
-            spot_overlay = self._build_spot_overlay(self._selected_spot, use_lonlat, mesh)
-            plot = plot * spot_overlay
+        # Spot bbox overlay — edit mode vs view mode
+        editing = self._edit_mode.value and self._selected_spot is not None
+
+        if editing:
+            # In edit mode: editable rectangle for selected spot, dimmed overlays for others
+            bb = self._selected_spot.bbox
+            if use_lonlat:
+                ex0, ey0 = bb.lon_min, bb.lat_min
+                ex1, ey1 = bb.lon_max, bb.lat_max
+            else:
+                corners_lon = np.array([bb.lon_min, bb.lon_max])
+                corners_lat = np.array([bb.lat_min, bb.lat_max])
+                cx, cy = mesh.lon_lat_to_utm(corners_lon, corners_lat)
+                ex0, ey0 = float(cx[0]), float(cy[0])
+                ex1, ey1 = float(cx[1]), float(cy[1])
+
+            edit_rects = hv.Rectangles([(ex0, ey0, ex1, ey1)]).opts(
+                fill_alpha=SPOT_EDIT_FILL_ALPHA,
+                fill_color=SPOT_EDIT_COLOR,
+                line_color=SPOT_EDIT_COLOR,
+                line_width=2,
+                line_dash='solid',
+            )
+            self._box_stream = streams.BoxEdit(source=edit_rects, num_objects=1)
+            self._box_stream.add_subscriber(self._on_box_edit)
+            plot = plot * edit_rects
+
+            # Dimmed overlays for non-selected spots
+            for spot in self._spots_list:
+                if spot is not self._selected_spot:
+                    overlay = self._build_spot_overlay(spot, use_lonlat, mesh, dimmed=True)
+                    plot = plot * overlay
+
+            # Label for selected spot
+            label = hv.Text((ex0 + ex1) / 2, ey1, self._selected_spot.display_name).opts(
+                color=SPOT_EDIT_COLOR, text_font_size='9pt',
+                text_align='center', text_baseline='bottom',
+            )
+            plot = plot * label
+        else:
+            self._box_stream = None
+            if self._selected_spot is not None:
+                spot_overlay = self._build_spot_overlay(self._selected_spot, use_lonlat, mesh)
+                plot = plot * spot_overlay
 
         # Click marker — handled at the Bokeh level via a hook so that
         # tapping never triggers a HoloViews/datashader range recalculation.
         # Uses self._tap (persistent) so the Panel layout's inspector pane
         # is always bound to the same stream across region/use_lonlat changes.
+        # Suppressed in edit mode to avoid conflicts with BoxEdit tool.
 
         def _add_tap_handler(plot_obj, element):
             from bokeh.events import Tap as BokehTap
@@ -411,17 +566,25 @@ class ResultView(BaseView):
                 fig.y_range.end = self._pending_ranges['y_end']
                 self._pending_ranges = None
 
-            marker_src = ColumnDataSource(data={'x': [], 'y': []})
-            fig.scatter(
-                'x', 'y', source=marker_src, size=15,
-                fill_color='red', line_color='white', line_width=2,
-                level='overlay',
-            )
-            fig.js_on_event('tap', CustomJS(
-                args=dict(source=marker_src),
-                code="source.data = {'x': [cb_obj.x], 'y': [cb_obj.y]};",
-            ))
-            fig.on_event(BokehTap, lambda event: self._tap.event(x=event.x, y=event.y))
+            if editing:
+                # Activate BoxEditTool as the drag tool (overrides pan)
+                from bokeh.models.tools import BoxEditTool
+                for tool in fig.tools:
+                    if isinstance(tool, BoxEditTool):
+                        fig.toolbar.active_drag = tool
+                        break
+            else:
+                marker_src = ColumnDataSource(data={'x': [], 'y': []})
+                fig.scatter(
+                    'x', 'y', source=marker_src, size=15,
+                    fill_color='red', line_color='white', line_width=2,
+                    level='overlay',
+                )
+                fig.js_on_event('tap', CustomJS(
+                    args=dict(source=marker_src),
+                    code="source.data = {'x': [cb_obj.x], 'y': [cb_obj.y]};",
+                ))
+                fig.on_event(BokehTap, lambda event: self._tap.event(x=event.x, y=event.y))
 
         plot = plot.opts(
             width=1000,
@@ -683,6 +846,9 @@ class ResultView(BaseView):
         spot_controls = pn.Column(
             pn.pane.Markdown("### Surf Spots"),
             self._spot_selector,
+            self._edit_mode,
+            self._save_spots_btn,
+            self._edit_status_html,
             self._spot_stats_html,
             width=240,
         )

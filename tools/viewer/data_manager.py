@@ -383,6 +383,14 @@ class DataManager:
     # Cache Management
     # -----------------------------------------------------------------
 
+    def invalidate_spots(self, region: str):
+        """Clear cached spots and spot aggregator for a region.
+
+        Call after spot bounding boxes are edited and saved.
+        """
+        self._cache.pop(('spots', region), None)
+        self._cache.pop(('spot_aggregator', region), None)
+
     def clear_cache(self, region: Optional[str] = None):
         """Clear all cached data, or only entries for a specific region."""
         if region:

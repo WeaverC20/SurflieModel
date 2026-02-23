@@ -103,6 +103,27 @@ class SurfSpot:
 _SPOTS_DIR = Path(__file__).parent
 
 
+def save_spots_config(region_name: str, spots: List[SurfSpot]) -> Path:
+    """Save spot definitions back to the region's JSON config file.
+
+    Args:
+        region_name: Region identifier (e.g., "socal")
+        spots: List of SurfSpot objects to save
+
+    Returns:
+        Path to the written file
+    """
+    config_path = _SPOTS_DIR / f"{region_name}.json"
+    config = {
+        "region": region_name,
+        "spots": [s.to_dict() for s in spots],
+    }
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+        f.write('\n')
+    return config_path
+
+
 def load_spots_config(region_name: str) -> List[SurfSpot]:
     """
     Load spot definitions for a region from its JSON config file.
