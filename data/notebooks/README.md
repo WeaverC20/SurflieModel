@@ -27,4 +27,4 @@ jupyter lab
 ## Difference from `data/analysis/`
 
 - **notebooks/**: General data exploration, open to team
-- **analysis/**: Private analysis (e.g., vs Surfline), just for you
+- **analysis/**: Private analysis, just for you
