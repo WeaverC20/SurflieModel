@@ -158,6 +158,9 @@ class ForwardTracingResult:
     # Keys: is_breaking, breaker_index, iribarren, breaker_type, breaking_intensity
     breaking_fields: Optional[dict] = None
 
+    # Optional wind metadata (when wind-modified breaking is used)
+    wind_metadata: Optional[dict] = None
+
     @property
     def coverage_rate(self) -> float:
         """Fraction of points covered by at least one ray."""

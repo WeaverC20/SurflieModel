@@ -152,6 +152,10 @@ def save_forward_result(
         },
     }
 
+    # Include wind metadata if available
+    if result.wind_metadata is not None:
+        metadata["wind"] = result.wind_metadata
+
     with open(json_path, 'w') as f:
         json.dump(metadata, f, indent=2)
 

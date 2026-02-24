@@ -162,6 +162,9 @@ def apply_combined_breaking_correction(
     per_partition_data: Dict[int, dict],
     gamma: float = 0.42,
     alongshore_bin_m: float = 100.0,
+    wind_u: Optional[np.ndarray] = None,
+    wind_v: Optional[np.ndarray] = None,
+    wind_Cw: float = 0.15,
 ) -> Tuple[np.ndarray, Dict[int, dict], np.ndarray]:
     """
     Apply post-deposition cross-shore transect breaking correction.
@@ -234,7 +237,29 @@ def apply_combined_breaking_correction(
                 continue
 
             Hs_total = np.sqrt(8.0 * total_e / (RHO * G))
-            H_max = gamma * h
+
+            # Wind-modified gamma (Douglass, 1990)
+            gamma_local = gamma
+            if wind_u is not None and wind_v is not None:
+                wu = wind_u[pt_idx]
+                wv = wind_v[pt_idx]
+                wind_speed = np.sqrt(wu * wu + wv * wv)
+                if wind_speed > 0.1:
+                    wind_dir = np.arctan2(wv, wu)
+                    # Energy-weighted wave direction at this point
+                    dx_total = 0.0
+                    dy_total = 0.0
+                    for k in partition_keys:
+                        if 'dir_x' in per_partition_data[k]:
+                            dx_total += per_partition_data[k]['dir_x'][pt_idx]
+                            dy_total += per_partition_data[k]['dir_y'][pt_idx]
+                    wave_dir = np.arctan2(dy_total, dx_total)
+                    phi = wind_dir - wave_dir
+                    C_local = np.sqrt(G * h)  # Shallow water approximation
+                    gamma_local = gamma * (1.0 - wind_Cw * wind_speed * np.cos(phi) / C_local)
+                    gamma_local = max(0.3, min(1.0, gamma_local))
+
+            H_max = gamma_local * h
 
             if Hs_total > H_max:
                 is_breaking[pt_idx] = True
@@ -270,6 +295,9 @@ def compute_breaking_characterization(
     per_partition_data: Dict[int, dict],
     is_breaking: np.ndarray,
     gamma: float = 0.42,
+    wind_u: Optional[np.ndarray] = None,
+    wind_v: Optional[np.ndarray] = None,
+    wind_Cw: float = 0.15,
 ) -> dict:
     """
     Compute breaking characterization at mesh points after cross-shore correction.
@@ -355,6 +383,25 @@ def compute_breaking_characterization(
     safe_H0_L0 = np.where(H0_L0 > 0, H0_L0, 1e-6)
     safe_slopes = np.where(np.isfinite(slopes) & (slopes > 0), slopes, 0.005)
     gamma_b = np.clip(0.57 + 0.71 * safe_H0_L0**0.12 * safe_slopes**0.36, 0.5, 1.5)
+
+    # Apply Douglass (1990) wind modification to breaker index
+    if wind_u is not None and wind_v is not None:
+        wind_speed = np.sqrt(wind_u**2 + wind_v**2)
+        has_wind = wind_speed > 0.1
+        if np.any(has_wind):
+            wind_dir = np.arctan2(wind_v, wind_u)
+            # Energy-weighted wave direction from partition dir components
+            dx_total = np.zeros(n_points)
+            dy_total = np.zeros(n_points)
+            for k in partition_keys:
+                if 'dir_x' in per_partition_data[k]:
+                    dx_total += per_partition_data[k]['dir_x']
+                    dy_total += per_partition_data[k]['dir_y']
+            wave_dir = np.arctan2(dy_total, dx_total)
+            phi = wind_dir - wave_dir
+            C_local = np.sqrt(G * depths)  # Shallow water approximation
+            wind_factor = 1.0 - wind_Cw * wind_speed * np.cos(phi) / np.maximum(C_local, 0.1)
+            gamma_b = np.where(has_wind, np.clip(gamma_b * wind_factor, 0.3, 1.5), gamma_b)
 
     # Iribarren: xi = m / sqrt(H/L0)
     steepness = np.where(L0 > 0, Hs_total / safe_L0, 0.0)

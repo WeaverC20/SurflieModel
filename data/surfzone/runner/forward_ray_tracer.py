@@ -28,6 +28,8 @@ from .wave_physics import (
     update_ray_direction,
     nautical_to_math,
     thornton_guza_dissipation,
+    breaker_index_wind_modified,
+    relative_wind_angle,
 )
 from .ray_tracer import (
     interpolate_depth_indexed,
@@ -83,6 +85,9 @@ class ForwardTracerConfig:
     breaking_gamma: float = 0.42           # T&G breaking parameter (onset threshold)
     breaking_gamma2: float = 0.21          # Reformation threshold (Daly et al.)
     breaking_B: float = 1.0               # T&G calibration coefficient
+
+    # Wind-modified breaking (Douglass, 1990)
+    wind_Cw: float = 0.15                 # Wind modification coefficient for breaker index
 
 
 @dataclass
@@ -584,6 +589,10 @@ def propagate_single_ray(
     breaking_gamma: float,
     breaking_gamma2: float,
     breaking_B: float,
+    # Wind fields for Douglass wind-modified breaking (per mesh vertex)
+    wind_u: np.ndarray,
+    wind_v: np.ndarray,
+    wind_Cw: float,
 ) -> Tuple[float, bool, float]:
     """
     Propagate a single ray and deposit energy density at each step.
@@ -663,7 +672,32 @@ def propagate_single_ray(
         # 4b. Breaking dissipation (Thornton & Guza + Daly threshold)
         if enable_breaking and h > 0.05:
             Hs_local = (8.0 * E_local / (1025.0 * 9.81)) ** 0.5
-            H_max = breaking_gamma * h
+
+            # Wind-modified breaker index (Douglass, 1990)
+            gamma_b = breaking_gamma
+            if len(wind_u) > 0:
+                wu = interpolate_depth_indexed(
+                    x, y, points_x, points_y, wind_u, triangles,
+                    grid_x_min, grid_y_min, grid_cell_size,
+                    grid_n_cells_x, grid_n_cells_y,
+                    grid_cell_starts, grid_cell_counts, grid_triangles
+                )
+                wv = interpolate_depth_indexed(
+                    x, y, points_x, points_y, wind_v, triangles,
+                    grid_x_min, grid_y_min, grid_cell_size,
+                    grid_n_cells_x, grid_n_cells_y,
+                    grid_cell_starts, grid_cell_counts, grid_triangles
+                )
+                if not np.isnan(wu) and not np.isnan(wv):
+                    wind_speed = np.sqrt(wu * wu + wv * wv)
+                    if wind_speed > 0.1:
+                        wind_dir = np.arctan2(wv, wu)
+                        phi = relative_wind_angle(wind_dir, theta)
+                        gamma_b = breaker_index_wind_modified(
+                            breaking_gamma, wind_speed, phi, C, wind_Cw
+                        )
+
+            H_max = gamma_b * h
 
             # Daly et al. dual-threshold hysteresis
             if not is_breaking and Hs_local > H_max:
@@ -674,7 +708,7 @@ def propagate_single_ray(
             if is_breaking:
                 f = 1.0 / period
                 D_br = thornton_guza_dissipation(
-                    Hs_local, h, f, breaking_gamma, breaking_B
+                    Hs_local, h, f, gamma_b, breaking_B
                 )
                 power_loss = D_br * width * current_step
                 power = max(0.0, power - power_loss)
@@ -818,6 +852,10 @@ def propagate_single_ray_with_path(
     breaking_gamma: float,
     breaking_gamma2: float,
     breaking_B: float,
+    # Wind fields for Douglass wind-modified breaking (per mesh vertex)
+    wind_u: np.ndarray,
+    wind_v: np.ndarray,
+    wind_Cw: float,
 ) -> int:
     """
     Propagate a single ray, deposit energy, and record path.
@@ -877,7 +915,32 @@ def propagate_single_ray_with_path(
         # 4b. Breaking dissipation (Thornton & Guza + Daly threshold)
         if enable_breaking and h > 0.05:
             Hs_check = (8.0 * E_local / (1025.0 * 9.81)) ** 0.5
-            H_max = breaking_gamma * h
+
+            # Wind-modified breaker index (Douglass, 1990)
+            gamma_b = breaking_gamma
+            if len(wind_u) > 0:
+                wu = interpolate_depth_indexed(
+                    x, y, points_x, points_y, wind_u, triangles,
+                    grid_x_min, grid_y_min, grid_cell_size,
+                    grid_n_cells_x, grid_n_cells_y,
+                    grid_cell_starts, grid_cell_counts, grid_triangles
+                )
+                wv = interpolate_depth_indexed(
+                    x, y, points_x, points_y, wind_v, triangles,
+                    grid_x_min, grid_y_min, grid_cell_size,
+                    grid_n_cells_x, grid_n_cells_y,
+                    grid_cell_starts, grid_cell_counts, grid_triangles
+                )
+                if not np.isnan(wu) and not np.isnan(wv):
+                    wind_speed = np.sqrt(wu * wu + wv * wv)
+                    if wind_speed > 0.1:
+                        wind_dir = np.arctan2(wv, wu)
+                        phi = relative_wind_angle(wind_dir, theta)
+                        gamma_b = breaker_index_wind_modified(
+                            breaking_gamma, wind_speed, phi, C, wind_Cw
+                        )
+
+            H_max = gamma_b * h
 
             if not is_breaking and Hs_check > H_max:
                 is_breaking = True
@@ -887,7 +950,7 @@ def propagate_single_ray_with_path(
             if is_breaking:
                 f = 1.0 / period
                 D_br = thornton_guza_dissipation(
-                    Hs_check, h, f, breaking_gamma, breaking_B
+                    Hs_check, h, f, gamma_b, breaking_B
                 )
                 power_loss = D_br * width * current_step
                 power = max(0.0, power - power_loss)
@@ -1020,6 +1083,10 @@ def propagate_all_rays(
     breaking_gamma: float,
     breaking_gamma2: float,
     breaking_B: float,
+    # Wind fields for Douglass wind-modified breaking (per mesh vertex)
+    wind_u: np.ndarray,
+    wind_v: np.ndarray,
+    wind_Cw: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Propagate all rays in parallel and deposit energy.
@@ -1067,6 +1134,7 @@ def propagate_all_rays(
             cfl_curvature_fraction, min_curvature_step,
             gradient_min_smooth, gradient_smooth_fraction,
             enable_breaking, breaking_gamma, breaking_gamma2, breaking_B,
+            wind_u, wind_v, wind_Cw,
         )
         distances_traveled[ray_idx] = dist
         broke_flags[ray_idx] = broke
@@ -1100,6 +1168,8 @@ class ForwardRayTracer:
         config: Optional[ForwardTracerConfig] = None,
         track_paths: bool = False,
         sample_fraction: float = 0.1,
+        wind_u: Optional[np.ndarray] = None,
+        wind_v: Optional[np.ndarray] = None,
     ):
         self.mesh = mesh
         self.boundary = boundary_conditions
@@ -1118,6 +1188,17 @@ class ForwardRayTracer:
         # Build point spatial index for O(k) lookups (instead of O(N))
         self._point_grid_starts, self._point_grid_counts, self._point_grid_indices = \
             self._build_point_spatial_index()
+
+        # Wind data (per mesh vertex, 1D arrays matching mesh point count)
+        n_vertices = len(self._mesh_arrays['points_x'])
+        if wind_u is not None and wind_v is not None:
+            self._wind_u = np.ascontiguousarray(wind_u, dtype=np.float64)
+            self._wind_v = np.ascontiguousarray(wind_v, dtype=np.float64)
+            self._has_wind = True
+        else:
+            self._wind_u = np.zeros(n_vertices, dtype=np.float64)
+            self._wind_v = np.zeros(n_vertices, dtype=np.float64)
+            self._has_wind = False
 
         # Path collection storage (filled during tracing if track_paths=True)
         self._collected_paths = []
@@ -1261,6 +1342,7 @@ class ForwardRayTracer:
                     self.config.gradient_min_smooth_m, self.config.gradient_smooth_fraction,
                     self.config.enable_breaking, self.config.breaking_gamma,
                     self.config.breaking_gamma2, self.config.breaking_B,
+                    self._wind_u, self._wind_v, self.config.wind_Cw,
                 )
 
                 # Store the path data (copy the valid portion)
@@ -1301,6 +1383,7 @@ class ForwardRayTracer:
                     self.config.gradient_min_smooth_m, self.config.gradient_smooth_fraction,
                     self.config.enable_breaking, self.config.breaking_gamma,
                     self.config.breaking_gamma2, self.config.breaking_B,
+                    self._wind_u, self._wind_v, self.config.wind_Cw,
                 )
                 all_distances.append(dist)
                 all_broke.append(broke)
@@ -1487,6 +1570,11 @@ class ForwardRayTracer:
         print(f"Forward ray tracing: {self.boundary.n_partitions} partitions")
         if self.track_paths:
             print(f"  Path tracking enabled: sampling {self.sample_fraction*100:.0f}% of rays")
+        if self._has_wind:
+            wind_speed = np.sqrt(self._wind_u**2 + self._wind_v**2)
+            mean_ws = wind_speed[wind_speed > 0].mean() if np.any(wind_speed > 0) else 0.0
+            print(f"  Wind-modified breaking (Douglass 1990): Cw={self.config.wind_Cw}, "
+                  f"wind speed {mean_ws:.1f} m/s mean")
 
         energy, ray_counts, per_partition_data = self.trace_all_partitions()
 
@@ -1498,6 +1586,9 @@ class ForwardRayTracer:
             energy, per_partition_data, is_breaking = apply_combined_breaking_correction(
                 self.mesh, energy, per_partition_data,
                 gamma=self.config.breaking_gamma,
+                wind_u=self._wind_u if self._has_wind else None,
+                wind_v=self._wind_v if self._has_wind else None,
+                wind_Cw=self.config.wind_Cw,
             )
 
         Hs = self.energy_to_wave_height(energy)
@@ -1526,6 +1617,9 @@ class ForwardRayTracer:
             breaking_fields = compute_breaking_characterization(
                 self.mesh, energy, per_partition_data, is_breaking,
                 gamma=self.config.breaking_gamma,
+                wind_u=self._wind_u if self._has_wind else None,
+                wind_v=self._wind_v if self._has_wind else None,
+                wind_Cw=self.config.wind_Cw,
             )
 
             # Clean up temporary Tp from per_partition_data

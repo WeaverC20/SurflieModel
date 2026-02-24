@@ -48,6 +48,8 @@ class ForwardSurfzoneRunner:
         config: Optional['ForwardTracerConfig'] = None,
         track_paths: bool = False,
         sample_fraction: float = 0.1,
+        wind_u: Optional[np.ndarray] = None,
+        wind_v: Optional[np.ndarray] = None,
     ):
         """
         Initialize forward surfzone runner.
@@ -58,6 +60,8 @@ class ForwardSurfzoneRunner:
             config: ForwardTracerConfig (uses defaults if None)
             track_paths: If True, collect ray paths for visualization
             sample_fraction: Fraction of rays to sample for path tracking (0.0-1.0)
+            wind_u: Per-vertex eastward wind component (m/s), for Douglass breaking
+            wind_v: Per-vertex northward wind component (m/s), for Douglass breaking
         """
         from .forward_ray_tracer import ForwardRayTracer, ForwardTracerConfig
 
@@ -72,6 +76,8 @@ class ForwardSurfzoneRunner:
             mesh, boundary_conditions, self.config,
             track_paths=track_paths,
             sample_fraction=sample_fraction,
+            wind_u=wind_u,
+            wind_v=wind_v,
         )
 
         logger.info(
@@ -197,6 +203,8 @@ def run_forward_surfzone_simulation(
     kernel_sigma_m: float = 25.0,
     track_paths: bool = False,
     sample_fraction: float = 0.1,
+    wind_u: Optional[np.ndarray] = None,
+    wind_v: Optional[np.ndarray] = None,
 ) -> ForwardTracingResult:
     """
     Convenience function to run a complete forward surfzone simulation.
@@ -240,6 +248,8 @@ def run_forward_surfzone_simulation(
         mesh, boundary_conditions, config,
         track_paths=track_paths,
         sample_fraction=sample_fraction,
+        wind_u=wind_u,
+        wind_v=wind_v,
     )
     result = runner.run(region_name=region_name)
 

@@ -166,6 +166,88 @@ def get_region_paths(region_name: str, swan_resolution: Optional[str] = None) ->
     }
 
 
+def load_wind_for_mesh(mesh, wind_file=None):
+    """
+    Load GFS wind data and interpolate to mesh vertex points.
+
+    Args:
+        mesh: SurfZoneMesh instance
+        wind_file: Optional path to specific GFS NetCDF file.
+                   If None, auto-detects the latest file.
+
+    Returns:
+        Tuple of (wind_u, wind_v, source_path) where wind_u/wind_v are
+        1D arrays (n_vertices,) in m/s, or None if no wind data available.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+
+    # Find wind file
+    wind_dir = PROJECT_ROOT / "data" / "downloaded_weather_data" / "wind"
+    if wind_file:
+        nc_path = Path(wind_file)
+    else:
+        # Auto-detect latest
+        nc_files = sorted(wind_dir.glob("gfs_*.nc"))
+        if not nc_files:
+            logger.warning("No GFS wind files found. Running without wind modification.")
+            return None
+        nc_path = nc_files[-1]
+
+    if not nc_path.exists():
+        logger.warning(f"Wind file not found: {nc_path}. Running without wind modification.")
+        return None
+
+    logger.info(f"Loading wind data: {nc_path.name}")
+
+    import xarray as xr
+    with xr.open_dataset(nc_path) as ds:
+        # Select first time step (single snapshot for simulation)
+        if "time" in ds.dims and len(ds.time) > 1:
+            ds = ds.isel(time=0)
+        elif "time" in ds.dims:
+            ds = ds.isel(time=0)
+
+        gfs_lats = ds["lat"].values
+        gfs_lons = ds["lon"].values
+        gfs_u = ds["u_wind"].values
+        gfs_v = ds["v_wind"].values
+
+    # Handle NaN in wind data (fill with 0 before interpolation)
+    gfs_u = np.where(np.isfinite(gfs_u), gfs_u, 0.0)
+    gfs_v = np.where(np.isfinite(gfs_v), gfs_v, 0.0)
+
+    # Convert mesh points from UTM to lon/lat
+    mesh_lons, mesh_lats = mesh.utm_to_lon_lat(mesh.points_x, mesh.points_y)
+
+    # Ensure lat/lon are sorted ascending for RegularGridInterpolator
+    if gfs_lats[0] > gfs_lats[-1]:
+        gfs_lats = gfs_lats[::-1]
+        gfs_u = gfs_u[::-1, :]
+        gfs_v = gfs_v[::-1, :]
+
+    # Build interpolators for u and v
+    u_interp = RegularGridInterpolator(
+        (gfs_lats, gfs_lons), gfs_u,
+        method='linear', bounds_error=False, fill_value=0.0
+    )
+    v_interp = RegularGridInterpolator(
+        (gfs_lats, gfs_lons), gfs_v,
+        method='linear', bounds_error=False, fill_value=0.0
+    )
+
+    # Interpolate to mesh points
+    query_pts = np.column_stack([mesh_lats, mesh_lons])
+    wind_u = u_interp(query_pts)
+    wind_v = v_interp(query_pts)
+
+    wind_speed = np.sqrt(wind_u**2 + wind_v**2)
+    logger.info(f"  Wind interpolated to {len(wind_u):,} mesh points")
+    logger.info(f"  Wind speed: {wind_speed.min():.1f} - {wind_speed.max():.1f} m/s "
+                f"(mean: {wind_speed.mean():.1f} m/s)")
+
+    return wind_u, wind_v, nc_path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Run surfzone wave propagation simulation (forward ray tracing)',
@@ -206,6 +288,12 @@ Examples:
                         help='Store sampled ray paths for visualization')
     parser.add_argument('--sample-rays', type=float, default=0.1,
                         help='Fraction of rays to sample for path tracking (0.0-1.0, default: 0.1)')
+
+    # Wind options (Douglass 1990 wind-modified breaking)
+    parser.add_argument('--wind-file', type=str, default=None,
+                        help='Path to GFS wind NetCDF file (default: auto-detect latest)')
+    parser.add_argument('--no-wind', action='store_true',
+                        help='Disable wind-modified breaking (use constant gamma)')
 
     # Performance options
     parser.add_argument('--clear-cache', action='store_true',
@@ -344,6 +432,20 @@ Examples:
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load wind data for Douglass (1990) wind-modified breaking
+    wind_u = None
+    wind_v = None
+    wind_source = None
+    if not args.no_wind:
+        wind_result = load_wind_for_mesh(mesh, args.wind_file)
+        if wind_result is not None:
+            wind_u, wind_v, wind_source = wind_result
+            logger.info(f"  Wind source: {wind_source.name}")
+        else:
+            logger.info("  No wind data — using constant breaking gamma")
+    else:
+        logger.info("  Wind-modified breaking disabled (--no-wind)")
+
     # Configure forward tracer
     forward_config = ForwardTracerConfig(
         boundary_spacing_m=args.boundary_spacing,
@@ -355,8 +457,23 @@ Examples:
         mesh, boundary_conditions, forward_config,
         track_paths=args.track_rays,
         sample_fraction=args.sample_rays,
+        wind_u=wind_u,
+        wind_v=wind_v,
     )
     result = forward_runner.run(region_name=region_display_name)
+
+    # Attach wind metadata to result
+    if wind_u is not None:
+        wind_speed = np.sqrt(wind_u**2 + wind_v**2)
+        result.wind_metadata = {
+            "source": wind_source.name,
+            "mean_speed_ms": round(float(wind_speed.mean()), 2),
+            "max_speed_ms": round(float(wind_speed.max()), 2),
+            "Cw": forward_config.wind_Cw,
+            "enabled": True,
+        }
+    else:
+        result.wind_metadata = {"enabled": False}
 
     # Print summary
     logger.info("-" * 40)
