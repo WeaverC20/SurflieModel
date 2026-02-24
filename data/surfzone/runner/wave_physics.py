@@ -619,6 +619,45 @@ BREAKER_TYPE_LABELS = {
 
 
 # =============================================================================
+# Breaking Dissipation Models
+# =============================================================================
+
+@njit(cache=True)
+def thornton_guza_dissipation(Hs: float, h: float, f: float, gamma: float, B: float) -> float:
+    """
+    Thornton & Guza (1983) breaking dissipation rate.
+
+    D_br = (3√π / 16) × B³ × f × ρg × Hs⁵ / (γ² × h³)
+
+    Fully explicit (no iteration), calibrated for Southern California
+    (Torrey Pines field data). Numba-compatible.
+
+    Args:
+        Hs: Significant wave height (m)
+        h: Water depth (m)
+        f: Wave frequency = 1/T (Hz)
+        gamma: Breaking parameter (0.42 for T&G convention)
+        B: Calibration coefficient (~1.0)
+
+    Returns:
+        Dissipation rate D_br (W/m²), always >= 0
+
+    References:
+        Thornton, E.B. & Guza, R.T. (1983). Transformation of wave height
+        distribution. JGR 88(C10), 5925-5938.
+    """
+    if h <= 0.05 or Hs <= 0.0 or f <= 0.0:
+        return 0.0
+
+    # sqrt(pi) = 1.7724538509055159
+    SQRT_PI = 1.7724538509055159
+    RHO_G = 1025.0 * 9.81  # rho * g
+
+    D_br = (3.0 * SQRT_PI / 16.0) * B * B * B * f * RHO_G * Hs**5 / (gamma * gamma * h * h * h)
+    return D_br
+
+
+# =============================================================================
 # Beach Slope Calculation
 # =============================================================================
 

@@ -27,6 +27,7 @@ from .wave_physics import (
     local_wave_properties,
     update_ray_direction,
     nautical_to_math,
+    thornton_guza_dissipation,
 )
 from .ray_tracer import (
     interpolate_depth_indexed,
@@ -76,6 +77,12 @@ class ForwardTracerConfig:
     # Based on WKB validity: bathymetry should vary slowly relative to wavelength
     gradient_min_smooth_m: float = 25.0    # Minimum smoothing radius (m)
     gradient_smooth_fraction: float = 0.25  # Fraction of wavelength (L/4)
+
+    # Breaking dissipation (Thornton & Guza 1983 + Daly threshold)
+    enable_breaking: bool = True           # Toggle breaking dissipation
+    breaking_gamma: float = 0.42           # T&G breaking parameter (onset threshold)
+    breaking_gamma2: float = 0.21          # Reformation threshold (Daly et al.)
+    breaking_B: float = 1.0               # T&G calibration coefficient
 
 
 @dataclass
@@ -572,12 +579,18 @@ def propagate_single_ray(
     # Wavelength-dependent gradient smoothing
     gradient_min_smooth: float,
     gradient_smooth_fraction: float,
+    # Breaking dissipation (Thornton & Guza + Daly threshold)
+    enable_breaking: bool,
+    breaking_gamma: float,
+    breaking_gamma2: float,
+    breaking_B: float,
 ) -> Tuple[float, bool, float]:
     """
     Propagate a single ray and deposit energy density at each step.
 
-    Uses power-based model where P = E × Cg × W is conserved.
-    Local energy density E = P / (Cg × W) increases with focusing (smaller W).
+    Uses power-based model where P = E × Cg × W is conserved outside
+    the surf zone. When breaking is enabled, power is reduced by
+    Thornton & Guza (1983) dissipation with Daly et al. reformation threshold.
 
     Step size adapts to water depth:
     - Deep water (>10m): step_deep (default 50m)
@@ -594,7 +607,7 @@ def propagate_single_ray(
     x = start_x
     y = start_y
     theta = start_theta
-    power = start_power  # Power is conserved (not energy)
+    power = start_power  # Power is conserved (not energy) outside breaking zone
     width = start_width
 
     # Deep water properties (computed once per ray)
@@ -602,6 +615,7 @@ def propagate_single_ray(
 
     cutoff = 3.0 * kernel_sigma
     broke = False
+    is_breaking = False  # Daly threshold state (hysteresis)
     final_depth = 0.0
     distance_traveled = 0.0
 
@@ -645,6 +659,28 @@ def propagate_single_ray(
         # P = E × Cg × W is conserved, so E = P / (Cg × W)
         # Focusing (W smaller) → higher E; Spreading (W larger) → lower E
         E_local = power / (Cg * width)
+
+        # 4b. Breaking dissipation (Thornton & Guza + Daly threshold)
+        if enable_breaking and h > 0.05:
+            Hs_local = (8.0 * E_local / (1025.0 * 9.81)) ** 0.5
+            H_max = breaking_gamma * h
+
+            # Daly et al. dual-threshold hysteresis
+            if not is_breaking and Hs_local > H_max:
+                is_breaking = True
+            if is_breaking and Hs_local < breaking_gamma2 * h:
+                is_breaking = False
+
+            if is_breaking:
+                f = 1.0 / period
+                D_br = thornton_guza_dissipation(
+                    Hs_local, h, f, breaking_gamma, breaking_B
+                )
+                power_loss = D_br * width * current_step
+                power = max(0.0, power - power_loss)
+                broke = True
+                # Recompute E_local with reduced power
+                E_local = power / (Cg * width)
 
         # 5. Ray direction components
         dx = np.cos(theta)
@@ -777,6 +813,11 @@ def propagate_single_ray_with_path(
     # Wavelength-dependent gradient smoothing
     gradient_min_smooth: float,
     gradient_smooth_fraction: float,
+    # Breaking dissipation (Thornton & Guza + Daly threshold)
+    enable_breaking: bool,
+    breaking_gamma: float,
+    breaking_gamma2: float,
+    breaking_B: float,
 ) -> int:
     """
     Propagate a single ray, deposit energy, and record path.
@@ -795,6 +836,7 @@ def propagate_single_ray_with_path(
 
     L0 = 9.81 * period * period / (2.0 * 3.141592653589793)
     cutoff = 3.0 * kernel_sigma
+    is_breaking = False  # Daly threshold state
     distance_traveled = 0.0
     step = 0
     max_steps = len(path_x)  # Use pre-allocated array length as safety limit
@@ -831,6 +873,26 @@ def propagate_single_ray_with_path(
 
         # 4. Compute local energy density and Hs
         E_local = power / (Cg * width)
+
+        # 4b. Breaking dissipation (Thornton & Guza + Daly threshold)
+        if enable_breaking and h > 0.05:
+            Hs_check = (8.0 * E_local / (1025.0 * 9.81)) ** 0.5
+            H_max = breaking_gamma * h
+
+            if not is_breaking and Hs_check > H_max:
+                is_breaking = True
+            if is_breaking and Hs_check < breaking_gamma2 * h:
+                is_breaking = False
+
+            if is_breaking:
+                f = 1.0 / period
+                D_br = thornton_guza_dissipation(
+                    Hs_check, h, f, breaking_gamma, breaking_B
+                )
+                power_loss = D_br * width * current_step
+                power = max(0.0, power - power_loss)
+                E_local = power / (Cg * width)
+
         Hs_local = np.sqrt(8.0 * E_local / (1025.0 * 9.81))
 
         # 5. Record path data
@@ -953,6 +1015,11 @@ def propagate_all_rays(
     # Wavelength-dependent gradient smoothing
     gradient_min_smooth: float,
     gradient_smooth_fraction: float,
+    # Breaking dissipation
+    enable_breaking: bool,
+    breaking_gamma: float,
+    breaking_gamma2: float,
+    breaking_B: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Propagate all rays in parallel and deposit energy.
@@ -999,6 +1066,7 @@ def propagate_all_rays(
             kernel_sigma, min_width,
             cfl_curvature_fraction, min_curvature_step,
             gradient_min_smooth, gradient_smooth_fraction,
+            enable_breaking, breaking_gamma, breaking_gamma2, breaking_B,
         )
         distances_traveled[ray_idx] = dist
         broke_flags[ray_idx] = broke
@@ -1191,6 +1259,8 @@ class ForwardRayTracer:
                     self.config.kernel_sigma_m, self.config.min_tube_width_m,
                     self.config.cfl_curvature_fraction, self.config.min_curvature_step_m,
                     self.config.gradient_min_smooth_m, self.config.gradient_smooth_fraction,
+                    self.config.enable_breaking, self.config.breaking_gamma,
+                    self.config.breaking_gamma2, self.config.breaking_B,
                 )
 
                 # Store the path data (copy the valid portion)
@@ -1229,6 +1299,8 @@ class ForwardRayTracer:
                     self.config.kernel_sigma_m, self.config.min_tube_width_m,
                     self.config.cfl_curvature_fraction, self.config.min_curvature_step_m,
                     self.config.gradient_min_smooth_m, self.config.gradient_smooth_fraction,
+                    self.config.enable_breaking, self.config.breaking_gamma,
+                    self.config.breaking_gamma2, self.config.breaking_B,
                 )
                 all_distances.append(dist)
                 all_broke.append(broke)
@@ -1416,6 +1488,16 @@ class ForwardRayTracer:
             print(f"  Path tracking enabled: sampling {self.sample_fraction*100:.0f}% of rays")
 
         energy, ray_counts, per_partition_data = self.trace_all_partitions()
+
+        # Stage 2: Post-deposition cross-shore transect correction
+        # Catches combined multi-partition breaking that per-ray dissipation misses
+        if self.config.enable_breaking:
+            from .breaking_correction import apply_combined_breaking_correction
+            energy, per_partition_data = apply_combined_breaking_correction(
+                self.mesh, energy, per_partition_data,
+                gamma=self.config.breaking_gamma,
+            )
+
         Hs = self.energy_to_wave_height(energy)
 
         # Compute Hs and direction for each partition
