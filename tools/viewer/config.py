@@ -90,3 +90,25 @@ SPOT_EDIT_COLOR = 'cyan'
 SPOT_EDIT_FILL_ALPHA = 0.15
 SPOT_DIMMED_COLOR = '#666666'
 SPOT_DIMMED_WIDTH = 1
+
+# Statistic column name → human-readable display label for variable selector.
+# Only columns suitable for heatmap display (not per-partition variants).
+STAT_LABELS = {
+    # Set/groupiness statistics
+    'set_period': 'Set Period (s)',
+    'waves_per_set': 'Waves per Set',
+    'groupiness_factor': 'Groupiness Factor',
+    'height_amplification': 'Height Amplification',
+    'set_duration': 'Set Duration (s)',
+    'lull_duration': 'Lull Duration (s)',
+    'set_height': 'Set Height (m)',
+    # Peakiness statistics
+    'combined_steepness': 'Combined Steepness',
+    'ursell_number': 'Ursell Number',
+    # Breaking statistics
+    'is_breaking': 'Breaking (Yes/No)',
+    'breaker_index': 'Breaker Index',
+    'iribarren': 'Iribarren Number',
+    'breaker_type': 'Breaker Type',
+    'breaking_intensity': 'Breaking Intensity',
+}

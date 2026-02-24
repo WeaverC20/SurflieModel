@@ -1473,15 +1473,16 @@ class ForwardRayTracer:
             sample_fraction=self.sample_fraction,
         )
 
-    def run(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict, Optional['RayPathData']]:
+    def run(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict, Optional['RayPathData'], Optional[dict]]:
         """
         Run complete forward ray tracing simulation.
 
         Returns:
-            Tuple of (Hs, energy, ray_counts, per_partition_data, ray_paths)
+            Tuple of (Hs, energy, ray_counts, per_partition_data, ray_paths, breaking_fields)
             where per_partition_data is a dict mapping partition_idx to
             dict with keys: 'energy', 'dir_x', 'dir_y', 'ray_counts', 'Hs', 'direction'
-            and ray_paths is RayPathData if track_paths=True, else None
+            ray_paths is RayPathData if track_paths=True, else None
+            breaking_fields is dict with breaking characterization if breaking enabled, else None
         """
         print(f"Forward ray tracing: {self.boundary.n_partitions} partitions")
         if self.track_paths:
@@ -1491,9 +1492,10 @@ class ForwardRayTracer:
 
         # Stage 2: Post-deposition cross-shore transect correction
         # Catches combined multi-partition breaking that per-ray dissipation misses
+        breaking_fields = None
         if self.config.enable_breaking:
-            from .breaking_correction import apply_combined_breaking_correction
-            energy, per_partition_data = apply_combined_breaking_correction(
+            from .breaking_correction import apply_combined_breaking_correction, compute_breaking_characterization
+            energy, per_partition_data, is_breaking = apply_combined_breaking_correction(
                 self.mesh, energy, per_partition_data,
                 gamma=self.config.breaking_gamma,
             )
@@ -1507,6 +1509,29 @@ class ForwardRayTracer:
                 part_data['dir_x'], part_data['dir_y']
             )
 
+        # Compute breaking characterization (Iribarren, breaker type, etc.)
+        if self.config.enable_breaking:
+            # Inject boundary Tp into per_partition_data for breaking characterization
+            for part_idx in per_partition_data:
+                partition = self.boundary.partitions[part_idx]
+                # Tp at boundary points — need to interpolate to mesh points
+                from scipy.spatial import cKDTree
+                boundary_pts = np.column_stack([self.boundary.x, self.boundary.y])
+                mesh_x = self._mesh_arrays['points_x']
+                mesh_y = self._mesh_arrays['points_y']
+                tree = cKDTree(boundary_pts)
+                _, nearest = tree.query(np.column_stack([mesh_x, mesh_y]))
+                per_partition_data[part_idx]['Tp'] = partition.tp[nearest]
+
+            breaking_fields = compute_breaking_characterization(
+                self.mesh, energy, per_partition_data, is_breaking,
+                gamma=self.config.breaking_gamma,
+            )
+
+            # Clean up temporary Tp from per_partition_data
+            for part_idx in per_partition_data:
+                del per_partition_data[part_idx]['Tp']
+
         # Report coverage
         n_covered = np.sum(ray_counts > 0)
         n_total = len(ray_counts)
@@ -1519,4 +1544,4 @@ class ForwardRayTracer:
             if ray_paths:
                 print(f"Ray paths: {ray_paths.summary()}")
 
-        return Hs, energy, ray_counts, per_partition_data, ray_paths
+        return Hs, energy, ray_counts, per_partition_data, ray_paths, breaking_fields

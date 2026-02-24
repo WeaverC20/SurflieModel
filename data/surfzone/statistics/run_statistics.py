@@ -215,6 +215,21 @@ def run_statistics(
     # Build context dict for statistics that need extra data
     context = {"slopes": slopes}
 
+    # Load simulation breaking fields if available (from forward_result.npz)
+    forward_result_path = output_dir / "forward_result.npz"
+    if forward_result_path.exists():
+        print("Loading simulation breaking fields...")
+        forward_data = np.load(forward_result_path)
+        breaking_keys = ['is_breaking', 'breaker_index', 'iribarren', 'breaker_type', 'breaking_intensity']
+        if f'breaking_{breaking_keys[0]}' in forward_data:
+            sim_breaking = {k: forward_data[f'breaking_{k}'] for k in breaking_keys if f'breaking_{k}' in forward_data}
+            context["sim_breaking"] = sim_breaking
+            n_breaking = int(np.sum(sim_breaking['is_breaking'] > 0))
+            print(f"  Loaded {n_breaking:,} breaking points from simulation")
+        else:
+            print("  No breaking fields in forward_result.npz (old format)")
+        forward_data.close()
+
     # Create WavePartition objects
     print("\nCreating wave partitions...")
     wave_partitions = create_wave_partitions(partitions_data)

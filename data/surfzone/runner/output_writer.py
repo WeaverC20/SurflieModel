@@ -50,8 +50,7 @@ def save_forward_result(
     json_path = output_path / f"{filename}.json"
 
     # Save combined arrays as compressed NPZ
-    np.savez_compressed(
-        npz_path,
+    save_dict = dict(
         mesh_x=result.mesh_x,
         mesh_y=result.mesh_y,
         mesh_depth=result.mesh_depth,
@@ -59,6 +58,13 @@ def save_forward_result(
         energy=result.energy,
         ray_count=result.ray_count,
     )
+
+    # Include breaking characterization if available
+    if result.breaking_fields is not None:
+        for key, arr in result.breaking_fields.items():
+            save_dict[f'breaking_{key}'] = arr
+
+    np.savez_compressed(npz_path, **save_dict)
 
     logger.info(f"Saved combined arrays: {npz_path}")
 
@@ -276,6 +282,12 @@ def load_forward_result(npz_path: Path) -> 'ForwardTracingResult':
     n_points = len(mesh_x)
     n_covered = int(np.sum(ray_count > 0))
 
+    # Load breaking characterization if available
+    breaking_fields = None
+    breaking_keys = ['is_breaking', 'breaker_index', 'iribarren', 'breaker_type', 'breaking_intensity']
+    if f'breaking_{breaking_keys[0]}' in data:
+        breaking_fields = {k: data[f'breaking_{k}'] for k in breaking_keys if f'breaking_{k}' in data}
+
     return ForwardTracingResult(
         region_name=region_name,
         timestamp=timestamp,
@@ -289,6 +301,7 @@ def load_forward_result(npz_path: Path) -> 'ForwardTracingResult':
         H_at_mesh=H_at_mesh,
         energy=energy,
         ray_count=ray_count,
+        breaking_fields=breaking_fields,
     )
 
 

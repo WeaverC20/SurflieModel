@@ -26,6 +26,7 @@ from tools.viewer.config import (
     PARTITION_COLORS, PARTITION_LABELS,
     SPOT_BBOX_COLOR, SPOT_BBOX_DASH, SPOT_BBOX_WIDTH,
     SPOT_EDIT_COLOR, SPOT_EDIT_FILL_ALPHA, SPOT_DIMMED_COLOR, SPOT_DIMMED_WIDTH,
+    STAT_LABELS,
 )
 from tools.viewer.components.colorbar import create_matplotlib_colorbar
 from tools.viewer.components.point_inspector import PointInspector
@@ -122,15 +123,6 @@ class ResultView(BaseView):
         self._spot_stats_html.object = ""
 
         # Populate variable selector from available stats columns
-        STAT_LABELS = {
-            'set_period': 'Set Period (s)',
-            'waves_per_set': 'Waves per Set',
-            'groupiness_factor': 'Groupiness Factor',
-            'height_amplification': 'Height Amplification',
-            'set_duration': 'Set Duration (s)',
-            'lull_duration': 'Lull Duration (s)',
-            'set_height': 'Set Height (m)',
-        }
         stats_df = self.data_manager.get_statistics(region)
         if stats_df is not None:
             col_map = {label: col for col, label in STAT_LABELS.items()

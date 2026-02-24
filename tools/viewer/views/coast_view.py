@@ -24,21 +24,11 @@ from tools.viewer.views.base import BaseView
 from tools.viewer.config import (
     WAVE_CMAP, STATS_CMAP, NO_WAVE_COLOR, DARK_BG, SIDEBAR_BG,
     SPOT_BBOX_COLOR, SPOT_BBOX_DASH, SPOT_BBOX_WIDTH,
+    STAT_LABELS,
 )
 from tools.viewer.components.colorbar import create_matplotlib_colorbar
 from tools.viewer.components.point_inspector import PointInspector
 
-
-# Statistic column → display label
-STAT_LABELS = {
-    'set_period': 'Set Period (s)',
-    'waves_per_set': 'Waves per Set',
-    'groupiness_factor': 'Groupiness Factor',
-    'height_amplification': 'Height Amplification',
-    'set_duration': 'Set Duration (s)',
-    'lull_duration': 'Lull Duration (s)',
-    'set_height': 'Set Height (m)',
-}
 
 # Columns to show in the point inspector tooltip
 INSPECTOR_STAT_COLS = [

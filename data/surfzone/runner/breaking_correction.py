@@ -162,7 +162,7 @@ def apply_combined_breaking_correction(
     per_partition_data: Dict[int, dict],
     gamma: float = 0.42,
     alongshore_bin_m: float = 100.0,
-) -> Tuple[np.ndarray, Dict[int, dict]]:
+) -> Tuple[np.ndarray, Dict[int, dict], np.ndarray]:
     """
     Apply post-deposition cross-shore transect breaking correction.
 
@@ -179,14 +179,17 @@ def apply_combined_breaking_correction(
         alongshore_bin_m: Width of alongshore bins (m)
 
     Returns:
-        Updated (total_energy, per_partition_data) with breaking correction applied
+        Tuple of (total_energy, per_partition_data, is_breaking) where
+        is_breaking is a boolean array marking points where breaking was detected
     """
     import time
+
+    n_points = len(total_energy)
 
     # Check prerequisites
     if mesh.coast_distance is None or mesh.coastlines is None:
         print("  Breaking correction: skipped (no coast_distance or coastlines)")
-        return total_energy, per_partition_data
+        return total_energy, per_partition_data, np.zeros(n_points, dtype=bool)
 
     t_start = time.perf_counter()
 
@@ -207,6 +210,9 @@ def apply_combined_breaking_correction(
     partition_keys = sorted(per_partition_data.keys())
     for k in partition_keys:
         partition_energies.append(per_partition_data[k]['energy'])
+
+    # Track which points are breaking
+    is_breaking = np.zeros(n_points, dtype=bool)
 
     # Walk each strip offshore → shore
     n_corrected = 0
@@ -231,6 +237,8 @@ def apply_combined_breaking_correction(
             H_max = gamma * h
 
             if Hs_total > H_max:
+                is_breaking[pt_idx] = True
+
                 # Compute Q_b from Rayleigh exceedance
                 ratio = H_max / Hs_total
                 Q_b = np.exp(-2.0 * ratio * ratio)
@@ -253,4 +261,143 @@ def apply_combined_breaking_correction(
     print(f"  Breaking correction: {n_corrected:,} points corrected in {elapsed:.2f}s "
           f"({transects.n_strips} transects, gamma={gamma})")
 
-    return total_energy, per_partition_data
+    return total_energy, per_partition_data, is_breaking
+
+
+def compute_breaking_characterization(
+    mesh: 'SurfZoneMesh',
+    energy: np.ndarray,
+    per_partition_data: Dict[int, dict],
+    is_breaking: np.ndarray,
+    gamma: float = 0.42,
+) -> dict:
+    """
+    Compute breaking characterization at mesh points after cross-shore correction.
+
+    Uses the same physics as the backward ray tracer (ray_tracer.py:729-743):
+    Rattanapitikon breaker index, Iribarren number, and breaker type classification.
+
+    Only characterizes points where is_breaking=True (as determined by the
+    cross-shore correction). All other points get NaN for classification fields.
+
+    Args:
+        mesh: SurfZoneMesh with bathymetry and slopes
+        energy: Total combined energy at each mesh point (post-correction)
+        per_partition_data: Per-partition data with 'energy' arrays
+        is_breaking: Boolean array from cross-shore correction
+        gamma: Breaking gamma used by the simulation
+
+    Returns:
+        Dict with keys: is_breaking, breaker_index, iribarren, breaker_type,
+        breaking_intensity — all shape (n_points,)
+    """
+    n_points = len(mesh.points_x)
+    depths = np.maximum(mesh.depth, 0.05) if mesh.depth is not None else np.maximum(-mesh.elevation, 0.05)
+
+    # Compute bottom slopes
+    slopes = mesh.get_slope_magnitude(mesh.points_x, mesh.points_y, h=10.0)
+
+    # Combined Hs from total energy
+    Hs_total = np.sqrt(8.0 * np.maximum(energy, 0) / (RHO * G))
+
+    # Dominant Tp: from highest-energy partition at each point
+    partition_keys = sorted(per_partition_data.keys())
+    max_energy = np.zeros(n_points)
+    Tp_dominant = np.zeros(n_points)
+
+    from scipy.spatial import cKDTree
+
+    for k in partition_keys:
+        part_e = per_partition_data[k]['energy']
+        # Need Tp — get from boundary data via nearest-neighbor
+        # per_partition_data has 'energy', 'dir_x', 'dir_y', 'ray_counts', 'Hs', 'direction'
+        # but not Tp directly. We need to get it from the partition result.
+        # For now, estimate Tp from Hs and energy relationship or use a reference period.
+        better = part_e > max_energy
+        max_energy = np.where(better, part_e, max_energy)
+
+    # We need Tp from the boundary conditions — it's not in per_partition_data.
+    # Use a representative period from the energy-weighted approach.
+    # Fall back to estimating from the mesh: load boundary Tp from partition NPZ if available.
+    # For the simulation context, we can get Tp from the partition results that will be built later.
+    # Instead, use a simpler approach: deep water wavelength from period isn't critical for
+    # the characterization — we need it for Iribarren. Use 10s as a reasonable default
+    # and override with actual partition Tp if available.
+    #
+    # Actually, the ForwardRayTracer has the boundary conditions. Let's accept Tp as a parameter.
+    # For now, use a conservative estimate.
+
+    # Check if 'Tp' was passed in per_partition_data (added by caller)
+    has_tp = any('Tp' in per_partition_data[k] for k in partition_keys)
+
+    if has_tp:
+        # Use energy-weighted Tp from partition data
+        Tp_dominant = np.zeros(n_points)
+        max_energy = np.zeros(n_points)
+        for k in partition_keys:
+            part_e = per_partition_data[k]['energy']
+            part_tp = per_partition_data[k]['Tp']
+            better = part_e > max_energy
+            Tp_dominant = np.where(better, part_tp, Tp_dominant)
+            max_energy = np.where(better, part_e, max_energy)
+    else:
+        # Fallback: estimate period from typical swell (10s)
+        # This is approximate but better than nothing
+        Tp_dominant = np.full(n_points, 10.0)
+
+    # Deep water wavelength
+    TWO_PI = 2.0 * np.pi
+    L0 = G * Tp_dominant**2 / TWO_PI
+    safe_L0 = np.where(L0 > 0, L0, 1.0)
+
+    # Breaker index (Rattanapitikon & Shibayama, matching backward tracer)
+    H0_L0 = np.where(L0 > 0, Hs_total / safe_L0, 0.0)
+    safe_H0_L0 = np.where(H0_L0 > 0, H0_L0, 1e-6)
+    safe_slopes = np.where(np.isfinite(slopes) & (slopes > 0), slopes, 0.005)
+    gamma_b = np.clip(0.57 + 0.71 * safe_H0_L0**0.12 * safe_slopes**0.36, 0.5, 1.5)
+
+    # Iribarren: xi = m / sqrt(H/L0)
+    steepness = np.where(L0 > 0, Hs_total / safe_L0, 0.0)
+    safe_steepness = np.where(steepness > 0, steepness, np.nan)
+    iribarren = np.where(
+        is_breaking & np.isfinite(slopes) & (steepness > 0),
+        slopes / np.sqrt(safe_steepness),
+        np.nan,
+    )
+
+    # Breaker type classification (only where breaking)
+    breaker_type = np.full(n_points, np.nan)
+    xi = np.where(np.isfinite(iribarren), iribarren, 0.0)
+    valid = is_breaking & np.isfinite(iribarren)
+    breaker_type = np.where(valid & (xi < 0.5), 0.0, breaker_type)
+    breaker_type = np.where(valid & (xi >= 0.5) & (xi < 3.3), 1.0, breaker_type)
+    breaker_type = np.where(valid & (xi >= 3.3) & (xi < 5.0), 2.0, breaker_type)
+    breaker_type = np.where(valid & (xi >= 5.0), 3.0, breaker_type)
+
+    # Breaking intensity: H / (gamma_b * h)
+    breaking_intensity = np.where(
+        is_breaking & (depths > 0.05),
+        Hs_total / (gamma_b * depths),
+        np.nan,
+    )
+
+    n_breaking = int(np.sum(is_breaking))
+    if n_breaking > 0:
+        valid_xi = iribarren[is_breaking & np.isfinite(iribarren)]
+        print(f"  Breaking characterization: {n_breaking:,} breaking points")
+        if len(valid_xi) > 0:
+            # Count breaker types
+            n_spilling = int(np.sum(valid_xi < 0.5))
+            n_plunging = int(np.sum((valid_xi >= 0.5) & (valid_xi < 3.3)))
+            n_collapsing = int(np.sum((valid_xi >= 3.3) & (valid_xi < 5.0)))
+            n_surging = int(np.sum(valid_xi >= 5.0))
+            print(f"    Spilling: {n_spilling}, Plunging: {n_plunging}, "
+                  f"Collapsing: {n_collapsing}, Surging: {n_surging}")
+
+    return {
+        'is_breaking': is_breaking.astype(float),
+        'breaker_index': np.where(is_breaking, gamma_b, np.nan),
+        'iribarren': iribarren,
+        'breaker_type': breaker_type,
+        'breaking_intensity': breaking_intensity,
+    }

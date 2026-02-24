@@ -94,8 +94,8 @@ class ForwardSurfzoneRunner:
         """
         t_start = time.perf_counter()
 
-        # Run forward tracing (now returns per-partition data and optional ray paths)
-        Hs, energy, ray_counts, per_partition_data, ray_paths = self.tracer.run()
+        # Run forward tracing (now returns per-partition data, ray paths, and breaking fields)
+        Hs, energy, ray_counts, per_partition_data, ray_paths, breaking_fields = self.tracer.run()
 
         elapsed = time.perf_counter() - t_start
 
@@ -136,6 +136,7 @@ class ForwardSurfzoneRunner:
             ray_count=ray_counts,
             partitions=partitions,
             ray_paths=ray_paths,
+            breaking_fields=breaking_fields,
         )
 
     def _build_partition_results(

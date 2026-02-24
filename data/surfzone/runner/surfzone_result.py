@@ -154,6 +154,10 @@ class ForwardTracingResult:
     # Optional ray path data (when track_paths=True)
     ray_paths: Optional[RayPathData] = None
 
+    # Optional breaking characterization (when enable_breaking=True)
+    # Keys: is_breaking, breaker_index, iribarren, breaker_type, breaking_intensity
+    breaking_fields: Optional[dict] = None
+
     @property
     def coverage_rate(self) -> float:
         """Fraction of points covered by at least one ray."""
