@@ -19,6 +19,7 @@ from tools.viewer.data_manager import DataManager
 from tools.viewer.views.swan_view import SwanView
 from tools.viewer.views.mesh_view import MeshView
 from tools.viewer.views.result_view import ResultView
+from tools.viewer.views.coast_view import CoastView
 
 
 class DevViewerApp(param.Parameterized):
@@ -28,7 +29,7 @@ class DevViewerApp(param.Parameterized):
     data_type = param.Selector(default='Surfzone Results', objects=DATA_TYPES)
     use_lonlat = param.Boolean(default=False, label='Use Lon/Lat')
 
-    _BOKEH_VIEWS = {'Surfzone Mesh', 'Surfzone Results'}
+    _BOKEH_VIEWS = {'Surfzone Mesh', 'Surfzone Results', 'California Coast'}
 
     def __init__(self, project_root, **params):
         super().__init__(**params)
@@ -37,6 +38,7 @@ class DevViewerApp(param.Parameterized):
             'SWAN Data': SwanView(self.data_manager),
             'Surfzone Mesh': MeshView(self.data_manager),
             'Surfzone Results': ResultView(self.data_manager),
+            'California Coast': CoastView(self.data_manager),
         }
         self._prev_data_type = self.data_type
         self._prev_region = self.region
@@ -79,13 +81,20 @@ class DevViewerApp(param.Parameterized):
                     background: {SIDEBAR_BG}; border-radius: 5px;">
             <b>Data Availability</b><br>
         """
+        # Per-region data types
+        region_types = [dt for dt in DATA_TYPES if dt != 'California Coast']
         for r in AVAILABLE_REGIONS:
             html += f"<br><b>{r}</b><br>"
-            for dt in DATA_TYPES:
+            for dt in region_types:
                 has = self.data_manager.has_data(dt, r)
                 icon = "&#10003;" if has else "&#10007;"
                 color = "#44ff44" if has else "#ff4444"
                 html += f"&nbsp;&nbsp;<span style='color: {color};'>{icon}</span> {dt}<br>"
+        # Global data types
+        has_coast = self.data_manager.has_data('California Coast', '')
+        icon = "&#10003;" if has_coast else "&#10007;"
+        color = "#44ff44" if has_coast else "#ff4444"
+        html += f"<br><span style='color: {color};'>{icon}</span> California Coast<br>"
         html += "</div>"
         return html
 

@@ -54,7 +54,7 @@ COASTLINE_COLOR = '#ff00ff'
 AVAILABLE_REGIONS = ['socal', 'central', 'norcal']
 
 # Data types the viewer supports
-DATA_TYPES = ['SWAN Data', 'Surfzone Mesh', 'Surfzone Results']
+DATA_TYPES = ['SWAN Data', 'Surfzone Mesh', 'Surfzone Results', 'California Coast']
 
 # Default depth/elevation clamp values for mesh view
 DEFAULT_DEPTH_MAX = 30.0

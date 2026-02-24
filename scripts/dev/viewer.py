@@ -61,7 +61,7 @@ def main():
     parser.add_argument(
         '--view', '-v',
         default='Surfzone Results',
-        choices=['SWAN Data', 'Surfzone Mesh', 'Surfzone Results'],
+        choices=['SWAN Data', 'Surfzone Mesh', 'Surfzone Results', 'California Coast'],
         help="Data type to view (default: Surfzone Results)",
     )
     parser.add_argument(

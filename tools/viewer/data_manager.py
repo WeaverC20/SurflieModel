@@ -361,6 +361,36 @@ class DataManager:
             return None
 
     # -----------------------------------------------------------------
+    # Merged Coast-Wide Data
+    # -----------------------------------------------------------------
+
+    def get_merged_statistics(self):
+        """Load merged coast-wide statistics CSV (cached)."""
+        key = ('merged_stats',)
+        if key not in self._cache:
+            import pandas as pd
+
+            stats_path = (
+                self._project_root / "data" / "surfzone" / "output"
+                / "california" / "statistics_merged.csv"
+            )
+            if stats_path.exists():
+                self._cache[key] = pd.read_csv(stats_path)
+            else:
+                self._cache[key] = None
+        return self._cache[key]
+
+    def get_all_spots(self) -> list:
+        """Load surf spots from all regions (cached)."""
+        key = ('all_spots',)
+        if key not in self._cache:
+            all_spots = []
+            for region in ['socal', 'central', 'norcal']:
+                all_spots.extend(self.get_spots(region))
+            self._cache[key] = all_spots
+        return self._cache[key]
+
+    # -----------------------------------------------------------------
     # Data Availability
     # -----------------------------------------------------------------
 
@@ -377,6 +407,12 @@ class DataManager:
                 / region / "forward_result.npz"
             )
             return result_path.exists()
+        elif data_type == 'California Coast':
+            merged_path = (
+                self._project_root / "data" / "surfzone" / "output"
+                / "california" / "statistics_merged.csv"
+            )
+            return merged_path.exists()
         return False
 
     # -----------------------------------------------------------------
