@@ -112,3 +112,8 @@ Thumbs.db
 *.bak
 tmp/
 temp/
+
+# React Native local builds
+ios/
+android/
+Pods/
